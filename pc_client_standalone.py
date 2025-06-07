@@ -81,11 +81,6 @@ class RiderPCClient:
                 'broker_host': '192.168.1.173',
                 'broker_port': '1883'
             }
-            config['ui'] = {
-                'update_interval': '0.1',
-                'theme': 'dark'
-            }
-            
             with open(config_file, 'w') as f:
                 config.write(f)
             if self.debug_mode:
@@ -130,175 +125,274 @@ class RiderPCClient:
         if self.debug_mode:
             print(message)
     
+    def draw_battery_icon(self, battery_level):
+        """Draw a battery icon that fills based on battery level"""
+        if not hasattr(self, 'battery_canvas'):
+            return
+            
+        # Clear the canvas
+        self.battery_canvas.delete("all")
+        
+        # Battery dimensions
+        battery_width = 30
+        battery_height = 16
+        terminal_width = 3
+        terminal_height = 8
+        
+        # Calculate battery body position (centered in canvas)
+        x1 = 5
+        y1 = 2
+        x2 = x1 + battery_width
+        y2 = y1 + battery_height
+        
+        # Draw battery outline (white)
+        self.battery_canvas.create_rectangle(x1, y1, x2, y2, outline='white', width=2, fill='#2b2b2b')
+        
+        # Draw battery terminal (small rectangle on right side)
+        terminal_x1 = x2
+        terminal_y1 = y1 + (battery_height - terminal_height) // 2
+        terminal_x2 = terminal_x1 + terminal_width
+        terminal_y2 = terminal_y1 + terminal_height
+        self.battery_canvas.create_rectangle(terminal_x1, terminal_y1, terminal_x2, terminal_y2, 
+                                           outline='white', width=2, fill='#2b2b2b')
+        
+        # Draw battery fill based on level
+        if battery_level > 0:
+            fill_width = max(1, int((battery_width - 4) * battery_level / 100))  # -4 for padding
+            fill_x1 = x1 + 2
+            fill_y1 = y1 + 2
+            fill_x2 = fill_x1 + fill_width
+            fill_y2 = y2 - 2
+            
+            # Color based on battery level
+            if battery_level >= 70:
+                fill_color = '#4caf50'  # Green
+            elif battery_level >= 40:
+                fill_color = '#ff9800'  # Orange  
+            elif battery_level >= 20:
+                fill_color = '#ff5722'  # Red-orange
+            else:
+                fill_color = '#f44336'  # Red
+                
+            self.battery_canvas.create_rectangle(fill_x1, fill_y1, fill_x2, fill_y2, 
+                                               outline='', fill=fill_color)
+    
     def setup_gui(self):
-        """Create the GUI interface matching rider screen layout"""
+        """Create a clean, organized GUI interface"""
         self.root = tk.Tk()
         self.root.title(f"Rider Robot PC Client - {self.broker_host}")
-        self.root.geometry("1000x800")
-        self.root.configure(bg='#0f152e')  # Dark blue background to match rider screen
+        self.root.geometry("1200x800")
+        self.root.configure(bg='#2b2b2b')  # Modern dark theme
+        
+        # Configure root window to use grid with proper weights (key for resizing!)
+        self.root.grid_rowconfigure(0, weight=0)  # Status bar row (fixed height)
+        self.root.grid_rowconfigure(1, weight=1)  # Main content row (expandable)
+        self.root.grid_columnconfigure(0, weight=1)
+        
+        # Force enable resizing immediately after window creation
+        self.root.resizable(width=True, height=True)
+        self.root.minsize(width=800, height=600)
+        self.root.maxsize(width=2000, height=1500)  # Set reasonable maximum size
         
         # Create menu bar
         self.create_menu()
         
         # Connection status bar
-        status_bar = tk.Frame(self.root, bg='#1a1a2e', height=30)
-        status_bar.pack(fill='x', side='top')
+        status_bar = tk.Frame(self.root, bg='#404040')
+        status_bar.grid(row=0, column=0, sticky="ew")
         
         self.connection_status = tk.Label(status_bar, text=f"Connecting to {self.broker_host}...", 
-                                        bg='#1a1a2e', fg='yellow', font=('Arial', 10))
-        self.connection_status.pack(side='left', padx=10, pady=5)
+                                        bg='#404040', fg='#ffd700', font=('Arial', 11, 'bold'))
+        self.connection_status.pack(side='left', padx=15, pady=8)
         
-        # Main frame with dark background
-        main_frame = tk.Frame(self.root, bg='#0f152e', padx=20, pady=20)
-        main_frame.pack(fill='both', expand=True)
+        # Current time (right side of status bar)
+        self.time_label = tk.Label(status_bar, text="--:--", font=('Arial', 11, 'bold'), 
+                                 bg='#404040', fg='white')
+        self.time_label.pack(side='right', padx=15, pady=8)
         
-        # Header frame (matches top of rider screen layout)
-        header_frame = tk.Frame(main_frame, bg='#0f152e')
-        header_frame.pack(fill='x', pady=(0, 20))
+        # Main container with padding - use grid to work with root grid configuration
+        main_container = tk.Frame(self.root, bg='#2b2b2b')
+        main_container.grid(row=1, column=0, sticky="nsew", padx=15, pady=15)
         
-        # Controller status (upper left - matches controller icon)
-        controller_frame = tk.Frame(header_frame, bg='#0f152e')
-        controller_frame.pack(side='left')
+        # Configure main container grid weights for proper resizing
+        main_container.grid_rowconfigure(1, weight=1)  # Middle row (IMU/Features) expands
+        main_container.grid_columnconfigure(0, weight=1)
         
-        tk.Label(controller_frame, text="🎮", font=('Arial', 16), bg='#0f152e', fg='white').pack(side='left')
-        self.controller_status_label = tk.Label(controller_frame, text="Controller: OFF", 
-                                              font=('Arial', 12, 'bold'), bg='#0f152e', fg='red')
-        self.controller_status_label.pack(side='left', padx=(5, 0))
+        # Top row - Status cards
+        status_row = tk.Frame(main_container, bg='#2b2b2b')
+        status_row.grid(row=0, column=0, sticky="ew", pady=(0, 15))
         
-        # Current time (center - matches screen layout)
-        self.time_label = tk.Label(header_frame, text="--:--", font=('Arial', 16, 'bold'), 
-                                 bg='#0f152e', fg='white')
-        self.time_label.pack()
+        # Battery Status Card
+        battery_card = tk.Frame(status_row, bg='#3c3c3c', relief='solid', bd=1)
+        battery_card.pack(side='left', padx=(0, 10), pady=5, fill='x', expand=True)
         
-        # Battery status (upper right - matches battery icon)
-        battery_frame = tk.Frame(header_frame, bg='#0f152e')
-        battery_frame.pack(side='right')
+        battery_content = tk.Frame(battery_card, bg='#3c3c3c')
+        battery_content.pack(pady=15)
         
-        tk.Label(battery_frame, text="🔋", font=('Arial', 16), bg='#0f152e', fg='white').pack(side='left')
-        self.battery_label = tk.Label(battery_frame, text="0%", font=('Arial', 12, 'bold'), 
-                                    bg='#0f152e', fg='red')
-        self.battery_label.pack(side='left', padx=(5, 0))
+        # Battery icon and percentage container
+        battery_display = tk.Frame(battery_content, bg='#3c3c3c')
+        battery_display.pack()
         
-        self.battery_progress = ttk.Progressbar(battery_frame, length=100, mode='determinate')
-        self.battery_progress.pack(side='left', padx=(10, 0))
+        # Create custom battery icon canvas
+        self.battery_canvas = tk.Canvas(battery_display, width=40, height=20, bg='#3c3c3c', 
+                                       highlightthickness=0, bd=0)
+        self.battery_canvas.pack(side='left', padx=(0, 10))
         
-        # Main content frame
-        content_frame = tk.Frame(main_frame, bg='#0f152e')
-        content_frame.pack(fill='both', expand=True)
+        # Battery percentage label
+        self.battery_label = tk.Label(battery_display, text="0%", font=('Arial', 16, 'bold'), 
+                                    bg='#3c3c3c', fg='red')
+        self.battery_label.pack(side='left')
         
-        # Left side - Robot Status (matches left side of screen)
-        status_frame = tk.LabelFrame(content_frame, text="Robot Status", font=('Arial', 12, 'bold'),
-                                   bg='#0f152e', fg='white', relief='solid', bd=1)
-        status_frame.pack(side='left', fill='both', expand=True, padx=(0, 10))
+        # Draw initial battery outline
+        self.draw_battery_icon(0)
         
-        # Speed (SPD - matches screen layout)
-        speed_row = tk.Frame(status_frame, bg='#0f152e')
-        speed_row.pack(fill='x', pady=10, padx=20)
+        # Controller Status Card
+        controller_card = tk.Frame(status_row, bg='#3c3c3c', relief='solid', bd=1)
+        controller_card.pack(side='left', padx=(0, 10), pady=5, fill='x', expand=True)
         
-        tk.Label(speed_row, text="SPD:", font=('Arial', 14, 'bold'), bg='#0f152e', fg='white').pack(side='left')
-        self.speed_label = tk.Label(speed_row, text="1.0x", font=('Arial', 14, 'bold'), bg='#0f152e', fg='white')
-        self.speed_label.pack(side='left', padx=(20, 0))
+        # Controller icon - color changes based on status
+        self.controller_icon = tk.Label(controller_card, text="🎮", font=('Arial', 30), 
+                                       bg='#3c3c3c', fg='#808080')  # Start with grey
+        self.controller_icon.pack(pady=15)
         
-        # Add speed control
-        speed_scale = tk.Scale(status_frame, from_=0.1, to=2.0, resolution=0.1, orient='horizontal',
-                             bg='#0f152e', fg='white', highlightbackground='#0f152e',
-                             command=self.change_speed, label="Speed Control")
+        # Speed Control Card
+        speed_card = tk.Frame(status_row, bg='#3c3c3c', relief='solid', bd=1)
+        speed_card.pack(side='left', pady=5, fill='x', expand=True)
+        
+        tk.Label(speed_card, text="⚡ SPEED", font=('Arial', 10, 'bold'), 
+                bg='#3c3c3c', fg='#87ceeb').pack(pady=(8, 2))
+        
+        self.speed_label = tk.Label(speed_card, text="1.0x", font=('Arial', 16, 'bold'), 
+                                   bg='#3c3c3c', fg='white')
+        self.speed_label.pack(pady=(0, 5))
+        
+        speed_scale = tk.Scale(speed_card, from_=0.1, to=2.0, resolution=0.1, orient='horizontal',
+                             bg='#3c3c3c', fg='white', highlightbackground='#3c3c3c',
+                             command=self.change_speed, length=300, width=15)
         speed_scale.set(1.0)
-        speed_scale.pack(fill='x', padx=20, pady=5)
+        speed_scale.pack(pady=(0, 8))
         
-        # Roll Balance (BAL - matches screen layout) 
-        balance_row = tk.Frame(status_frame, bg='#0f152e')
-        balance_row.pack(fill='x', pady=10, padx=20)
+        # Middle row - IMU Data and Robot Features
+        middle_row = tk.Frame(main_container, bg='#2b2b2b')
+        middle_row.grid(row=1, column=0, sticky="nsew", pady=(0, 15))
         
-        tk.Label(balance_row, text="BAL:", font=('Arial', 14, 'bold'), bg='#0f152e', fg='white').pack(side='left')
-        self.roll_balance_label = tk.Label(balance_row, text="OFF", font=('Arial', 14, 'bold'), bg='#0f152e', fg='red')
-        self.roll_balance_label.pack(side='left', padx=(20, 0))
+        # Configure middle row for resizing
+        middle_row.grid_rowconfigure(0, weight=1)
+        middle_row.grid_columnconfigure(0, weight=1)
+        middle_row.grid_columnconfigure(1, weight=1)
         
-        # Performance Mode (FUN - matches screen layout)
-        performance_row = tk.Frame(status_frame, bg='#0f152e')
-        performance_row.pack(fill='x', pady=10, padx=20)
+        # IMU Data Panel (Left)
+        imu_panel = tk.LabelFrame(middle_row, text="📊 IMU / ORIENTATION DATA", 
+                                 font=('Arial', 12, 'bold'), bg='#3c3c3c', fg='#87ceeb',
+                                 relief='solid', bd=1)
+        imu_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         
-        tk.Label(performance_row, text="FUN:", font=('Arial', 14, 'bold'), bg='#0f152e', fg='white').pack(side='left')
-        self.performance_label = tk.Label(performance_row, text="OFF", font=('Arial', 14, 'bold'), bg='#0f152e', fg='red')
-        self.performance_label.pack(side='left', padx=(20, 0))
+        imu_grid = tk.Frame(imu_panel, bg='#3c3c3c')
+        imu_grid.pack(padx=20, pady=15, fill='both', expand=True)
         
-        # Camera Status
-        camera_row = tk.Frame(status_frame, bg='#0f152e')
-        camera_row.pack(fill='x', pady=10, padx=20)
+        # IMU values in a grid
+        for i, (label, attr) in enumerate([("Roll", "roll"), ("Pitch", "pitch"), ("Yaw", "yaw")]):
+            row = tk.Frame(imu_grid, bg='#3c3c3c')
+            row.pack(fill='x', pady=8)
+            
+            tk.Label(row, text=f"{label}:", font=('Arial', 14, 'bold'), 
+                    bg='#3c3c3c', fg='#ffd700', width=6, anchor='w').pack(side='left')
+            
+            value_label = tk.Label(row, text="+0.0°", font=('Arial', 14, 'bold'), 
+                                 bg='#3c3c3c', fg='white')
+            value_label.pack(side='left', padx=(10, 0))
+            setattr(self, f"{attr}_label", value_label)
         
-        tk.Label(camera_row, text="CAM:", font=('Arial', 14, 'bold'), bg='#0f152e', fg='white').pack(side='left')
-        self.camera_label = tk.Label(camera_row, text="OFF", font=('Arial', 14, 'bold'), bg='#0f152e', fg='red')
-        self.camera_label.pack(side='left', padx=(20, 0))
+        # Robot Features Panel (Right)
+        features_panel = tk.LabelFrame(middle_row, text="🤖 ROBOT FEATURES", 
+                                      font=('Arial', 12, 'bold'), bg='#3c3c3c', fg='#87ceeb',
+                                      relief='solid', bd=1)
+        features_panel.grid(row=0, column=1, sticky="nsew")
         
-        # Right side - IMU/Odometry Data (matches screen odometry section)
-        imu_frame = tk.LabelFrame(content_frame, text="Odometry/IMU Data", font=('Arial', 12, 'bold'),
-                                bg='#0f152e', fg='white', relief='solid', bd=1)
-        imu_frame.pack(side='right', fill='both', expand=True)
+        features_grid = tk.Frame(features_panel, bg='#3c3c3c')
+        features_grid.pack(padx=20, pady=15, fill='both', expand=True)
         
-        # Roll, Pitch, Yaw display (matches screen odometry format)
-        roll_row = tk.Frame(imu_frame, bg='#0f152e')
-        roll_row.pack(fill='x', pady=5, padx=20)
+        # Feature status indicators
+        features = [
+            ("Roll Balance", "roll_balance", self.toggle_roll_balance),
+            ("Performance Mode", "performance", self.toggle_performance), 
+            ("Camera", "camera", self.toggle_camera)
+        ]
         
-        tk.Label(roll_row, text="Roll:", font=('Arial', 12, 'bold'), bg='#0f152e', fg='yellow').pack(side='left')
-        self.roll_label = tk.Label(roll_row, text="+0.0°", font=('Arial', 12, 'bold'), bg='#0f152e', fg='yellow')
-        self.roll_label.pack(side='left', padx=(20, 0))
+        for i, (name, attr, command) in enumerate(features):
+            feature_row = tk.Frame(features_grid, bg='#3c3c3c')
+            feature_row.pack(fill='x', pady=8)
+            
+            tk.Label(feature_row, text=f"{name}:", font=('Arial', 12, 'bold'), 
+                    bg='#3c3c3c', fg='white', width=15, anchor='w').pack(side='left')
+            
+            status_label = tk.Label(feature_row, text="OFF", font=('Arial', 12, 'bold'), 
+                                   bg='#3c3c3c', fg='red', width=6)
+            status_label.pack(side='left', padx=(5, 10))
+            setattr(self, f"{attr}_label", status_label)
+            
+            tk.Button(feature_row, text="Toggle", command=command, 
+                     font=('Arial', 9), bg='#555555', fg='white', 
+                     activebackground='#666666', width=8).pack(side='right')
         
-        pitch_row = tk.Frame(imu_frame, bg='#0f152e')
-        pitch_row.pack(fill='x', pady=5, padx=20)
+        # Bottom row - Movement Controls
+        control_panel = tk.LabelFrame(main_container, text="🎮 ROBOT CONTROL", 
+                                     font=('Arial', 12, 'bold'), bg='#3c3c3c', fg='#87ceeb',
+                                     relief='solid', bd=1)
+        control_panel.grid(row=2, column=0, sticky="ew")
         
-        tk.Label(pitch_row, text="Pitch:", font=('Arial', 12, 'bold'), bg='#0f152e', fg='yellow').pack(side='left')
-        self.pitch_label = tk.Label(pitch_row, text="+0.0°", font=('Arial', 12, 'bold'), bg='#0f152e', fg='yellow')
-        self.pitch_label.pack(side='left', padx=(20, 0))
+        control_content = tk.Frame(control_panel, bg='#3c3c3c')
+        control_content.pack(padx=20, pady=15)
         
-        yaw_row = tk.Frame(imu_frame, bg='#0f152e')
-        yaw_row.pack(fill='x', pady=5, padx=20)
+        # Movement controls (Left side)
+        movement_frame = tk.Frame(control_content, bg='#3c3c3c')
+        movement_frame.pack(side='left', padx=(0, 40))
         
-        tk.Label(yaw_row, text="Yaw:", font=('Arial', 12, 'bold'), bg='#0f152e', fg='yellow').pack(side='left')
-        self.yaw_label = tk.Label(yaw_row, text="+0.0°", font=('Arial', 12, 'bold'), bg='#0f152e', fg='yellow')
-        self.yaw_label.pack(side='left', padx=(20, 0))
+        tk.Label(movement_frame, text="Movement Controls", font=('Arial', 11, 'bold'), 
+                bg='#3c3c3c', fg='white').pack(pady=(0, 10))
         
-        # Control frame 
-        control_frame = tk.LabelFrame(main_frame, text="Robot Control", font=('Arial', 12, 'bold'),
-                                    bg='#0f152e', fg='white', relief='solid', bd=1)
-        control_frame.pack(fill='x', pady=(20, 0))
+        # Arrow button grid
+        move_grid = tk.Frame(movement_frame, bg='#3c3c3c')
+        move_grid.pack()
         
-        # Control buttons in a compact horizontal layout
-        button_frame = tk.Frame(control_frame, bg='#0f152e')
-        button_frame.pack(pady=10, padx=20)
+        move_buttons = [
+            ("↑", 0, 50, 0, 1),
+            ("←", -50, 0, 1, 0), 
+            ("⏹", 0, 0, 1, 1),
+            ("→", 50, 0, 1, 2),
+            ("↓", 0, -50, 2, 1)
+        ]
         
-        # Movement controls
-        movement_group = tk.Frame(button_frame, bg='#0f152e')
-        movement_group.pack(side='left', padx=(0, 20))
+        for text, x, y, row, col in move_buttons:
+            btn = tk.Button(move_grid, text=text, command=lambda x=x, y=y: self.send_movement(x, y),
+                           width=4, height=2, font=('Arial', 14, 'bold'),
+                           bg='#555555', fg='white', activebackground='#666666')
+            btn.grid(row=row, column=col, padx=2, pady=2)
         
-        tk.Label(movement_group, text="Movement:", font=('Arial', 10, 'bold'), bg='#0f152e', fg='white').pack()
+        # Emergency stop (Right side)
+        system_frame = tk.Frame(control_content, bg='#3c3c3c')
+        system_frame.pack(side='right')
         
-        move_buttons = tk.Frame(movement_group, bg='#0f152e')
-        move_buttons.pack()
+        tk.Button(system_frame, text="🚨 EMERGENCY STOP", command=self.emergency_stop,
+                 font=('Arial', 12, 'bold'), bg='#d32f2f', fg='white', 
+                 activebackground='#b71c1c', width=18, pady=10).pack()
         
-        tk.Button(move_buttons, text="↑", command=lambda: self.send_movement(0, 50), width=3, font=('Arial', 12, 'bold')).grid(row=0, column=1, padx=1, pady=1)
-        tk.Button(move_buttons, text="←", command=lambda: self.send_movement(-50, 0), width=3, font=('Arial', 12, 'bold')).grid(row=1, column=0, padx=1, pady=1)
-        tk.Button(move_buttons, text="⏹", command=lambda: self.send_movement(0, 0), width=3, font=('Arial', 12, 'bold')).grid(row=1, column=1, padx=1, pady=1)
-        tk.Button(move_buttons, text="→", command=lambda: self.send_movement(50, 0), width=3, font=('Arial', 12, 'bold')).grid(row=1, column=2, padx=1, pady=1)
-        tk.Button(move_buttons, text="↓", command=lambda: self.send_movement(0, -50), width=3, font=('Arial', 12, 'bold')).grid(row=2, column=1, padx=1, pady=1)
+        # Configure ttk styles
+        style = ttk.Style()
         
-        # Settings controls
-        settings_group = tk.Frame(button_frame, bg='#0f152e')
-        settings_group.pack(side='left', padx=(20, 0))
+        # Add sizegrip to bottom-right corner for visual resize handle
+        self.sizegrip = ttk.Sizegrip(self.root)
+        self.sizegrip.grid(row=1, column=0, sticky="se")
         
-        tk.Label(settings_group, text="Settings:", font=('Arial', 10, 'bold'), bg='#0f152e', fg='white').pack()
+        # Force update and then enable resizing
+        self.root.update_idletasks()
+        self.root.resizable(True, True)  # Force resizable again after layout
         
-        tk.Button(settings_group, text="Toggle Roll Balance", command=self.toggle_roll_balance, font=('Arial', 9)).pack(pady=2)
-        tk.Button(settings_group, text="Toggle Performance", command=self.toggle_performance, font=('Arial', 9)).pack(pady=2)
-        tk.Button(settings_group, text="Toggle Camera", command=self.toggle_camera, font=('Arial', 9)).pack(pady=2)
-        
-        # System controls
-        system_group = tk.Frame(button_frame, bg='#0f152e')
-        system_group.pack(side='left', padx=(20, 0))
-        
-        tk.Label(system_group, text="System:", font=('Arial', 10, 'bold'), bg='#0f152e', fg='white').pack()
-        
-        tk.Button(system_group, text="Request Battery", command=self.request_battery, font=('Arial', 9)).pack(pady=2)
-        tk.Button(system_group, text="Emergency Stop", command=self.emergency_stop, font=('Arial', 9), bg='red', fg='white').pack(pady=2)
+        # Debug: Verify resizable settings
+        if self.debug_mode:
+            print(f"Final window resizable: {self.root.resizable()}")
+            print(f"Final window minsize: {self.root.minsize()}")
+            print(f"Final window geometry: {self.root.geometry()}")
         
         # Start GUI update thread
         self.gui_running = True
@@ -368,10 +462,18 @@ class RiderPCClient:
         if not self.gui_running:
             return
         try:
-            if self.robot_data['controller_connected']:
-                self.controller_status_label.config(text="Controller: ON", fg='green')
+            if not self.connected:
+                # MQTT not connected - grey
+                self.controller_icon.config(fg='#808080')
+                self.debug_print("[DEBUG] Controller icon: GREY (MQTT disconnected)")
+            elif self.robot_data['controller_connected']:
+                # MQTT connected AND controller responding - green
+                self.controller_icon.config(fg='#4caf50')
+                self.debug_print("[DEBUG] Controller icon: GREEN (controller connected)")
             else:
-                self.controller_status_label.config(text="Controller: OFF", fg='red')
+                # MQTT connected but no controller response - red
+                self.controller_icon.config(fg='#f44336')
+                self.debug_print("[DEBUG] Controller icon: RED (controller disconnected)")
         except:
             pass  # GUI might be destroyed
     
@@ -473,70 +575,88 @@ class RiderPCClient:
             return False
     
     def update_robot_status(self, data):
-        """Update robot status display"""
+        """Update robot status display - schedule GUI updates in main thread"""
         self.debug_print(f"[DEBUG] Updating robot status with data: {data}")
         self.robot_data.update(data)
         
-        # Update speed
-        speed_val = data.get('speed_scale', 1.0)
-        self.speed_label.config(text=f"{speed_val:.1f}x")
-        self.debug_print(f"[DEBUG] Updated speed display to: {speed_val}")
+        def _update_gui():
+            try:
+                # Update speed
+                speed_val = data.get('speed_scale', 1.0)
+                self.speed_label.config(text=f"{speed_val:.1f}x")
+                self.debug_print(f"[DEBUG] Updated speed display to: {speed_val}")
+                
+                # Update roll balance
+                roll_balance = data.get('roll_balance_enabled', False)
+                if roll_balance:
+                    self.roll_balance_label.config(text="ON", fg='green')
+                else:
+                    self.roll_balance_label.config(text="OFF", fg='red')
+                self.debug_print(f"[DEBUG] Updated roll balance display to: {roll_balance}")
+                
+                # Update performance mode
+                performance = data.get('performance_mode_enabled', False)
+                if performance:
+                    self.performance_label.config(text="ON", fg='green')
+                else:
+                    self.performance_label.config(text="OFF", fg='red')
+                self.debug_print(f"[DEBUG] Updated performance display to: {performance}")
+                
+                # Update camera status
+                camera = data.get('camera_enabled', False)
+                if camera:
+                    self.camera_label.config(text="ON", fg='green')
+                else:
+                    self.camera_label.config(text="OFF", fg='red')
+                self.debug_print(f"[DEBUG] Updated camera display to: {camera}")
+                
+                # Update controller status
+                controller = data.get('controller_connected', False)
+                self.robot_data['controller_connected'] = controller
+                self.debug_print(f"[DEBUG] Updated controller status to: {controller}")
+            except:
+                pass  # GUI might be destroyed
         
-        # Update roll balance
-        roll_balance = data.get('roll_balance_enabled', False)
-        if roll_balance:
-            self.roll_balance_label.config(text="ON", fg='green')
-        else:
-            self.roll_balance_label.config(text="OFF", fg='red')
-        self.debug_print(f"[DEBUG] Updated roll balance display to: {roll_balance}")
-        
-        # Update performance mode
-        performance = data.get('performance_mode_enabled', False)
-        if performance:
-            self.performance_label.config(text="ON", fg='green')
-        else:
-            self.performance_label.config(text="OFF", fg='red')
-        self.debug_print(f"[DEBUG] Updated performance display to: {performance}")
-        
-        # Update camera status
-        camera = data.get('camera_enabled', False)
-        if camera:
-            self.camera_label.config(text="ON", fg='green')
-        else:
-            self.camera_label.config(text="OFF", fg='red')
-        self.debug_print(f"[DEBUG] Updated camera display to: {camera}")
-        
-        # Update controller status
-        controller = data.get('controller_connected', False)
-        self.robot_data['controller_connected'] = controller
-        self.debug_print(f"[DEBUG] Updated controller status to: {controller}")
+        # Schedule GUI update in main thread
+        if hasattr(self, 'root'):
+            self.root.after(0, _update_gui)
     
     def update_battery_status(self, data):
-        """Update battery status display"""
+        """Update battery status display - schedule GUI updates in main thread"""
         self.debug_print(f"[DEBUG] Updating battery status with: {data}")
         # Robot sends 'level' field, not 'battery_level'
         battery_level = data.get('level', data.get('battery_level', 0))
         self.robot_data['battery_level'] = battery_level
         
-        # Update battery label
-        self.battery_label.config(text=f"{battery_level}%")
+        def _update_gui():
+            try:
+                # Update battery percentage label
+                self.battery_label.config(text=f"{battery_level}%")
+                
+                # Update battery icon
+                self.draw_battery_icon(battery_level)
+                
+                # Update percentage label color based on battery level
+                if battery_level >= 70:
+                    color = '#4caf50'  # Green
+                elif battery_level >= 40:
+                    color = '#ff9800'  # Orange
+                elif battery_level >= 20:
+                    color = '#ff5722'  # Red-orange
+                else:
+                    color = '#f44336'  # Red
+                
+                self.battery_label.config(fg=color)
+                self.debug_print(f"[DEBUG] Updated battery display to: {battery_level}% (color: {color})")
+            except:
+                pass  # GUI might be destroyed
         
-        # Update progress bar
-        self.battery_progress['value'] = battery_level
-        
-        # Update colors based on battery level
-        if battery_level >= 70:
-            color = 'green'
-        elif battery_level >= 40:
-            color = 'yellow'
-        else:
-            color = 'red'
-        
-        self.battery_label.config(fg=color)
-        self.debug_print(f"[DEBUG] Updated battery display to: {battery_level}% (color: {color})")
+        # Schedule GUI update in main thread
+        if hasattr(self, 'root'):
+            self.root.after(0, _update_gui)
     
     def update_imu_data(self, data):
-        """Update IMU/odometry data display"""
+        """Update IMU/odometry data display - schedule GUI updates in main thread"""
         self.debug_print(f"[DEBUG] Updating IMU data with: {data}")
         roll = data.get('roll', 0.0)
         pitch = data.get('pitch', 0.0)
@@ -544,11 +664,19 @@ class RiderPCClient:
         
         self.robot_data.update({'roll': roll, 'pitch': pitch, 'yaw': yaw})
         
-        # Update labels with proper formatting
-        self.roll_label.config(text=f"{roll:+.1f}°")
-        self.pitch_label.config(text=f"{pitch:+.1f}°") 
-        self.yaw_label.config(text=f"{yaw:+.1f}°")
-        self.debug_print(f"[DEBUG] Updated IMU display - Roll: {roll:+.1f}°, Pitch: {pitch:+.1f}°, Yaw: {yaw:+.1f}°")
+        def _update_gui():
+            try:
+                # Update labels with proper formatting
+                self.roll_label.config(text=f"{roll:+.1f}°")
+                self.pitch_label.config(text=f"{pitch:+.1f}°") 
+                self.yaw_label.config(text=f"{yaw:+.1f}°")
+                self.debug_print(f"[DEBUG] Updated IMU display - Roll: {roll:+.1f}°, Pitch: {pitch:+.1f}°, Yaw: {yaw:+.1f}°")
+            except:
+                pass  # GUI might be destroyed
+        
+        # Schedule GUI update in main thread
+        if hasattr(self, 'root'):
+            self.root.after(0, _update_gui)
     
     def send_movement(self, x, y):
         """Send movement command"""
@@ -616,32 +744,22 @@ class RiderPCClient:
         
         self.publish_command(self.topics['control_settings'], command)
     
-    def request_battery(self):
-        """Request battery status update"""
+
+    
+    def emergency_stop(self):
+        """Emergency stop - immediate, no confirmation"""
         if not self.connected:
-            messagebox.showwarning("Not Connected", "Not connected to robot")
+            # Even if not connected, try to show status - don't block emergency action
+            print("⚠️ Emergency stop attempted but not connected to robot")
             return
         
+        print("🚨 EMERGENCY STOP ACTIVATED")
         command = {
-            'action': 'request_battery',
+            'action': 'emergency_stop',
             'timestamp': time.time()
         }
         
-        self.publish_command(self.topics['request_battery'], command)
-    
-    def emergency_stop(self):
-        """Emergency stop"""
-        if not self.connected:
-            messagebox.showwarning("Not Connected", "Not connected to robot")
-            return
-        
-        if messagebox.askyesno("Emergency Stop", "Are you sure you want to emergency stop the robot?"):
-            command = {
-                'action': 'emergency_stop',
-                'timestamp': time.time()
-            }
-            
-            self.publish_command(self.topics['control_system'], command)
+        self.publish_command(self.topics['control_system'], command)
     
     def reconnect(self):
         """Reconnect to MQTT broker"""
@@ -650,15 +768,20 @@ class RiderPCClient:
         self.connect_mqtt()
     
     def disconnect(self):
-        """Disconnect from MQTT broker"""
+        """Disconnect from MQTT broker - immediate, no waiting"""
         if self.mqtt_client:
             try:
-                print("📡 Disconnecting from MQTT broker...")
-                # Stop the loop immediately and don't wait
+                print("📡 Force disconnecting from MQTT broker...")
+                # Stop the loop immediately and don't wait for network
                 self.mqtt_client.loop_stop()
-                # Just mark as disconnected, don't wait for network
+                # Force immediate disconnection without waiting
+                try:
+                    self.mqtt_client.disconnect()
+                except:
+                    pass  # Don't wait for network response
+                # Clear reference immediately
                 self.mqtt_client = None
-                print("✅ MQTT disconnected")
+                print("✅ MQTT force disconnected")
             except Exception as e:
                 print(f"⚠️ MQTT disconnect error (ignored): {e}")
         self.connected = False
@@ -666,28 +789,50 @@ class RiderPCClient:
     def run(self):
         """Run the GUI application"""
         def on_window_close():
-            """Handle window close event"""
+            """Handle window close event with timeout protection"""
             print("🪟 Window close requested...")
+            
+            # Set up timeout protection for hanging cleanup
+            import threading
+            import time
+            
+            def force_exit():
+                time.sleep(2)  # Give 2 seconds for normal cleanup
+                print("⏰ Cleanup timeout - forcing exit...")
+                import os
+                os._exit(0)
+            
+            # Start timeout thread
+            timeout_thread = threading.Thread(target=force_exit, daemon=True)
+            timeout_thread.start()
+            
             # Immediately stop all operations
             self.gui_running = False
+            print("🛑 Stopping GUI operations...")
             
-            # Force-stop MQTT immediately
+            # Force-stop MQTT with timeout
             try:
                 if self.mqtt_client:
+                    print("📡 Stopping MQTT...")
                     self.mqtt_client.loop_stop()
+                    self.mqtt_client.disconnect()
                     self.mqtt_client = None
-                print("📡 MQTT force-stopped")
-            except:
-                pass
+                    print("📡 MQTT stopped")
+            except Exception as e:
+                print(f"⚠️ MQTT cleanup error (ignored): {e}")
             
-            # Destroy GUI immediately  
+            # Destroy GUI immediately
             try:
+                print("🖥️ Destroying GUI...")
                 self.root.quit()
+                self.root.destroy()
                 print("✅ Window closed successfully")
-            except:
-                print("⚠️ Force closing...")
                 import sys
                 sys.exit(0)
+            except Exception as e:
+                print(f"⚠️ Error closing window: {e}")
+                import sys
+                sys.exit(1)
         
         # Set up proper window close handler
         self.root.protocol("WM_DELETE_WINDOW", on_window_close)
