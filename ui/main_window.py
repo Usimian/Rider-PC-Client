@@ -4,7 +4,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from typing import Dict, Callable, Any
-from .status_widgets import BatteryWidget, ControllerWidget, SpeedWidget, StatusBar
+from .status_widgets import BatteryWidget, ControllerWidget, SpeedWidget, CPUWidget, StatusBar
 from .control_panels import IMUPanel, FeaturesPanel, MovementPanel
 
 class MainWindow:
@@ -71,7 +71,7 @@ class MainWindow:
             print(f"Final window geometry: {self.root.geometry()}")
     
     def create_status_row(self, parent):
-        """Create the top status row with battery, controller, and speed"""
+        """Create the top status row with battery, controller, CPU, and speed"""
         status_row = tk.Frame(parent, bg='#2b2b2b')
         status_row.grid(row=0, column=0, sticky="ew", pady=(0, 15))
         
@@ -82,6 +82,10 @@ class MainWindow:
         # Controller Status Card
         self.controller_widget = ControllerWidget(status_row)
         self.controller_widget.get_widget().pack(side='left', padx=(0, 10), pady=5, fill='x', expand=True)
+        
+        # CPU Status Card
+        self.cpu_widget = CPUWidget(status_row)
+        self.cpu_widget.get_widget().pack(side='left', padx=(0, 10), pady=5, fill='x', expand=True)
         
         # Speed Control Card
         speed_callback = self.callbacks.get('change_speed', None)
@@ -221,4 +225,8 @@ class MainWindow:
     
     def update_all_features(self, data: Dict[str, Any]):
         """Update all feature statuses"""
-        self.features_panel.update_all_features(data) 
+        self.features_panel.update_all_features(data)
+    
+    def update_cpu_data(self, data: Dict[str, float]):
+        """Update CPU data display"""
+        self.cpu_widget.update_cpu_data(data) 

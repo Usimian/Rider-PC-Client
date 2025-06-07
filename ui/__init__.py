@@ -8,7 +8,7 @@ Contains all GUI components and widgets
 
 from .gui_manager import GUIManager
 from .main_window import MainWindow
-from .status_widgets import BatteryWidget, ControllerWidget, SpeedWidget, StatusBar
+from .status_widgets import BatteryWidget, ControllerWidget, SpeedWidget, CPUWidget, StatusBar
 from .control_panels import IMUPanel, FeaturesPanel, MovementPanel
 
 __all__ = [
@@ -17,6 +17,7 @@ __all__ = [
     'BatteryWidget',
     'ControllerWidget',
     'SpeedWidget',
+    'CPUWidget',
     'StatusBar',
     'IMUPanel',
     'FeaturesPanel',

@@ -25,7 +25,11 @@ These topics are **published by the robot** and **subscribed to by the PC client
   "camera_enabled": false,
   "controller_connected": true,
   "height": 85,
-  "connection_status": "connected"
+  "connection_status": "connected",
+  "cpu_percent": 15.2,
+  "cpu_load_1min": 0.85,
+  "cpu_load_5min": 1.02,
+  "cpu_load_15min": 0.97
 }
 ```
 
@@ -38,6 +42,10 @@ These topics are **published by the robot** and **subscribed to by the PC client
 - `controller_connected`: Whether gamepad controller is connected
 - `height`: Robot height setting (typically 85)
 - `connection_status`: "connected" | "disconnected"
+- `cpu_percent`: Current CPU usage percentage (0.0 - 100.0)
+- `cpu_load_1min`: 1-minute load average (0.0 - 4.0+ typical for 4-core system)
+- `cpu_load_5min`: 5-minute load average (0.0 - 4.0+ typical for 4-core system)
+- `cpu_load_15min`: 15-minute load average (0.0 - 4.0+ typical for 4-core system)
 
 #### `rider/status/battery`
 **Frequency**: Every ~10 seconds  
@@ -76,6 +84,30 @@ These topics are **published by the robot** and **subscribed to by the PC client
 - `roll`: Roll angle in degrees (-180 to +180)
 - `pitch`: Pitch angle in degrees (-90 to +90)
 - `yaw`: Yaw angle in degrees (-180 to +180)
+
+---
+
+## System Performance Monitoring
+
+The robot includes real-time system performance monitoring in the general status messages.
+
+### CPU Metrics Explained
+
+**CPU Percentage (`cpu_percent`)**:
+- Shows current CPU usage (0-100%)
+- Instantaneous measurement 
+- Values > 80% indicate high system load
+
+**Load Average (`cpu_load_1min`, `cpu_load_5min`, `cpu_load_15min`)**:
+- Average number of processes waiting for CPU over time periods
+- Values < 1.0 = system not busy
+- Values 1.0-4.0 = moderate load (acceptable for 4-core Raspberry Pi)
+- Values > 4.0 = system overloaded
+
+**Typical Values for Raspberry Pi CM4**:
+- Normal operation: CPU 5-25%, Load 0.2-0.8
+- Active robot control: CPU 20-50%, Load 0.5-1.5
+- High load warning: CPU > 80%, Load > 3.0
 
 ---
 
@@ -193,6 +225,28 @@ Your Pi server should publish to these topics:
 ### Message Handling Logic
 
 ```python
+import os
+import psutil
+
+def get_cpu_data():
+    """Get current CPU metrics"""
+    try:
+        cpu_percent = psutil.cpu_percent(interval=None)
+        load_avg = os.getloadavg()
+        return {
+            'cpu_percent': cpu_percent,
+            'cpu_load_1min': load_avg[0],
+            'cpu_load_5min': load_avg[1],
+            'cpu_load_15min': load_avg[2]
+        }
+    except:
+        return {
+            'cpu_percent': 0.0,
+            'cpu_load_1min': 0.0,
+            'cpu_load_5min': 0.0,
+            'cpu_load_15min': 0.0
+        }
+
 def handle_movement_command(message_data):
     x = message_data.get('x', 0)  # -100 to +100
     y = message_data.get('y', 0)  # -100 to +100
@@ -240,6 +294,9 @@ def handle_battery_request(message_data):
 
 ```python
 def publish_status():
+    # Get current CPU metrics
+    cpu_data = get_cpu_data()
+    
     status = {
         "timestamp": time.time(),
         "speed_scale": current_speed_scale,
@@ -248,7 +305,11 @@ def publish_status():
         "camera_enabled": camera_active,
         "controller_connected": controller_connected,
         "height": robot_height,
-        "connection_status": "connected"
+        "connection_status": "connected",
+        "cpu_percent": cpu_data['cpu_percent'],
+        "cpu_load_1min": cpu_data['cpu_load_1min'],
+        "cpu_load_5min": cpu_data['cpu_load_5min'],
+        "cpu_load_15min": cpu_data['cpu_load_15min']
     }
     mqtt_client.publish("rider/status", json.dumps(status))
 

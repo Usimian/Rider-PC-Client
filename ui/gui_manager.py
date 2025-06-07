@@ -117,6 +117,12 @@ class GUIManager:
             if 'speed_scale' in data:
                 self.main_window.update_speed(data['speed_scale'])
             
+            # Update CPU data if any CPU fields are present
+            cpu_fields = ['cpu_percent', 'cpu_load_1min', 'cpu_load_5min', 'cpu_load_15min']
+            if any(field in data for field in cpu_fields):
+                cpu_data = self.robot_state.get_cpu_data()
+                self.main_window.update_cpu_data(cpu_data)
+            
             # Update features
             self.main_window.update_all_features(data)
         

@@ -3,7 +3,7 @@
 
 import tkinter as tk
 from datetime import datetime
-from typing import Callable, Optional
+from typing import Callable, Optional, Dict
 
 class BatteryWidget:
     def __init__(self, parent):
@@ -176,6 +176,81 @@ class SpeedWidget:
         """Update speed display"""
         self.label.config(text=f"{speed_value:.1f}x")
         self.scale.set(speed_value)
+    
+    def get_widget(self):
+        """Get the main widget"""
+        return self.card
+
+class CPUWidget:
+    def __init__(self, parent):
+        self.parent = parent
+        self.setup_widget()
+    
+    def setup_widget(self):
+        """Setup CPU status widget"""
+        self.card = tk.Frame(self.parent, bg='#3c3c3c', relief='solid', bd=1)
+        
+        # CPU title
+        tk.Label(self.card, text="🖥️ CPU", font=('Arial', 10, 'bold'), 
+                bg='#3c3c3c', fg='#87ceeb').pack(pady=(8, 2))
+        
+        # CPU percentage display
+        self.cpu_percent_label = tk.Label(self.card, text="0%", font=('Arial', 14, 'bold'), 
+                                         bg='#3c3c3c', fg='#4caf50')
+        self.cpu_percent_label.pack(pady=(0, 5))
+        
+        # Load averages
+        load_frame = tk.Frame(self.card, bg='#3c3c3c')
+        load_frame.pack(pady=(0, 8))
+        
+        tk.Label(load_frame, text="Load:", font=('Arial', 8), 
+                bg='#3c3c3c', fg='#cccccc').pack()
+        
+        self.load_labels = {}
+        for period in ['1m', '5m', '15m']:
+            label = tk.Label(load_frame, text=f"{period}: 0.0", font=('Arial', 8), 
+                           bg='#3c3c3c', fg='#cccccc')
+            label.pack()
+            self.load_labels[period] = label
+    
+    def update_cpu_data(self, data: Dict[str, float]):
+        """Update CPU display"""
+        try:
+            # Update CPU percentage
+            cpu_percent = data.get('cpu_percent', 0.0)
+            self.cpu_percent_label.config(text=f"{cpu_percent:.1f}%")
+            
+            # Color based on CPU usage
+            if cpu_percent >= 80:
+                color = '#f44336'  # Red - high load
+            elif cpu_percent >= 60:
+                color = '#ff9800'  # Orange - moderate load
+            else:
+                color = '#4caf50'  # Green - normal load
+            
+            self.cpu_percent_label.config(fg=color)
+            
+            # Update load averages
+            load_1min = data.get('cpu_load_1min', 0.0)
+            load_5min = data.get('cpu_load_5min', 0.0)
+            load_15min = data.get('cpu_load_15min', 0.0)
+            
+            self.load_labels['1m'].config(text=f"1m: {load_1min:.2f}")
+            self.load_labels['5m'].config(text=f"5m: {load_5min:.2f}")
+            self.load_labels['15m'].config(text=f"15m: {load_15min:.2f}")
+            
+            # Color load averages based on system load (assuming 4-core Pi)
+            for period, value in [('1m', load_1min), ('5m', load_5min), ('15m', load_15min)]:
+                if value >= 3.0:
+                    load_color = '#f44336'  # Red - overloaded
+                elif value >= 1.5:
+                    load_color = '#ff9800'  # Orange - high load
+                else:
+                    load_color = '#4caf50'  # Green - normal load
+                
+                self.load_labels[period].config(fg=load_color)
+        except:
+            pass  # GUI might be destroyed
     
     def get_widget(self):
         """Get the main widget"""
