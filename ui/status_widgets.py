@@ -190,65 +190,116 @@ class CPUWidget:
         """Setup CPU status widget"""
         self.card = tk.Frame(self.parent, bg='#3c3c3c', relief='solid', bd=1)
         
-        # CPU title
-        tk.Label(self.card, text="🖥️ CPU", font=('Arial', 10, 'bold'), 
-                bg='#3c3c3c', fg='#87ceeb').pack(pady=(8, 2))
+        # CPU percentage row
+        cpu_frame = tk.Frame(self.card, bg='#3c3c3c')
+        cpu_frame.pack(pady=(10, 5), padx=8, fill='x')
         
-        # CPU percentage display
-        self.cpu_percent_label = tk.Label(self.card, text="0%", font=('Arial', 14, 'bold'), 
-                                         bg='#3c3c3c', fg='#4caf50')
-        self.cpu_percent_label.pack(pady=(0, 5))
+        self.cpu_value_label = tk.Label(cpu_frame, text="0%", font=('Arial', 9, 'bold'), 
+                                       bg='#3c3c3c', fg='#cccccc', width=6, anchor='e')
+        self.cpu_value_label.pack(side='left')
         
-        # Load averages
+        self.cpu_canvas = tk.Canvas(cpu_frame, width=80, height=12, bg='#2b2b2b', 
+                                   highlightthickness=0, bd=0)
+        self.cpu_canvas.pack(side='left', padx=(5, 0))
+        
+        tk.Label(cpu_frame, text="CPU", font=('Arial', 8), 
+                bg='#3c3c3c', fg='#87ceeb').pack(side='left', padx=(5, 0))
+        
+        # Load row
         load_frame = tk.Frame(self.card, bg='#3c3c3c')
-        load_frame.pack(pady=(0, 8))
+        load_frame.pack(pady=(0, 10), padx=8, fill='x')
         
-        tk.Label(load_frame, text="Load:", font=('Arial', 8), 
-                bg='#3c3c3c', fg='#cccccc').pack()
+        self.load_value_label = tk.Label(load_frame, text="0.0", font=('Arial', 9, 'bold'), 
+                                        bg='#3c3c3c', fg='#cccccc', width=6, anchor='e')
+        self.load_value_label.pack(side='left')
         
-        self.load_labels = {}
-        for period in ['1m', '5m', '15m']:
-            label = tk.Label(load_frame, text=f"{period}: 0.0", font=('Arial', 8), 
-                           bg='#3c3c3c', fg='#cccccc')
-            label.pack()
-            self.load_labels[period] = label
+        self.load_canvas = tk.Canvas(load_frame, width=80, height=12, bg='#2b2b2b', 
+                                    highlightthickness=0, bd=0)
+        self.load_canvas.pack(side='left', padx=(5, 0))
+        
+        tk.Label(load_frame, text="Load", font=('Arial', 8), 
+                bg='#3c3c3c', fg='#87ceeb').pack(side='left', padx=(5, 0))
+        
+        # Draw initial empty bars
+        self.draw_cpu_bar(0)
+        self.draw_load_bar(0)
+    
+    def draw_cpu_bar(self, cpu_percent):
+        """Draw CPU percentage bar"""
+        self.cpu_canvas.delete("all")
+        
+        # Bar dimensions
+        bar_width = 76
+        bar_height = 8
+        x1 = 2
+        y1 = 2
+        x2 = x1 + bar_width
+        y2 = y1 + bar_height
+        
+        # Draw background bar
+        self.cpu_canvas.create_rectangle(x1, y1, x2, y2, outline='white', width=1, fill='#2b2b2b')
+        
+        # Draw fill based on CPU percentage
+        if cpu_percent > 0:
+            fill_width = max(1, int(bar_width * cpu_percent / 100))
+            fill_x2 = x1 + fill_width
+            
+            # Color based on CPU usage
+            if cpu_percent >= 80:
+                fill_color = '#f44336'  # Red - high load
+            elif cpu_percent >= 60:
+                fill_color = '#ff9800'  # Orange - moderate load
+            else:
+                fill_color = '#4caf50'  # Green - normal load
+            
+            self.cpu_canvas.create_rectangle(x1 + 1, y1 + 1, fill_x2, y2 - 1, 
+                                           outline='', fill=fill_color)
+    
+    def draw_load_bar(self, load_value):
+        """Draw load bar (0-4 scale)"""
+        self.load_canvas.delete("all")
+        
+        # Bar dimensions
+        bar_width = 76
+        bar_height = 8
+        x1 = 2
+        y1 = 2
+        x2 = x1 + bar_width
+        y2 = y1 + bar_height
+        
+        # Draw background bar
+        self.load_canvas.create_rectangle(x1, y1, x2, y2, outline='white', width=1, fill='#2b2b2b')
+        
+        # Draw fill based on load (0-4 scale)
+        if load_value > 0:
+            # Clamp load value to 0-4 range
+            clamped_load = min(max(load_value, 0), 4)
+            fill_width = max(1, int(bar_width * clamped_load / 4))
+            fill_x2 = x1 + fill_width
+            
+            # Color based on load
+            if load_value >= 3.0:
+                fill_color = '#f44336'  # Red - overloaded
+            elif load_value >= 1.5:
+                fill_color = '#ff9800'  # Orange - high load
+            else:
+                fill_color = '#4caf50'  # Green - normal load
+            
+            self.load_canvas.create_rectangle(x1 + 1, y1 + 1, fill_x2, y2 - 1, 
+                                            outline='', fill=fill_color)
     
     def update_cpu_data(self, data: Dict[str, float]):
         """Update CPU display"""
         try:
             # Update CPU percentage
             cpu_percent = data.get('cpu_percent', 0.0)
-            self.cpu_percent_label.config(text=f"{cpu_percent:.1f}%")
+            self.cpu_value_label.config(text=f"{cpu_percent:.1f}%")
+            self.draw_cpu_bar(cpu_percent)
             
-            # Color based on CPU usage
-            if cpu_percent >= 80:
-                color = '#f44336'  # Red - high load
-            elif cpu_percent >= 60:
-                color = '#ff9800'  # Orange - moderate load
-            else:
-                color = '#4caf50'  # Green - normal load
-            
-            self.cpu_percent_label.config(fg=color)
-            
-            # Update load averages
+            # Update 1-minute load average
             load_1min = data.get('cpu_load_1min', 0.0)
-            load_5min = data.get('cpu_load_5min', 0.0)
-            load_15min = data.get('cpu_load_15min', 0.0)
-            
-            self.load_labels['1m'].config(text=f"1m: {load_1min:.2f}")
-            self.load_labels['5m'].config(text=f"5m: {load_5min:.2f}")
-            self.load_labels['15m'].config(text=f"15m: {load_15min:.2f}")
-            
-            # Color load averages based on system load (assuming 4-core Pi)
-            for period, value in [('1m', load_1min), ('5m', load_5min), ('15m', load_15min)]:
-                if value >= 3.0:
-                    load_color = '#f44336'  # Red - overloaded
-                elif value >= 1.5:
-                    load_color = '#ff9800'  # Orange - high load
-                else:
-                    load_color = '#4caf50'  # Green - normal load
-                
-                self.load_labels[period].config(fg=load_color)
+            self.load_value_label.config(text=f"{load_1min:.2f}")
+            self.draw_load_bar(load_1min)
         except:
             pass  # GUI might be destroyed
     

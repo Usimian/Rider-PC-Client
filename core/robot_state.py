@@ -21,8 +21,6 @@ class RobotState:
             'connection_status': 'disconnected',
             'cpu_percent': 0.0,
             'cpu_load_1min': 0.0,
-            'cpu_load_5min': 0.0,
-            'cpu_load_15min': 0.0,
             'last_update': None
         }
         
@@ -135,9 +133,7 @@ class RobotState:
         """Get current CPU data"""
         return {
             'cpu_percent': self.data['cpu_percent'],
-            'cpu_load_1min': self.data['cpu_load_1min'],
-            'cpu_load_5min': self.data['cpu_load_5min'],
-            'cpu_load_15min': self.data['cpu_load_15min']
+            'cpu_load_1min': self.data['cpu_load_1min']
         }
     
     def _check_controller_timeout(self):
