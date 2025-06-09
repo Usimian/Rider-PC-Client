@@ -1,0 +1,10 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+This program is in Python3.
+This uses the tkinter framework.
+The client-server communications protocol is MQTT
+The application is a client for the Rider Robot server.
+For context, there is a copy of the server code at /home/mw/Rider-Robot-Controller/

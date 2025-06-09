@@ -1,35 +1,40 @@
 {
-    // Basic single site configuration
-    "sync-rsync.remote": "user@192.168.1.173:/home/pi/Rider-PC-Client",
-    "sync-rsync.local": "${workspaceRoot}/home/mw/Rider-PC-Client",
-    "sync-rsync.delete": false,
-    "sync-rsync.flags": "avz",
-    "sync-rsync.exclude": [
-        ".git",
-        ".vscode",
-        "__pycache__",
-        "*.pyc",
-        "*.log",
-        ".env"
+    // Multiple sites configuration for both pull and push operations
+    "sync-rsync.sites": [
+        {
+            "name": "Pull Robot Controller from Pi",
+            "localPath": "${workspaceRoot}/../Rider-Robot-Controller/",
+            "remotePath": "pi@192.168.1.173:/home/pi/Rider-Robot-Controller/",
+            "downOnly": true,
+            "flags": "avz",
+            "exclude": [
+                ".git",
+                ".vscode",
+                "__pycache__",
+                "*.pyc",
+                "*.log",
+                ".env"
+            ],
+            "shell": "ssh"
+        },
+        {
+            "name": "Push PC Client to Pi",
+            "localPath": "${workspaceRoot}/",
+            "remotePath": "pi@192.168.1.173:/home/pi/Rider-PC-Client/",
+            "upOnly": true,
+            "flags": "avz",
+            "exclude": [
+                ".git",
+                ".vscode",
+                "__pycache__",
+                "*.pyc",
+                "*.log",
+                ".env"
+            ],
+            "shell": "ssh"
+        }
     ],
-    "sync-rsync.shell": "ssh",
     "sync-rsync.showProgress": true,
     "sync-rsync.autoShowOutput": true,
-    "sync-rsync.notification": true,
-    
-    // Alternative: Multiple sites configuration (comment out the basic config above if using this)
-    // "sync-rsync.sites": [
-    //     {
-    //         "name": "Production Server",
-    //         "remotePath": "user@prod-server:/var/www/html/",
-    //         "localPath": "${workspaceRoot}/",
-    //         "shell": "ssh -p 22"
-    //     },
-    //     {
-    //         "name": "Staging Server", 
-    //         "remotePath": "user@staging-server:/var/www/html/",
-    //         "localPath": "${workspaceRoot}/",
-    //         "shell": "ssh -p 2222"
-    //     }
-    // ]
+    "sync-rsync.notification": true
 } 
