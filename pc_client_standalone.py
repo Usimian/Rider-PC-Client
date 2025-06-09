@@ -23,6 +23,7 @@ def main():
         print("🐛 Debug mode enabled - showing all MQTT traffic")
     else:
         print("ℹ️ Use -d or --debug flag to see detailed MQTT traffic")
+    print("🛡️ Enhanced with graceful disconnect to prevent robot corruption")
     
     app_controller = None
     try:

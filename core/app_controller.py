@@ -98,7 +98,7 @@ class ApplicationController:
             
             # Stop MQTT
             if hasattr(self, 'mqtt_client'):
-                self.mqtt_client.disconnect()
+                self.mqtt_client.graceful_disconnect()
             
             print("✅ Force shutdown complete")
         except Exception as e:
@@ -185,9 +185,9 @@ class ApplicationController:
     
     def _disconnect(self):
         """Disconnect from MQTT broker"""
-        self.mqtt_client.disconnect()
+        self.mqtt_client.graceful_disconnect()
         if self.debug_mode:
-            print("[APP] Disconnected from MQTT broker")
+            print("[APP] Gracefully disconnected from MQTT broker")
     
     def _change_robot_ip(self, new_ip: str):
         """Change robot IP address"""
@@ -196,7 +196,7 @@ class ApplicationController:
             self.gui_manager.update_broker_host(new_ip)
             
             # Update MQTT client with new host
-            self.mqtt_client.disconnect()
+            self.mqtt_client.graceful_disconnect()
             self.mqtt_client.broker_host = new_ip
             self.mqtt_client.connect()
             
@@ -211,11 +211,14 @@ class ApplicationController:
         """Handle window close event with timeout protection"""
         print("🪟 Window close requested...")
         
+        # Send safety commands before shutdown
+        self._send_safety_shutdown_commands()
+        
         # Set up timeout protection for hanging cleanup
         import threading
         
         def force_exit():
-            time.sleep(2)  # Give 2 seconds for normal cleanup
+            time.sleep(3)  # Give 3 seconds for normal cleanup (increased for safety commands)
             print("⏰ Cleanup timeout - forcing exit...")
             import os
             os._exit(0)
@@ -226,6 +229,28 @@ class ApplicationController:
         
         # Perform cleanup
         self.cleanup()
+
+    def _send_safety_shutdown_commands(self):
+        """Send safety commands before shutdown to prevent robot corruption"""
+        if not hasattr(self, 'mqtt_client') or not self.mqtt_client.is_connected():
+            return
+        
+        try:
+            print("🛡️ Sending safety shutdown commands...")
+            
+            # Send movement stop
+            self.mqtt_client.send_movement_command(0, 0)
+            
+            # Send emergency stop for extra safety
+            self.mqtt_client.send_system_command('emergency_stop')
+            
+            # Brief pause to ensure commands are sent
+            time.sleep(0.1)
+            
+            print("✅ Safety shutdown commands sent")
+            
+        except Exception as e:
+            print(f"⚠️ Error sending safety commands: {e}")
     
     def run(self):
         """Run the application"""
@@ -253,13 +278,16 @@ class ApplicationController:
         print("🛑 Shutting down application...")
         
         try:
+            # Send safety commands first
+            self._send_safety_shutdown_commands()
+            
             # Stop GUI
             if hasattr(self, 'gui_manager'):
                 self.gui_manager.stop()
             
-            # Disconnect MQTT
+            # Disconnect MQTT (graceful disconnect includes additional safety commands)
             if hasattr(self, 'mqtt_client'):
-                self.mqtt_client.disconnect()
+                self.mqtt_client.graceful_disconnect()
             
             # Brief pause for cleanup
             time.sleep(0.1)

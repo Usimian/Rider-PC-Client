@@ -1,0 +1,35 @@
+{
+    // Basic single site configuration
+    "sync-rsync.remote": "user@192.168.1.173:/home/pi/Rider-PC-Client",
+    "sync-rsync.local": "${workspaceRoot}/home/mw/Rider-PC-Client",
+    "sync-rsync.delete": false,
+    "sync-rsync.flags": "avz",
+    "sync-rsync.exclude": [
+        ".git",
+        ".vscode",
+        "__pycache__",
+        "*.pyc",
+        "*.log",
+        ".env"
+    ],
+    "sync-rsync.shell": "ssh",
+    "sync-rsync.showProgress": true,
+    "sync-rsync.autoShowOutput": true,
+    "sync-rsync.notification": true,
+    
+    // Alternative: Multiple sites configuration (comment out the basic config above if using this)
+    // "sync-rsync.sites": [
+    //     {
+    //         "name": "Production Server",
+    //         "remotePath": "user@prod-server:/var/www/html/",
+    //         "localPath": "${workspaceRoot}/",
+    //         "shell": "ssh -p 22"
+    //     },
+    //     {
+    //         "name": "Staging Server", 
+    //         "remotePath": "user@staging-server:/var/www/html/",
+    //         "localPath": "${workspaceRoot}/",
+    //         "shell": "ssh -p 2222"
+    //     }
+    // ]
+} 

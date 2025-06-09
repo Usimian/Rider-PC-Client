@@ -87,10 +87,80 @@ class MQTTClient:
             except Exception as e:
                 print(f"⚠️ MQTT disconnect error (ignored): {e}")
         self.connected = False
+
+    def graceful_disconnect(self):
+        """Gracefully disconnect from MQTT broker with proper cleanup"""
+        if not self.connected or not self.mqtt_client:
+            self.connected = False
+            return
+        
+        try:
+            print("📡 Graceful disconnect initiated...")
+            
+            # Send stop commands to ensure robot is in safe state
+            self.send_emergency_stop()
+            self.send_movement_stop()
+            
+            # Brief pause to allow messages to be sent
+            time.sleep(0.2)
+            
+            print("📡 Disconnecting from MQTT broker...")
+            
+            # Stop the network loop
+            self.mqtt_client.loop_stop()
+            
+            # Proper MQTT disconnect
+            self.mqtt_client.disconnect()
+            
+            # Clear reference
+            self.mqtt_client = None
+            self.connected = False
+            
+            print("✅ MQTT gracefully disconnected")
+            
+        except Exception as e:
+            print(f"⚠️ Graceful disconnect error, falling back to force disconnect: {e}")
+            # Fall back to force disconnect if graceful fails
+            self.disconnect()
+
+    def send_emergency_stop(self) -> bool:
+        """Send emergency stop command during disconnect"""
+        try:
+            command = {
+                'action': 'emergency_stop',
+                'timestamp': time.time(),
+                'source': 'disconnect_cleanup'
+            }
+            if self.connected and self.mqtt_client:
+                payload = json.dumps(command)
+                result = self.mqtt_client.publish(self.topics['control_system'], payload)
+                self.debug_print("[CLEANUP] Emergency stop sent during disconnect")
+                return result.rc == 0
+        except Exception as e:
+            self.debug_print(f"[CLEANUP] Failed to send emergency stop: {e}")
+        return False
+
+    def send_movement_stop(self) -> bool:
+        """Send movement stop command during disconnect"""
+        try:
+            command = {
+                'x': 0,
+                'y': 0,
+                'timestamp': time.time(),
+                'source': 'disconnect_cleanup'
+            }
+            if self.connected and self.mqtt_client:
+                payload = json.dumps(command)
+                result = self.mqtt_client.publish(self.topics['control_movement'], payload)
+                self.debug_print("[CLEANUP] Movement stop sent during disconnect")
+                return result.rc == 0
+        except Exception as e:
+            self.debug_print(f"[CLEANUP] Failed to send movement stop: {e}")
+        return False
     
     def reconnect(self):
         """Reconnect to MQTT broker"""
-        self.disconnect()
+        self.graceful_disconnect()
         time.sleep(1)
         return self.connect()
     
