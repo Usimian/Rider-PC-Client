@@ -16,6 +16,7 @@ from ui.gui_manager import GUIManager
 class ApplicationController:
     def __init__(self, debug: bool = False):
         self.debug_mode = debug
+        self.cleanup_done = False  # Flag to prevent multiple cleanup calls
         
         # Initialize core components
         self.config_manager = ConfigManager()
@@ -343,6 +344,13 @@ class ApplicationController:
     
     def cleanup(self):
         """Cleanup resources"""
+        # Prevent multiple cleanup calls
+        if self.cleanup_done:
+            if self.debug_mode:
+                print("🛑 Cleanup already done, skipping...")
+            return
+        
+        self.cleanup_done = True
         print("🛑 Shutting down application...")
         
         try:

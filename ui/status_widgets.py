@@ -198,7 +198,7 @@ class CPUWidget:
                                        bg='#3c3c3c', fg='#cccccc', width=6, anchor='e')
         self.cpu_value_label.pack(side='left')
         
-        self.cpu_canvas = tk.Canvas(cpu_frame, width=80, height=12, bg='#2b2b2b', 
+        self.cpu_canvas = tk.Canvas(cpu_frame, width=80, height=24, bg='#2b2b2b', 
                                    highlightthickness=0, bd=0)
         self.cpu_canvas.pack(side='left', padx=(5, 0))
         
@@ -213,7 +213,7 @@ class CPUWidget:
                                         bg='#3c3c3c', fg='#cccccc', width=6, anchor='e')
         self.load_value_label.pack(side='left')
         
-        self.load_canvas = tk.Canvas(load_frame, width=80, height=12, bg='#2b2b2b', 
+        self.load_canvas = tk.Canvas(load_frame, width=80, height=24, bg='#2b2b2b', 
                                     highlightthickness=0, bd=0)
         self.load_canvas.pack(side='left', padx=(5, 0))
         
@@ -230,7 +230,7 @@ class CPUWidget:
         
         # Bar dimensions
         bar_width = 76
-        bar_height = 8
+        bar_height = 20
         x1 = 2
         y1 = 2
         x2 = x1 + bar_width
@@ -261,7 +261,7 @@ class CPUWidget:
         
         # Bar dimensions
         bar_width = 76
-        bar_height = 8
+        bar_height = 20
         x1 = 2
         y1 = 2
         x2 = x1 + bar_width

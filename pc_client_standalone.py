@@ -54,7 +54,10 @@ def main():
                 print(f"⚠️ Final cleanup error: {e}")
                 print("🚪 Forcing exit...")
                 sys.exit(0)
-        print("👋 Application terminated")
+        
+        # Only print this message if cleanup wasn't already done
+        if not app_controller or not hasattr(app_controller, 'cleanup_done') or not app_controller.cleanup_done:
+            print("👋 Application terminated")
 
 if __name__ == "__main__":
     main() 
