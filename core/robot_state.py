@@ -96,11 +96,23 @@ class RobotState:
             })
     
     def update_status(self, data: Dict[str, Any]):
-        """Update general robot status"""
+        """Update general robot status including battery level from rider/status message"""
         changed_fields = {}
         
-        # Track which fields actually changed
+        # Handle battery level specially if present in status message
+        battery_level_changed = False
+        if 'battery_level' in data or 'level' in data:
+            # Robot may send 'level' field or 'battery_level' field
+            new_battery_level = data.get('battery_level', data.get('level', self.data['battery_level']))
+            if self.data['battery_level'] != new_battery_level:
+                self.data['battery_level'] = new_battery_level
+                battery_level_changed = True
+                changed_fields['battery_level'] = new_battery_level
+        
+        # Track which other fields actually changed
         for key, value in data.items():
+            if key in ['battery_level', 'level']:
+                continue  # Already handled above
             if key in self.data and self.data[key] != value:
                 changed_fields[key] = value
                 self.data[key] = value
@@ -112,6 +124,10 @@ class RobotState:
         if changed_fields:
             self.data['last_update'] = datetime.now()
             self._notify_observers('status', changed_fields)
+            
+            # If battery level changed in status message, also notify battery observers
+            if battery_level_changed:
+                self._notify_observers('battery', {'level': self.data['battery_level']})
     
     def get_current_state(self) -> Dict[str, Any]:
         """Get current complete robot state"""

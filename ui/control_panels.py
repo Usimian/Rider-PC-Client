@@ -162,10 +162,31 @@ class MovementPanel:
         system_frame = tk.Frame(content, bg='#3c3c3c')
         system_frame.pack(side='right')
         
+        tk.Label(system_frame, text="System Controls", font=('Arial', 11, 'bold'), 
+                bg='#3c3c3c', fg='white').pack(pady=(0, 10))
+        
         emergency_callback = self.callbacks.get('emergency_stop', lambda: None)
         tk.Button(system_frame, text="🚨 EMERGENCY STOP", command=emergency_callback,
                  font=('Arial', 12, 'bold'), bg='#d32f2f', fg='white', 
-                 activebackground='#b71c1c', width=18, pady=10).pack()
+                 activebackground='#b71c1c', width=18, pady=10).pack(pady=(0, 10))
+        
+        # Robot reset button
+        reset_callback = self.callbacks.get('reset_robot', lambda: None)
+        tk.Button(system_frame, text="🔄 RESET ROBOT", command=reset_callback,
+                 font=('Arial', 10, 'bold'), bg='#ff9800', fg='white', 
+                 activebackground='#f57c00', width=18, pady=8).pack(pady=(0, 5))
+        
+        # Pi reboot button
+        reboot_callback = self.callbacks.get('reboot_pi', lambda: None)
+        tk.Button(system_frame, text="🔃 REBOOT PI", command=reboot_callback,
+                 font=('Arial', 10, 'bold'), bg='#2196f3', fg='white', 
+                 activebackground='#1976d2', width=18, pady=8).pack(pady=(0, 5))
+        
+        # Pi power off button
+        poweroff_callback = self.callbacks.get('poweroff_pi', lambda: None)
+        tk.Button(system_frame, text="⚡ POWER OFF PI", command=poweroff_callback,
+                 font=('Arial', 10, 'bold'), bg='#9c27b0', fg='white', 
+                 activebackground='#7b1fa2', width=18, pady=8).pack()
     
     def get_widget(self):
         """Get the main widget"""

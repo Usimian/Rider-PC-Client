@@ -26,7 +26,7 @@ class MessageHandlers:
         return self.handlers.get(topic)
     
     def handle_status_message(self, data: Dict[str, Any]):
-        """Handle general status messages"""
+        """Handle general status messages including battery level"""
         self.debug_print(f"[HANDLER] Processing status message: {data}")
         self.robot_state.update_status(data)
     

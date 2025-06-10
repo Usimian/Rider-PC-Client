@@ -26,8 +26,7 @@ class MQTTClient:
             'control_movement': 'rider/control/movement',
             'control_settings': 'rider/control/settings',
             'control_camera': 'rider/control/camera',
-            'control_system': 'rider/control/system',
-            'request_battery': 'rider/request/battery'
+            'control_system': 'rider/control/system'
         }
         
         # Callbacks for different message types

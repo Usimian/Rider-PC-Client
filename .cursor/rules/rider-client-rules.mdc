@@ -5,6 +5,7 @@ alwaysApply: true
 ---
 This program is in Python3.
 This uses the tkinter framework.
-The client-server communications protocol is MQTT
+For context, there is a copy of the server code at /home/mw/Rider-Robot-Controller/, this folder may not be modified.
+The client-server communications protocol is MQTT.
+'MQTT_Protocol_Documentation.md located in the copy of the server code.  This shows the communications protocol.
 The application is a client for the Rider Robot server.
-For context, there is a copy of the server code at /home/mw/Rider-Robot-Controller/

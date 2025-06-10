@@ -55,6 +55,9 @@ class ApplicationController:
             'toggle_camera': self._toggle_camera,
             'send_movement': self._send_movement,
             'emergency_stop': self._emergency_stop,
+            'reset_robot': self._reset_robot,
+            'reboot_pi': self._reboot_pi,
+            'poweroff_pi': self._poweroff_pi,
             'reconnect': self._reconnect,
             'disconnect': self._disconnect,
             'change_robot_ip': self._change_robot_ip,
@@ -176,6 +179,71 @@ class ApplicationController:
         
         print("🚨 EMERGENCY STOP ACTIVATED")
         self.mqtt_client.send_system_command('emergency_stop')
+    
+    def _reset_robot(self):
+        """Reset the robot - requires confirmation"""
+        if not self.mqtt_client.is_connected():
+            messagebox.showwarning("Not Connected", "Not connected to robot")
+            return
+        
+        # Confirmation dialog
+        result = messagebox.askyesno(
+            "Reset Robot", 
+            "Are you sure you want to reset the robot?\n\nThis will restart the robot software.",
+            icon='warning'
+        )
+        
+        if result:
+            print("🔄 ROBOT RESET INITIATED")
+            self.mqtt_client.send_system_command('reset_robot')
+            if self.debug_mode:
+                print("[APP] Robot reset command sent")
+    
+    def _reboot_pi(self):
+        """Reboot the Raspberry Pi - requires confirmation"""
+        if not self.mqtt_client.is_connected():
+            messagebox.showwarning("Not Connected", "Not connected to robot")
+            return
+        
+        # Confirmation dialog
+        result = messagebox.askyesno(
+            "Reboot Raspberry Pi", 
+            "Are you sure you want to reboot the Raspberry Pi?\n\nThis will restart the entire system and you will lose connection.",
+            icon='warning'
+        )
+        
+        if result:
+            print("🔃 PI REBOOT INITIATED")
+            self.mqtt_client.send_system_command('reboot_pi')
+            if self.debug_mode:
+                print("[APP] Pi reboot command sent")
+    
+    def _poweroff_pi(self):
+        """Power off the Raspberry Pi - requires double confirmation"""
+        if not self.mqtt_client.is_connected():
+            messagebox.showwarning("Not Connected", "Not connected to robot")
+            return
+        
+        # First confirmation dialog
+        result1 = messagebox.askyesno(
+            "Power Off Raspberry Pi", 
+            "⚠️ WARNING: This will POWER OFF the Raspberry Pi!\n\nYou will need physical access to restart it.\n\nAre you sure you want to continue?",
+            icon='warning'
+        )
+        
+        if result1:
+            # Second confirmation dialog for extra safety
+            result2 = messagebox.askyesno(
+                "Final Confirmation", 
+                "🚨 FINAL CONFIRMATION 🚨\n\nThis action will completely shut down the robot.\nYou will need to physically restart it.\n\nProceed with power off?",
+                icon='error'
+            )
+            
+            if result2:
+                print("⚡ PI POWER OFF INITIATED")
+                self.mqtt_client.send_system_command('poweroff_pi')
+                if self.debug_mode:
+                    print("[APP] Pi power off command sent")
     
     def _reconnect(self):
         """Reconnect to MQTT broker"""

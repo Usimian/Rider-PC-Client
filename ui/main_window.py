@@ -119,7 +119,10 @@ class MainWindow:
         """Create the bottom row with movement controls"""
         movement_callbacks = {
             'move': self.callbacks.get('send_movement', lambda x, y: None),
-            'emergency_stop': self.callbacks.get('emergency_stop', lambda: None)
+            'emergency_stop': self.callbacks.get('emergency_stop', lambda: None),
+            'reset_robot': self.callbacks.get('reset_robot', lambda: None),
+            'reboot_pi': self.callbacks.get('reboot_pi', lambda: None),
+            'poweroff_pi': self.callbacks.get('poweroff_pi', lambda: None)
         }
         self.movement_panel = MovementPanel(parent, movement_callbacks)
         self.movement_panel.get_widget().grid(row=2, column=0, sticky="ew")
