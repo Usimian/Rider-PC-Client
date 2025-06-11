@@ -26,7 +26,9 @@ class MQTTClient:
             'control_movement': 'rider/control/movement',
             'control_settings': 'rider/control/settings',
             'control_camera': 'rider/control/camera',
-            'control_system': 'rider/control/system'
+            'control_system': 'rider/control/system',
+            'control_image_capture': 'rider/control/image_capture',
+            'response_image_capture': 'rider/response/image_capture'
         }
         
         # Callbacks for different message types
@@ -74,7 +76,7 @@ class MQTTClient:
             try:
                 print("📡 Force disconnecting from MQTT broker...")
                 # Stop the loop immediately and don't wait for network
-                self.mqtt_client.loop_stop()
+                self.mqtt_client.loop_stop()  # Stop immediately
                 # Force immediate disconnection without waiting
                 try:
                     self.mqtt_client.disconnect()
@@ -219,6 +221,24 @@ class MQTTClient:
         }
         return self.publish_command(self.topics['control_system'], command)
     
+    def send_image_capture_request(self, resolution: str = "high") -> str:
+        """Send image capture request and return the request ID"""
+        request_id = f"img_{int(time.time() * 1000)}"  # Unique ID with milliseconds
+        command = {
+            'request_id': request_id,
+            'resolution': resolution,  # "high" (640x480) or "low" (320x240)
+            'timestamp': time.time(),
+            'client_id': self.client_id
+        }
+        
+        success = self.publish_command(self.topics['control_image_capture'], command)
+        if success:
+            self.debug_print(f"[IMAGE] Capture request sent: {request_id} ({resolution})")
+            return request_id
+        else:
+            self.debug_print(f"[IMAGE] Failed to send capture request")
+            return None
+    
     def _on_connect(self, client, userdata, flags, reason_code, properties):
         """Callback for MQTT connection"""
         if reason_code == 0:
@@ -239,6 +259,10 @@ class MQTTClient:
                     continue  # Don't subscribe to control topics
                 client.subscribe(topic)
                 self.debug_print(f"  Subscribed to {topic}")
+            
+            # Subscribe to image response topic separately (it's a response, not status)
+            client.subscribe(self.topics['response_image_capture'])
+            self.debug_print(f"  Subscribed to {self.topics['response_image_capture']}")
             
             # Notify connection callbacks
             if 'connect' in self._connection_callbacks:

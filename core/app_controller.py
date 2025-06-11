@@ -17,6 +17,7 @@ class ApplicationController:
     def __init__(self, debug: bool = False):
         self.debug_mode = debug
         self.cleanup_done = False  # Flag to prevent multiple cleanup calls
+        self._shutting_down = False  # Flag to prevent multiple signal handling
         
         # Initialize core components
         self.config_manager = ConfigManager()
@@ -41,6 +42,9 @@ class ApplicationController:
         # Setup MQTT callbacks
         self._setup_mqtt_callbacks()
         
+        # Setup image capture callback
+        self.message_handlers.set_image_capture_callback(self._handle_image_capture_response)
+        
         # Setup signal handlers for graceful shutdown
         self._setup_signal_handlers()
         
@@ -62,7 +66,8 @@ class ApplicationController:
             'reconnect': self._reconnect,
             'disconnect': self._disconnect,
             'change_robot_ip': self._change_robot_ip,
-            'is_mqtt_connected': self._is_mqtt_connected
+            'is_mqtt_connected': self._is_mqtt_connected,
+            'request_image_capture': self._request_image_capture
         }
     
     def _setup_mqtt_callbacks(self):
@@ -83,6 +88,12 @@ class ApplicationController:
     def _setup_signal_handlers(self):
         """Set up signal handlers for graceful shutdown"""
         def signal_handler(signum, frame):
+            # Prevent multiple signal handling
+            if hasattr(self, '_shutting_down') and self._shutting_down:
+                print("🔄 Already shutting down, ignoring signal...")
+                return
+            
+            self._shutting_down = True
             signal_name = signal.Signals(signum).name
             print(f"\n🚨 Received {signal_name} signal - initiating immediate shutdown...")
             self._force_shutdown()
@@ -96,19 +107,21 @@ class ApplicationController:
         try:
             print("✅ Force shutdown initiated")
             
-            # Stop GUI
+            # Stop GUI first - this will exit the tkinter mainloop
             if hasattr(self, 'gui_manager'):
                 self.gui_manager.stop()
             
-            # Stop MQTT
+            # Stop MQTT with timeout
             if hasattr(self, 'mqtt_client'):
-                self.mqtt_client.graceful_disconnect()
+                self.mqtt_client.disconnect()  # Use fast disconnect instead of graceful
             
             print("✅ Force shutdown complete")
         except Exception as e:
             print(f"⚠️ Shutdown error (ignored): {e}")
         finally:
-            sys.exit(0)
+            # Import os for force exit
+            import os
+            os._exit(0)  # Force exit without cleanup
     
     # MQTT Event Handlers
     def _on_mqtt_connect(self, success: bool):
@@ -161,6 +174,54 @@ class ApplicationController:
         self.mqtt_client.send_camera_command('toggle_camera')
         if self.debug_mode:
             print("[APP] Camera toggled")
+    
+    def _request_image_capture(self, resolution: str = "high"):
+        """Request image capture from robot"""
+        if not self.mqtt_client.is_connected():
+            messagebox.showwarning("Not Connected", "Not connected to robot")
+            return
+        
+        request_id = self.mqtt_client.send_image_capture_request(resolution)
+        if request_id:
+            # Store the request ID for tracking if needed
+            if self.debug_mode:
+                print(f"[APP] Image capture requested: {request_id} ({resolution})")
+        else:
+            messagebox.showerror("Image Capture Error", "Failed to send image capture request")
+    
+    def _handle_image_capture_response(self, data: Dict[str, Any]):
+        """Handle image capture response from robot"""
+        try:
+            success = data.get('success', False)
+            request_id = data.get('request_id', 'unknown')
+            
+            if success:
+                image_data = data.get('image_data')
+                if image_data:
+                    # Update GUI with successful image
+                    self.gui_manager.update_image_display(image_data, success=True)
+                    if self.debug_mode:
+                        image_size = data.get('image_size', 'unknown size')
+                        resolution = data.get('resolution', 'unknown')
+                        print(f"[APP] Image received: {request_id} ({image_size}, {resolution})")
+                else:
+                    # Success but no image data
+                    error_msg = "No image data received"
+                    self.gui_manager.update_image_display(None, success=False, error_message=error_msg)
+                    if self.debug_mode:
+                        print(f"[APP] Image capture successful but no data: {request_id}")
+            else:
+                # Failed capture
+                error_msg = data.get('error', 'Image capture failed')
+                self.gui_manager.update_image_display(None, success=False, error_message=error_msg)
+                if self.debug_mode:
+                    print(f"[APP] Image capture failed: {request_id} - {error_msg}")
+                    
+        except Exception as e:
+            error_msg = f"Error processing image response: {e}"
+            self.gui_manager.update_image_display(None, success=False, error_message=error_msg)
+            if self.debug_mode:
+                print(f"[APP] Image response processing error: {e}")
     
     def _send_movement(self, x: float, y: float):
         """Send movement command"""
@@ -307,14 +368,20 @@ class ApplicationController:
         try:
             print("🛡️ Sending safety shutdown commands...")
             
-            # Send movement stop
-            self.mqtt_client.send_movement_command(0, 0)
+            # Send movement stop (don't wait for response)
+            try:
+                self.mqtt_client.send_movement_command(0, 0)
+            except:
+                pass
             
-            # Send emergency stop for extra safety
-            self.mqtt_client.send_system_command('emergency_stop')
+            # Send emergency stop for extra safety (don't wait for response)
+            try:
+                self.mqtt_client.send_system_command('emergency_stop')
+            except:
+                pass
             
-            # Brief pause to ensure commands are sent
-            time.sleep(0.1)
+            # Very brief pause to allow network send
+            time.sleep(0.05)
             
             print("✅ Safety shutdown commands sent")
             
@@ -354,19 +421,25 @@ class ApplicationController:
         print("🛑 Shutting down application...")
         
         try:
-            # Send safety commands first
-            self._send_safety_shutdown_commands()
+            # Send safety commands first (with timeout protection)
+            try:
+                self._send_safety_shutdown_commands()
+            except Exception as e:
+                print(f"⚠️ Safety shutdown commands failed: {e}")
             
-            # Stop GUI
-            if hasattr(self, 'gui_manager'):
-                self.gui_manager.stop()
+            # Stop GUI (with timeout protection)
+            try:
+                if hasattr(self, 'gui_manager'):
+                    self.gui_manager.stop()
+            except Exception as e:
+                print(f"⚠️ GUI stop failed: {e}")
             
-            # Disconnect MQTT (graceful disconnect includes additional safety commands)
-            if hasattr(self, 'mqtt_client'):
-                self.mqtt_client.graceful_disconnect()
-            
-            # Brief pause for cleanup
-            time.sleep(0.1)
+            # Disconnect MQTT (force disconnect for reliability)
+            try:
+                if hasattr(self, 'mqtt_client'):
+                    self.mqtt_client.disconnect()  # Use force disconnect
+            except Exception as e:
+                print(f"⚠️ MQTT disconnect failed: {e}")
             
             print("✅ Application cleanup complete")
             

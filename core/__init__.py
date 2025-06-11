@@ -8,10 +8,9 @@ Contains configuration, state management, and application controller
 
 from .config_manager import ConfigManager
 from .robot_state import RobotState
-from .app_controller import ApplicationController
+# ApplicationController has complex dependencies, import directly when needed
 
 __all__ = [
     'ConfigManager',
-    'RobotState',
-    'ApplicationController'
+    'RobotState'
 ] 

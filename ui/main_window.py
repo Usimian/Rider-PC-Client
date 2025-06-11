@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from typing import Dict, Callable, Any
 from .status_widgets import BatteryWidget, ControllerWidget, SpeedWidget, CPUWidget, StatusBar
-from .control_panels import IMUPanel, FeaturesPanel, MovementPanel
+from .control_panels import IMUPanel, FeaturesPanel, MovementPanel, ImageDisplayPanel
 
 class MainWindow:
     def __init__(self, broker_host: str, callbacks: Dict[str, Callable], debug: bool = False):
@@ -20,7 +20,7 @@ class MainWindow:
         """Setup the main window"""
         self.root = tk.Tk()
         self.root.title(f"Rider Robot PC Client - {self.broker_host}")
-        self.root.geometry("1200x800")
+        self.root.geometry("1400x1150")
         self.root.configure(bg='#2b2b2b')  # Modern dark theme
         
         # Configure root window to use grid with proper weights (key for resizing!)
@@ -30,7 +30,7 @@ class MainWindow:
         
         # Force enable resizing immediately after window creation
         self.root.resizable(width=True, height=True)
-        self.root.minsize(width=800, height=600)
+        self.root.minsize(width=1000, height=700)
         self.root.maxsize(width=2000, height=1500)  # Set reasonable maximum size
     
     def create_widgets(self):
@@ -44,7 +44,9 @@ class MainWindow:
         main_container.grid(row=1, column=0, sticky="nsew", padx=15, pady=15)
         
         # Configure main container grid weights for proper resizing
-        main_container.grid_rowconfigure(1, weight=1)  # Middle row (IMU/Features) expands
+        main_container.grid_rowconfigure(0, weight=0)  # Top row (status cards) - fixed height
+        main_container.grid_rowconfigure(1, weight=0)  # Middle row (IMU/Features) - fixed height
+        main_container.grid_rowconfigure(2, weight=1)  # Bottom row (Robot Control/Camera) - expandable
         main_container.grid_columnconfigure(0, weight=1)
         
         # Top row - Status cards
@@ -95,16 +97,16 @@ class MainWindow:
     def create_middle_row(self, parent):
         """Create the middle row with IMU and features panels"""
         middle_row = tk.Frame(parent, bg='#2b2b2b')
-        middle_row.grid(row=1, column=0, sticky="nsew", pady=(0, 15))
+        middle_row.grid(row=1, column=0, sticky="ew", pady=(0, 15))
         
-        # Configure middle row for resizing
-        middle_row.grid_rowconfigure(0, weight=1)
+        # Configure middle row for fixed height panels
+        middle_row.grid_rowconfigure(0, weight=0)  # Don't expand vertically
         middle_row.grid_columnconfigure(0, weight=1)
         middle_row.grid_columnconfigure(1, weight=1)
         
         # IMU Data Panel (Left)
         self.imu_panel = IMUPanel(middle_row)
-        self.imu_panel.get_widget().grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        self.imu_panel.get_widget().grid(row=0, column=0, sticky="ew", padx=(0, 10))
         
         # Robot Features Panel (Right)
         feature_callbacks = {
@@ -113,10 +115,20 @@ class MainWindow:
             'toggle_camera': self.callbacks.get('toggle_camera', lambda: None)
         }
         self.features_panel = FeaturesPanel(middle_row, feature_callbacks)
-        self.features_panel.get_widget().grid(row=0, column=1, sticky="nsew")
+        self.features_panel.get_widget().grid(row=0, column=1, sticky="ew")
     
     def create_bottom_row(self, parent):
-        """Create the bottom row with movement controls"""
+        """Create the bottom row with robot controls and image display"""
+        # Create bottom row container
+        bottom_row = tk.Frame(parent, bg='#2b2b2b')
+        bottom_row.grid(row=2, column=0, sticky="nsew", pady=(0, 0))
+        
+        # Configure bottom row grid - movement panel should not expand, image panel should
+        bottom_row.grid_rowconfigure(0, weight=1)
+        bottom_row.grid_columnconfigure(0, weight=0)  # Robot control column - fixed size
+        bottom_row.grid_columnconfigure(1, weight=1)  # Image display column - expandable
+        
+        # Robot Control Panel (Left side - fixed width to fit controls)
         movement_callbacks = {
             'move': self.callbacks.get('send_movement', lambda x, y: None),
             'emergency_stop': self.callbacks.get('emergency_stop', lambda: None),
@@ -124,8 +136,13 @@ class MainWindow:
             'reboot_pi': self.callbacks.get('reboot_pi', lambda: None),
             'poweroff_pi': self.callbacks.get('poweroff_pi', lambda: None)
         }
-        self.movement_panel = MovementPanel(parent, movement_callbacks)
-        self.movement_panel.get_widget().grid(row=2, column=0, sticky="ew")
+        self.movement_panel = MovementPanel(bottom_row, movement_callbacks)
+        self.movement_panel.get_widget().grid(row=0, column=0, sticky="ns", padx=(0, 15))
+        
+        # Image Display Panel (Right side - expandable)
+        image_callback = self.callbacks.get('request_image_capture', lambda resolution: None)
+        self.image_panel = ImageDisplayPanel(bottom_row, image_callback)
+        self.image_panel.get_widget().grid(row=0, column=1, sticky="nsew")
     
     def create_menu(self):
         """Create menu bar"""
@@ -232,4 +249,8 @@ class MainWindow:
     
     def update_cpu_data(self, data: Dict[str, float]):
         """Update CPU data display"""
-        self.cpu_widget.update_cpu_data(data) 
+        self.cpu_widget.update_cpu_data(data)
+    
+    def update_image_display(self, image_data=None, success=True, error_message=None):
+        """Update image display"""
+        self.image_panel.update_image(image_data, success, error_message) 

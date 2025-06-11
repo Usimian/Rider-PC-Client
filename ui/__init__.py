@@ -6,13 +6,12 @@ UI package for Rider Robot PC Client
 Contains all GUI components and widgets
 """
 
-from .gui_manager import GUIManager
+# GUIManager has complex dependencies, import directly when needed
 from .main_window import MainWindow
 from .status_widgets import BatteryWidget, ControllerWidget, SpeedWidget, CPUWidget, StatusBar
-from .control_panels import IMUPanel, FeaturesPanel, MovementPanel
+from .control_panels import IMUPanel, FeaturesPanel, MovementPanel, ImageDisplayPanel
 
 __all__ = [
-    'GUIManager',
     'MainWindow', 
     'BatteryWidget',
     'ControllerWidget',
@@ -21,5 +20,6 @@ __all__ = [
     'StatusBar',
     'IMUPanel',
     'FeaturesPanel',
-    'MovementPanel'
+    'MovementPanel',
+    'ImageDisplayPanel'
 ] 

@@ -143,6 +143,13 @@ class GUIManager:
         
         self.main_window.schedule_update(_update)
     
+    def update_image_display(self, image_data=None, success=True, error_message=None):
+        """Update image display"""
+        def _update():
+            self.main_window.update_image_display(image_data, success, error_message)
+        
+        self.main_window.schedule_update(_update)
+    
     def set_close_callback(self, callback: Callable):
         """Set callback for window close event"""
         self.main_window.set_close_callback(callback)
@@ -159,11 +166,14 @@ class GUIManager:
         # Give the GUI thread a moment to stop
         if self.gui_thread and self.gui_thread.is_alive():
             try:
-                self.gui_thread.join(timeout=0.5)
+                self.gui_thread.join(timeout=0.2)  # Shorter timeout for force stop
             except:
                 pass  # Don't wait too long
         
-        # Quit and destroy GUI
-        self.main_window.quit()
-        self.main_window.destroy()
+        # Force quit and destroy GUI immediately
+        try:
+            self.main_window.quit()
+            self.main_window.destroy()
+        except:
+            pass  # GUI might already be destroyed
         print("🖥️ GUI stopped") 
