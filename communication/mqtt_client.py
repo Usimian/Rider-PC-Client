@@ -102,9 +102,6 @@ class MQTTClient:
             self.send_emergency_stop()
             self.send_movement_stop()
             
-            # Brief pause to allow messages to be sent
-            time.sleep(0.2)
-            
             print("📡 Disconnecting from MQTT broker...")
             
             # Stop the network loop

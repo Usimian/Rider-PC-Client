@@ -372,7 +372,7 @@ class ImageDisplayPanel:
                 
                 # Calculate image size for status
                 size_kb = len(img_bytes) / 1024
-                self.status_label.config(text=f"📷 Image loaded ({size_kb:.1f}KB, {img_width}x{img_height})")
+                self.status_label.config(text=f"📷 Image: ({size_kb:.1f}KB, {img_width}x{img_height})")
                 
             except Exception as e:
                 self.image_label.config(

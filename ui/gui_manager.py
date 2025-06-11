@@ -43,7 +43,7 @@ class GUIManager:
         self.gui_thread = threading.Thread(target=self._gui_update_loop, daemon=True)
         self.gui_thread.start()
         if self.debug_mode:
-            print("🧵 GUI update thread started")
+            print("🧵 GUI update thread started (daemon)")
     
     def _gui_update_loop(self):
         """GUI update loop running in separate thread"""
@@ -159,21 +159,24 @@ class GUIManager:
         self.main_window.mainloop()
     
     def stop(self):
-        """Stop the GUI manager"""
+        """Stop the GUI manager - immediate shutdown"""
         print("🛑 Stopping GUI operations...")
         self.gui_running = False
         
-        # Give the GUI thread a moment to stop
+        # Don't wait for GUI thread - just mark it for stopping
         if self.gui_thread and self.gui_thread.is_alive():
-            try:
-                self.gui_thread.join(timeout=0.2)  # Shorter timeout for force stop
-            except:
-                pass  # Don't wait too long
+            # Don't join - let it die naturally or be killed by process exit
+            pass
         
-        # Force quit and destroy GUI immediately
+        # Force quit and destroy GUI immediately without any exception handling delays
         try:
             self.main_window.quit()
+        except:
+            pass
+        
+        try:
             self.main_window.destroy()
         except:
-            pass  # GUI might already be destroyed
+            pass
+            
         print("🖥️ GUI stopped") 

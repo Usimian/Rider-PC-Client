@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # coding=utf-8
 
-# Rider Robot PC Client - Standalone Version (Refactored)
-# MQTT-based remote control and monitoring client for PC (AMD64)
-# This version uses a clean layer-based architecture
+# Rider Robot PC Client - Standalone Version
+# MQTT-based remote control and monitoring client for the XGO Rider Robot
 # Marc Wester
 
 import argparse
@@ -36,28 +35,15 @@ def main():
     finally:
         if app_controller:
             try:
-                # Try cleanup with timeout protection
-                def cleanup_timeout_handler(signum, frame):
-                    print("⏰ Cleanup timeout - forcing exit...")
-                    sys.exit(0)
-                
-                # Set 3-second timeout for cleanup
-                signal.signal(signal.SIGALRM, cleanup_timeout_handler)
-                signal.alarm(3)
-                
+                # Immediate cleanup without timeout - timeout handling is now in window close handler
                 app_controller.cleanup()
-                
-                # Cancel timeout if cleanup succeeded
-                signal.alarm(0)
-                
             except Exception as e:
                 print(f"⚠️ Final cleanup error: {e}")
                 print("🚪 Forcing exit...")
-                sys.exit(0)
+                import os
+                os._exit(0)
         
-        # Only print this message if cleanup wasn't already done
-        if not app_controller or not hasattr(app_controller, 'cleanup_done') or not app_controller.cleanup_done:
-            print("👋 Application terminated")
+        print("👋 Application terminated")
 
 if __name__ == "__main__":
     main() 

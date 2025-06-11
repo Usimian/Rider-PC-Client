@@ -32,6 +32,10 @@ class MainWindow:
         self.root.resizable(width=True, height=True)
         self.root.minsize(width=1000, height=700)
         self.root.maxsize(width=2000, height=1500)  # Set reasonable maximum size
+        
+        # Set aggressive window closing behavior
+        # This prevents the window from being closed normally - all closes go through our handler
+        self.root.protocol("WM_DELETE_WINDOW", self._emergency_close)
     
     def create_widgets(self):
         """Create all GUI widgets"""
@@ -181,6 +185,7 @@ class MainWindow:
     
     def set_close_callback(self, callback: Callable):
         """Set callback for window close event"""
+        # Override the emergency close handler with the provided callback
         self.root.protocol("WM_DELETE_WINDOW", callback)
     
     def mainloop(self):
@@ -253,4 +258,9 @@ class MainWindow:
     
     def update_image_display(self, image_data=None, success=True, error_message=None):
         """Update image display"""
-        self.image_panel.update_image(image_data, success, error_message) 
+        self.image_panel.update_image(image_data, success, error_message)
+
+    def _emergency_close(self):
+        """Emergency close handler"""
+        print("🚨 Emergency close requested...")
+        self.quit() 

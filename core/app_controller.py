@@ -338,55 +338,72 @@ class ApplicationController:
         return self.mqtt_client.is_connected()
     
     def _window_close_handler(self):
-        """Handle window close event with timeout protection"""
-        print("🪟 Window close requested...")
+        """Handle window close event - immediate and aggressive shutdown"""
+        print("🪟 Window close requested - forcing immediate termination...")
         
-        # Send safety commands before shutdown
-        self._send_safety_shutdown_commands()
+        # Prevent multiple close events
+        if hasattr(self, '_closing') and self._closing:
+            return
+        self._closing = True
         
-        # Set up timeout protection for hanging cleanup
+        # Set up backup force kill after 1 second
         import threading
+        import time
+        import signal
+        def backup_force_kill():
+            time.sleep(1.0)  # Give 1 second max
+            print("⏰ Backup force kill activated...")
+            # Try multiple ways to kill the process
+            try:
+                import os
+                os.kill(os.getpid(), signal.SIGKILL)  # Force kill signal
+            except:
+                os._exit(1)  # Fallback to _exit
         
-        def force_exit():
-            time.sleep(3)  # Give 3 seconds for normal cleanup (increased for safety commands)
-            print("⏰ Cleanup timeout - forcing exit...")
+        backup_thread = threading.Thread(target=backup_force_kill, daemon=True)
+        backup_thread.start()
+        
+        # Start immediate shutdown in a separate thread to avoid blocking
+        def immediate_shutdown():
+            try:
+                # Try to send safety commands quickly
+                self._send_safety_shutdown_commands()
+            except:
+                pass  # Don't let safety commands block shutdown
+            
+            print("🚪 Forcing immediate process termination...")
             import os
-            os._exit(0)
+            os._exit(0)  # Force immediate termination
         
-        # Start timeout thread
-        timeout_thread = threading.Thread(target=force_exit, daemon=True)
-        timeout_thread.start()
+        # Start shutdown thread and return immediately
+        shutdown_thread = threading.Thread(target=immediate_shutdown, daemon=True)
+        shutdown_thread.start()
         
-        # Perform cleanup
-        self.cleanup()
-
+        # Also try to destroy the window immediately in current thread
+        try:
+            self.gui_manager.main_window.root.destroy()
+        except:
+            pass
+    
     def _send_safety_shutdown_commands(self):
-        """Send safety commands before shutdown to prevent robot corruption"""
+        """Send safety commands before shutdown - ultra-fast version"""
         if not hasattr(self, 'mqtt_client') or not self.mqtt_client.is_connected():
             return
         
         try:
             print("🛡️ Sending safety shutdown commands...")
             
-            # Send movement stop (don't wait for response)
+            # Send both commands without any error handling to maximize speed
             try:
                 self.mqtt_client.send_movement_command(0, 0)
-            except:
-                pass
-            
-            # Send emergency stop for extra safety (don't wait for response)
-            try:
                 self.mqtt_client.send_system_command('emergency_stop')
             except:
-                pass
-            
-            # Very brief pause to allow network send
-            time.sleep(0.05)
+                pass  # Ignore all errors - speed is critical
             
             print("✅ Safety shutdown commands sent")
             
-        except Exception as e:
-            print(f"⚠️ Error sending safety commands: {e}")
+        except Exception:
+            pass  # Ignore all errors to prevent blocking
     
     def run(self):
         """Run the application"""
@@ -410,7 +427,7 @@ class ApplicationController:
             self.cleanup()
     
     def cleanup(self):
-        """Cleanup resources"""
+        """Cleanup resources - immediate shutdown version"""
         # Prevent multiple cleanup calls
         if self.cleanup_done:
             if self.debug_mode:
@@ -421,20 +438,20 @@ class ApplicationController:
         print("🛑 Shutting down application...")
         
         try:
-            # Send safety commands first (with timeout protection)
+            # Send safety commands first (with minimal delay)
             try:
                 self._send_safety_shutdown_commands()
             except Exception as e:
                 print(f"⚠️ Safety shutdown commands failed: {e}")
             
-            # Stop GUI (with timeout protection)
+            # Stop GUI immediately
             try:
                 if hasattr(self, 'gui_manager'):
                     self.gui_manager.stop()
             except Exception as e:
                 print(f"⚠️ GUI stop failed: {e}")
             
-            # Disconnect MQTT (force disconnect for reliability)
+            # Force disconnect MQTT immediately
             try:
                 if hasattr(self, 'mqtt_client'):
                     self.mqtt_client.disconnect()  # Use force disconnect
