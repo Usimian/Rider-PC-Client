@@ -143,9 +143,9 @@ class MovementPanel:
         content = tk.Frame(self.panel, bg='#3c3c3c')
         content.pack(padx=20, pady=15)
         
-        # System controls (Left side)
+        # System controls (Top section)
         system_frame = tk.Frame(content, bg='#3c3c3c')
-        system_frame.pack(side='left', padx=(0, 40))
+        system_frame.pack(pady=(0, 20))
         
         tk.Label(system_frame, text="System Controls", font=('Arial', 11, 'bold'), 
                 bg='#3c3c3c', fg='white').pack(pady=(0, 10))
@@ -173,9 +173,9 @@ class MovementPanel:
                  font=('Arial', 10, 'bold'), bg='#9c27b0', fg='white', 
                  activebackground='#7b1fa2', width=18, pady=8).pack()
         
-        # Movement controls (Right side)
+        # Movement controls (Bottom section)
         movement_frame = tk.Frame(content, bg='#3c3c3c')
-        movement_frame.pack(side='right')
+        movement_frame.pack()
         
         tk.Label(movement_frame, text="Movement Controls", font=('Arial', 11, 'bold'), 
                 bg='#3c3c3c', fg='white').pack(pady=(0, 10))
@@ -235,7 +235,7 @@ class ImageDisplayPanel:
         
         self.resolution_var = tk.StringVar(value="high")
         resolution_combo = ttk.Combobox(resolution_frame, textvariable=self.resolution_var, 
-                                       values=["high", "low"], state="readonly", width=8)
+                                       values=["high", "low", "tiny"], state="readonly", width=8)
         resolution_combo.pack(side='left', padx=(0, 10))
         
         # Save screenshot button
@@ -244,6 +244,21 @@ class ImageDisplayPanel:
                             activebackground='#666666', width=8,
                             command=self._save_image)
         save_btn.pack(side='right')
+        
+        # Load image button (to the left of Save)
+        load_btn = tk.Button(controls_frame, text="📂 Load", 
+                            font=('Arial', 9), bg='#555555', fg='white', 
+                            activebackground='#666666', width=8,
+                            command=self._load_image)
+        load_btn.pack(side='right', padx=(0, 5))
+
+        # Video feed button (to the left of Load)
+        self.video_active = False
+        self.video_btn = tk.Button(controls_frame, text="🎥 Video", 
+                            font=('Arial', 9), bg='#555555', fg='white', 
+                            activebackground='#666666', width=8,
+                            command=self._toggle_video_feed)
+        self.video_btn.pack(side='right', padx=(0, 5))
         
         # Refresh button
         refresh_btn = tk.Button(controls_frame, text="🔄 Refresh", 
@@ -267,6 +282,7 @@ class ImageDisplayPanel:
     
     def _refresh_image(self):
         """Refresh camera image by requesting new capture"""
+        self._stop_video_feed()
         if self.image_callback:
             self.status_label.config(text="🔄 Requesting image capture...")
             resolution = self.resolution_var.get()
@@ -299,6 +315,52 @@ class ImageDisplayPanel:
         except Exception as e:
             messagebox.showerror("Save Error", f"Failed to save image: {e}")
             self.status_label.config(text="❌ Failed to save image")
+    
+    def _load_image(self):
+        """Prompt user to load a jpg image from the file system and display it"""
+        self._stop_video_feed()
+        try:
+            filename = filedialog.askopenfilename(
+                filetypes=[("JPEG files", "*.jpg;*.jpeg"), ("All files", "*.*")],
+                title="Load Image"
+            )
+            if filename:
+                pil_image = Image.open(filename)
+                # Convert to JPEG and base64 encode for consistency
+                with io.BytesIO() as output:
+                    pil_image.convert('RGB').save(output, format='JPEG')
+                    img_bytes = output.getvalue()
+                    image_data = base64.b64encode(img_bytes).decode('utf-8')
+                self.update_image(image_data, success=True)
+                self.status_label.config(text=f"📂 Loaded image: {filename}")
+                self.panel.after(3000, lambda: self.status_label.config(text="📶 Image ready"))
+        except Exception as e:
+            messagebox.showerror("Load Error", f"Failed to load image: {e}")
+            self.status_label.config(text="❌ Failed to load image")
+    
+    def _toggle_video_feed(self):
+        if not self.video_active:
+            self.video_active = True
+            self.video_btn.config(text="⏹ Stop")
+            self.status_label.config(text="🎥 Video feed started (tiny)")
+            self._video_request_pending = False
+            self._start_video_loop()
+        else:
+            self._stop_video_feed()
+
+    def _start_video_loop(self):
+        if self.video_active and self.image_callback and not getattr(self, '_video_request_pending', False):
+            self._video_request_pending = True
+            resolution = self.resolution_var.get()
+            self.image_callback(resolution)
+
+    def _stop_video_feed(self):
+        if self.video_active:
+            self.video_active = False
+            self._video_request_pending = False
+            self.video_btn.config(text="🎥 Video")
+            self.status_label.config(text="📶 Video feed stopped")
+            self.panel.after(2000, lambda: self.status_label.config(text="📶 Ready to capture image"))
     
     def _on_resize(self, event):
         """Handle resize events to rescale image"""
@@ -383,6 +445,12 @@ class ImageDisplayPanel:
                 self.status_label.config(text=f"❌ Image load error: {e}")
                 self.current_image = None
                 self.current_image_data = None
+        
+        # At the end of update_image, if video is active, schedule the next frame
+        if getattr(self, 'video_active', False) and getattr(self, '_video_request_pending', False):
+            self._video_request_pending = False
+            # Schedule next request immediately (or add a small delay if desired)
+            self.panel.after(1, self._start_video_loop)
     
     def get_widget(self):
         """Get the main widget"""
