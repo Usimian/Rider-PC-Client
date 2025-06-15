@@ -254,16 +254,15 @@ class LLMPanel:
     
     def _clear_chat(self):
         """Clear chat history"""
-        if messagebox.askyesno("Clear Chat", "Clear all conversation history?"):
-            self.chat_display.config(state=tk.NORMAL)
-            self.chat_display.delete("1.0", tk.END)
-            self.chat_display.config(state=tk.DISABLED)
-            
-            # Clear LLM conversation history
-            if self.llm_callbacks.get('clear_conversation'):
-                self.llm_callbacks['clear_conversation']()
-            
-            self._add_system_message("Conversation cleared. Ready for new questions!")
+        self.chat_display.config(state=tk.NORMAL)
+        self.chat_display.delete("1.0", tk.END)
+        self.chat_display.config(state=tk.DISABLED)
+        
+        # Clear LLM conversation history
+        if self.llm_callbacks.get('clear_conversation'):
+            self.llm_callbacks['clear_conversation']()
+        
+        self._add_system_message("Conversation cleared. Ready for new questions!")
     
     def _show_settings(self):
         """Show LLM settings dialog"""
