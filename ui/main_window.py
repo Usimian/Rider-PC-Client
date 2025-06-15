@@ -3,7 +3,7 @@
 
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
-from typing import Dict, Callable, Any
+from typing import Dict, Callable, Any, List
 from .status_widgets import BatteryWidget, ControllerWidget, SpeedWidget, CPUWidget, StatusBar
 from .control_panels import IMUPanel, FeaturesPanel, MovementPanel, ImageDisplayPanel
 
@@ -20,7 +20,7 @@ class MainWindow:
         """Setup the main window"""
         self.root = tk.Tk()
         self.root.title(f"Rider Robot PC Client - {self.broker_host}")
-        self.root.geometry("1400x1150")
+        self.root.geometry("1600x1200")
         self.root.configure(bg='#2b2b2b')  # Modern dark theme
         
         # Configure root window to use grid with proper weights (key for resizing!)
@@ -122,15 +122,16 @@ class MainWindow:
         self.features_panel.get_widget().grid(row=0, column=1, sticky="ew")
     
     def create_bottom_row(self, parent):
-        """Create the bottom row with robot controls and image display"""
+        """Create the bottom row with robot controls, image display, and LLM panel"""
         # Create bottom row container
         bottom_row = tk.Frame(parent, bg='#2b2b2b')
         bottom_row.grid(row=2, column=0, sticky="nsew", pady=(0, 0))
         
-        # Configure bottom row grid - movement panel should not expand, image panel should
+        # Configure bottom row grid - 3 columns: controls, image, LLM
         bottom_row.grid_rowconfigure(0, weight=1)
         bottom_row.grid_columnconfigure(0, weight=0)  # Robot control column - fixed size
         bottom_row.grid_columnconfigure(1, weight=1)  # Image display column - expandable
+        bottom_row.grid_columnconfigure(2, weight=1)  # LLM panel column - expandable
         
         # Robot Control Panel (Left side - fixed width to fit controls)
         movement_callbacks = {
@@ -141,12 +142,34 @@ class MainWindow:
             'poweroff_pi': self.callbacks.get('poweroff_pi', lambda: None)
         }
         self.movement_panel = MovementPanel(bottom_row, movement_callbacks)
-        self.movement_panel.get_widget().grid(row=0, column=0, sticky="ns", padx=(0, 15))
+        self.movement_panel.get_widget().grid(row=0, column=0, sticky="ns", padx=(0, 10))
         
-        # Image Display Panel (Right side - expandable)
+        # Image Display Panel (Center - expandable)
         image_callback = self.callbacks.get('request_image_capture', lambda resolution: None)
-        self.image_panel = ImageDisplayPanel(bottom_row, image_callback)
-        self.image_panel.get_widget().grid(row=0, column=1, sticky="nsew")
+        llm_callback = self.callbacks.get('llm_send_image', lambda image_data: None)
+        self.image_panel = ImageDisplayPanel(bottom_row, image_callback, llm_callback)
+        self.image_panel.get_widget().grid(row=0, column=1, sticky="nsew", padx=(0, 10))
+        
+        # LLM Panel (Right side - expandable)
+        llm_callbacks = {
+            'generate_response': self.callbacks.get('llm_generate_response', lambda prompt, use_image=True: None),
+            'set_model': self.callbacks.get('llm_set_model', lambda model: False),
+            'clear_conversation': self.callbacks.get('llm_clear_conversation', lambda: None),
+            'get_models': self.callbacks.get('llm_get_models', lambda: []),
+            'get_status': self.callbacks.get('llm_get_status', lambda: {"available": False})
+        }
+        
+        # Only create LLM panel if LLM callbacks are available
+        if self.callbacks.get('llm_generate_response'):
+            from .llm_panel import LLMPanel
+            self.llm_panel = LLMPanel(bottom_row, llm_callbacks, self.debug_mode)
+            self.llm_panel.get_widget().grid(row=0, column=2, sticky="nsew")
+        else:
+            # Create placeholder if LLM not available
+            placeholder = tk.Frame(bottom_row, bg='#2b2b2b')
+            placeholder.grid(row=0, column=2, sticky="nsew")
+            tk.Label(placeholder, text="🤖 LLM Not Available\n\nEnable LLM in config\nand restart application", 
+                    font=('Arial', 12), bg='#2b2b2b', fg='#666666', justify='center').pack(expand=True)
     
     def create_menu(self):
         """Create menu bar"""
@@ -259,6 +282,38 @@ class MainWindow:
     def update_image_display(self, image_data=None, success=True, error_message=None):
         """Update image display"""
         self.image_panel.update_image(image_data, success, error_message)
+        
+        # Also update LLM panel with image status if available
+        if hasattr(self, 'llm_panel'):
+            has_image = success and image_data is not None
+            image_info = "Ready" if has_image else "None"
+            self.llm_panel.update_image_status(has_image, image_info)
+    
+    # LLM Panel update methods
+    def update_llm_models(self, models: List[str]):
+        """Update available LLM models"""
+        if hasattr(self, 'llm_panel'):
+            self.llm_panel.update_models(models)
+    
+    def update_llm_status(self, status: str, available: bool = True):
+        """Update LLM server status"""
+        if hasattr(self, 'llm_panel'):
+            self.llm_panel.update_server_status(status, available)
+    
+    def set_llm_generating(self, is_generating: bool):
+        """Update LLM generating status"""
+        if hasattr(self, 'llm_panel'):
+            self.llm_panel.set_generating_status(is_generating)
+    
+    def add_llm_response(self, response: str):
+        """Add complete LLM response"""
+        if hasattr(self, 'llm_panel'):
+            self.llm_panel.add_complete_response(response)
+    
+    def add_llm_error(self, error: str):
+        """Add LLM error message"""
+        if hasattr(self, 'llm_panel'):
+            self.llm_panel.add_error_message(error)
 
     def _emergency_close(self):
         """Emergency close handler"""

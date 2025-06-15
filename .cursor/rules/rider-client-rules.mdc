@@ -9,3 +9,4 @@ For context, there is a copy of the server code at /home/mw/Rider-Robot-Controll
 The client-server communications protocol is MQTT.
 'MQTT_Protocol_Documentation.md located in the copy of the server code.  This shows the communications protocol.
 The application is a client for the Rider Robot server.
+When creating testing files, prefix them with "test_"

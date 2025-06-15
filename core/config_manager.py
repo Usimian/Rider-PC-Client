@@ -20,6 +20,13 @@ class ConfigManager:
                 'broker_host': '192.168.1.173',
                 'broker_port': '1883'
             }
+            self.config['llm'] = {
+                'ollama_url': 'http://localhost:11434',
+                'default_model': 'llava:7b',
+                'temperature': '0.7',
+                'max_tokens': '500',
+                'enabled': 'true'
+            }
             self.save_config()
     
     def save_config(self):
@@ -43,4 +50,60 @@ class ConfigManager:
     def set_broker_port(self, port):
         """Set MQTT broker port and save"""
         self.config.set('mqtt', 'broker_port', str(port))
+        self.save_config()
+    
+    # LLM Configuration Methods
+    def get_ollama_url(self):
+        """Get ollama server URL"""
+        return self.config.get('llm', 'ollama_url', fallback='http://localhost:11434')
+    
+    def get_llm_default_model(self):
+        """Get default LLM model"""
+        return self.config.get('llm', 'default_model', fallback='llava:7b')
+    
+    def get_llm_temperature(self):
+        """Get LLM temperature setting"""
+        return self.config.getfloat('llm', 'temperature', fallback=0.7)
+    
+    def get_llm_max_tokens(self):
+        """Get LLM max tokens setting"""
+        return self.config.getint('llm', 'max_tokens', fallback=500)
+    
+    def is_llm_enabled(self):
+        """Check if LLM features are enabled"""
+        return self.config.getboolean('llm', 'enabled', fallback=True)
+    
+    def set_ollama_url(self, url):
+        """Set ollama server URL and save"""
+        if 'llm' not in self.config:
+            self.config.add_section('llm')
+        self.config.set('llm', 'ollama_url', url)
+        self.save_config()
+    
+    def set_llm_default_model(self, model):
+        """Set default LLM model and save"""
+        if 'llm' not in self.config:
+            self.config.add_section('llm')
+        self.config.set('llm', 'default_model', model)
+        self.save_config()
+    
+    def set_llm_temperature(self, temperature):
+        """Set LLM temperature and save"""
+        if 'llm' not in self.config:
+            self.config.add_section('llm')
+        self.config.set('llm', 'temperature', str(temperature))
+        self.save_config()
+    
+    def set_llm_max_tokens(self, max_tokens):
+        """Set LLM max tokens and save"""
+        if 'llm' not in self.config:
+            self.config.add_section('llm')
+        self.config.set('llm', 'max_tokens', str(max_tokens))
+        self.save_config()
+    
+    def set_llm_enabled(self, enabled):
+        """Set LLM enabled status and save"""
+        if 'llm' not in self.config:
+            self.config.add_section('llm')
+        self.config.set('llm', 'enabled', str(enabled).lower())
         self.save_config() 

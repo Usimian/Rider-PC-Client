@@ -150,6 +150,49 @@ class GUIManager:
         
         self.main_window.schedule_update(_update)
     
+    # LLM Integration Methods
+    def handle_llm_response_chunk(self, chunk: str):
+        """Handle streaming LLM response chunk"""
+        # For now, we'll just collect chunks and display complete responses
+        # This could be enhanced for real-time streaming display
+        pass
+    
+    def handle_llm_status(self, status: str):
+        """Handle LLM status updates"""
+        def _update():
+            available = "Connected" in status or "available" in status.lower()
+            self.main_window.update_llm_status(status, available)
+        
+        self.main_window.schedule_update(_update)
+    
+    def update_llm_models(self, models):
+        """Update available LLM models"""
+        def _update():
+            self.main_window.update_llm_models(models)
+        
+        self.main_window.schedule_update(_update)
+    
+    def set_llm_generating(self, is_generating: bool):
+        """Set LLM generating status"""
+        def _update():
+            self.main_window.set_llm_generating(is_generating)
+        
+        self.main_window.schedule_update(_update)
+    
+    def add_llm_response(self, response: str):
+        """Add complete LLM response"""
+        def _update():
+            self.main_window.add_llm_response(response)
+        
+        self.main_window.schedule_update(_update)
+    
+    def add_llm_error(self, error: str):
+        """Add LLM error"""
+        def _update():
+            self.main_window.add_llm_error(error)
+        
+        self.main_window.schedule_update(_update)
+    
     def set_close_callback(self, callback: Callable):
         """Set callback for window close event"""
         self.main_window.set_close_callback(callback)

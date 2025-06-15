@@ -204,9 +204,10 @@ class MovementPanel:
         return self.panel
 
 class ImageDisplayPanel:
-    def __init__(self, parent, image_callback: Callable = None):
+    def __init__(self, parent, image_callback: Callable = None, llm_callback: Callable = None):
         self.parent = parent
         self.image_callback = image_callback  # Callback to request image from robot
+        self.llm_callback = llm_callback  # Callback to send image to LLM
         self.current_image = None  # Store current PIL Image
         self.current_image_data = None  # Store current base64 image data
         self.setup_panel()
@@ -222,7 +223,7 @@ class ImageDisplayPanel:
         controls_frame.pack(side='bottom', fill='x', padx=20, pady=(0, 15))
         
         # Image info/status
-        self.status_label = tk.Label(controls_frame, text="📶 Ready to capture image", 
+        self.status_label = tk.Label(controls_frame, text="📷 Camera", 
                                     font=('Arial', 10), bg='#3c3c3c', fg='#ffd700')
         self.status_label.pack(side='left')
         
@@ -238,34 +239,37 @@ class ImageDisplayPanel:
                                        values=["high", "low", "tiny"], state="readonly", width=8)
         resolution_combo.pack(side='left', padx=(0, 10))
         
+        # OPTIMIZED BUTTON LAYOUT - All buttons with comfortable spacing
         # Save screenshot button
         save_btn = tk.Button(controls_frame, text="💾 Save", 
                             font=('Arial', 9), bg='#555555', fg='white', 
                             activebackground='#666666', width=8,
                             command=self._save_image)
-        save_btn.pack(side='right')
-        
-        # Load image button (to the left of Save)
+        save_btn.pack(side='right', padx=(5, 0))
+
+        # Load image button
         load_btn = tk.Button(controls_frame, text="📂 Load", 
                             font=('Arial', 9), bg='#555555', fg='white', 
                             activebackground='#666666', width=8,
                             command=self._load_image)
-        load_btn.pack(side='right', padx=(0, 5))
-
-        # Video feed button (to the left of Load)
+        load_btn.pack(side='right', padx=(5, 5))
+        
+        # Video feed button
         self.video_active = False
         self.video_btn = tk.Button(controls_frame, text="🎥 Video", 
                             font=('Arial', 9), bg='#555555', fg='white', 
                             activebackground='#666666', width=8,
                             command=self._toggle_video_feed)
-        self.video_btn.pack(side='right', padx=(0, 5))
+        self.video_btn.pack(side='right', padx=(5, 5))
         
-        # Refresh button
-        refresh_btn = tk.Button(controls_frame, text="🔄 Refresh", 
-                               font=('Arial', 9), bg='#555555', fg='white', 
-                               activebackground='#666666', width=10,
+
+        
+        # Capture button - MOST IMPORTANT for single image capture
+        refresh_btn = tk.Button(controls_frame, text="🔄 Capture", 
+                               font=('Arial', 9, 'bold'), bg='#4CAF50', fg='white', 
+                               activebackground='#45a049', width=10,
                                command=self._refresh_image)
-        refresh_btn.pack(side='right', padx=(0, 5))
+        refresh_btn.pack(side='right', padx=(5, 5))
         
         # Main image display area - pack this AFTER controls to fill remaining space
         self.image_frame = tk.Frame(self.panel, bg='#2b2b2b', relief='sunken', bd=2)
@@ -284,7 +288,7 @@ class ImageDisplayPanel:
         """Refresh camera image by requesting new capture"""
         self._stop_video_feed()
         if self.image_callback:
-            self.status_label.config(text="🔄 Requesting image capture...")
+            self.status_label.config(text="🔄 Image capture...")
             resolution = self.resolution_var.get()
             self.image_callback(resolution)
         else:
@@ -360,7 +364,9 @@ class ImageDisplayPanel:
             self._video_request_pending = False
             self.video_btn.config(text="🎥 Video")
             self.status_label.config(text="📶 Video feed stopped")
-            self.panel.after(2000, lambda: self.status_label.config(text="📶 Ready to capture image"))
+            self.panel.after(2000, lambda: self.status_label.config(text="📷 Camera"))
+    
+
     
     def _on_resize(self, event):
         """Handle resize events to rescale image"""
@@ -391,7 +397,7 @@ class ImageDisplayPanel:
                 text="📷\n\nCamera feed will appear here\n\nNo image available",
                 compound='center'
             )
-            self.status_label.config(text="📶 Ready to capture image")
+            self.status_label.config(text="📷 Camera")
             self.current_image = None
             self.current_image_data = None
         else:
@@ -434,7 +440,16 @@ class ImageDisplayPanel:
                 
                 # Calculate image size for status
                 size_kb = len(img_bytes) / 1024
-                self.status_label.config(text=f"📷 Image: ({size_kb:.1f}KB, {img_width}x{img_height})")
+                self.status_label.config(text=f"📷({img_width}x{img_height})")
+                
+                # AUTOMATICALLY send image to LLM system when captured
+                if self.llm_callback and image_data:
+                    try:
+                        self.llm_callback(image_data)
+                        if hasattr(self, 'debug_mode') and self.debug_mode:
+                            print("🤖 Image automatically sent to LLM system")
+                    except Exception as llm_error:
+                        print(f"⚠️ Failed to send image to LLM: {llm_error}")
                 
             except Exception as e:
                 self.image_label.config(
