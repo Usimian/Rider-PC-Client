@@ -198,12 +198,13 @@ class CPUWidget:
                                        bg='#3c3c3c', fg='#cccccc', width=6, anchor='e')
         self.cpu_value_label.pack(side='left')
         
-        self.cpu_canvas = tk.Canvas(cpu_frame, width=80, height=24, bg='#2b2b2b', 
+        # Make canvas expand to fill most of available space
+        self.cpu_canvas = tk.Canvas(cpu_frame, height=24, bg='#2b2b2b', 
                                    highlightthickness=0, bd=0)
-        self.cpu_canvas.pack(side='left', padx=(5, 0))
+        self.cpu_canvas.pack(side='left', padx=(5, 5), fill='x', expand=True)
         
         tk.Label(cpu_frame, text="CPU", font=('Arial', 8), 
-                bg='#3c3c3c', fg='#87ceeb').pack(side='left', padx=(5, 0))
+                bg='#3c3c3c', fg='#87ceeb').pack(side='left')
         
         # Load row
         load_frame = tk.Frame(self.card, bg='#3c3c3c')
@@ -213,12 +214,13 @@ class CPUWidget:
                                         bg='#3c3c3c', fg='#cccccc', width=6, anchor='e')
         self.load_value_label.pack(side='left')
         
-        self.load_canvas = tk.Canvas(load_frame, width=80, height=24, bg='#2b2b2b', 
+        # Make canvas expand to fill most of available space
+        self.load_canvas = tk.Canvas(load_frame, height=24, bg='#2b2b2b', 
                                     highlightthickness=0, bd=0)
-        self.load_canvas.pack(side='left', padx=(5, 0))
+        self.load_canvas.pack(side='left', padx=(5, 5), fill='x', expand=True)
         
         tk.Label(load_frame, text="Load", font=('Arial', 8), 
-                bg='#3c3c3c', fg='#87ceeb').pack(side='left', padx=(5, 0))
+                bg='#3c3c3c', fg='#87ceeb').pack(side='left')
         
         # Draw initial empty bars
         self.draw_cpu_bar(0)
@@ -228,22 +230,28 @@ class CPUWidget:
         """Draw CPU percentage bar"""
         self.cpu_canvas.delete("all")
         
-        # Bar dimensions
-        bar_width = 76
-        bar_height = 20
-        x1 = 2
-        y1 = 2
-        x2 = x1 + bar_width
-        y2 = y1 + bar_height
+        # Get current canvas width dynamically
+        self.cpu_canvas.update_idletasks()
+        canvas_width = self.cpu_canvas.winfo_width()
+        canvas_height = self.cpu_canvas.winfo_height()
         
-        # Draw background bar
-        self.cpu_canvas.create_rectangle(x1, y1, x2, y2, outline='white', width=1, fill='#2b2b2b')
+        # Use the actual full canvas width without any limitations
+        # Remove all width restrictions to use complete available space
         
-        # Draw fill based on CPU percentage
+        # Draw fill based on CPU percentage directly on canvas background
         if cpu_percent > 0:
-            fill_width = max(1, int(bar_width * cpu_percent / 100))
-            fill_x2 = x1 + fill_width
+            # Use complete actual canvas dimensions for fill area
+            fill_x1 = 0
+            fill_y1 = 0
+            fill_width = int(canvas_width * cpu_percent / 100)
+            fill_x2 = fill_x1 + fill_width
+            fill_y2 = canvas_height
             
+            # Ensure minimum width if there's any value
+            if fill_width < 1 and cpu_percent > 0:
+                fill_width = 1
+                fill_x2 = fill_x1 + fill_width
+                
             # Color based on CPU usage
             if cpu_percent >= 80:
                 fill_color = '#f44336'  # Red - high load
@@ -252,31 +260,39 @@ class CPUWidget:
             else:
                 fill_color = '#4caf50'  # Green - normal load
             
-            self.cpu_canvas.create_rectangle(x1 + 1, y1 + 1, fill_x2, y2 - 1, 
+            # Draw the fill rectangle directly on canvas using full width
+            self.cpu_canvas.create_rectangle(fill_x1, fill_y1, fill_x2, fill_y2, 
                                            outline='', fill=fill_color)
     
     def draw_load_bar(self, load_value):
         """Draw load bar (0-4 scale)"""
         self.load_canvas.delete("all")
         
-        # Bar dimensions
-        bar_width = 76
-        bar_height = 20
-        x1 = 2
-        y1 = 2
-        x2 = x1 + bar_width
-        y2 = y1 + bar_height
+        # Get current canvas width dynamically
+        self.load_canvas.update_idletasks()
+        canvas_width = self.load_canvas.winfo_width()
+        canvas_height = self.load_canvas.winfo_height()
         
-        # Draw background bar
-        self.load_canvas.create_rectangle(x1, y1, x2, y2, outline='white', width=1, fill='#2b2b2b')
+        # Use the actual full canvas width without any limitations
+        # Remove all width restrictions to use complete available space
         
-        # Draw fill based on load (0-4 scale)
+        # Draw fill based on load (0-4 scale) directly on canvas background
         if load_value > 0:
             # Clamp load value to 0-4 range
             clamped_load = min(max(load_value, 0), 4)
-            fill_width = max(1, int(bar_width * clamped_load / 4))
-            fill_x2 = x1 + fill_width
             
+            # Use complete actual canvas dimensions for fill area
+            fill_x1 = 0
+            fill_y1 = 0
+            fill_width = int(canvas_width * clamped_load / 4)
+            fill_x2 = fill_x1 + fill_width
+            fill_y2 = canvas_height
+            
+            # Ensure minimum width if there's any value
+            if fill_width < 1 and load_value > 0:
+                fill_width = 1
+                fill_x2 = fill_x1 + fill_width
+                
             # Color based on load
             if load_value >= 3.0:
                 fill_color = '#f44336'  # Red - overloaded
@@ -285,7 +301,8 @@ class CPUWidget:
             else:
                 fill_color = '#4caf50'  # Green - normal load
             
-            self.load_canvas.create_rectangle(x1 + 1, y1 + 1, fill_x2, y2 - 1, 
+            # Draw the fill rectangle directly on canvas using full width
+            self.load_canvas.create_rectangle(fill_x1, fill_y1, fill_x2, fill_y2, 
                                             outline='', fill=fill_color)
     
     def update_cpu_data(self, data: Dict[str, float]):
