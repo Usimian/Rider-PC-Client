@@ -16,7 +16,7 @@ A desktop monitoring client that mirrors the robot's LCD screen display.
 
 2. Update robot IP in `pc_client.py` (line 482):
    ```python
-   ROBOT_IP = "192.168.1.173"  # Change to your Pi's IP
+   ROBOT_IP = "192.168.1.130"  # Change to your Pi's IP
    ```
 
 3. Run the client:

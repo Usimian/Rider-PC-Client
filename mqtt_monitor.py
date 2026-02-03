@@ -10,7 +10,7 @@ import paho.mqtt.client as mqtt
 from datetime import datetime
 
 class MQTTMonitor:
-    def __init__(self, broker_host='192.168.1.173', broker_port=1883):
+    def __init__(self, broker_host='192.168.1.130', broker_port=1883):
         self.broker_host = broker_host
         self.broker_port = broker_port
         self.client_id = f"mqtt_monitor_{int(time.time())}"
@@ -101,7 +101,7 @@ def main():
     
     # Allow custom IP
     import sys
-    broker_ip = sys.argv[1] if len(sys.argv) > 1 else '192.168.1.173'
+    broker_ip = sys.argv[1] if len(sys.argv) > 1 else '192.168.1.130'
     
     monitor = MQTTMonitor(broker_ip)
     monitor.run()

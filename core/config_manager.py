@@ -17,7 +17,7 @@ class ConfigManager:
         else:
             # Create default config
             self.config['mqtt'] = {
-                'broker_host': '192.168.1.173',
+                'broker_host': '192.168.1.130',
                 'broker_port': '1883'
             }
             self.config['llm'] = {
@@ -36,7 +36,7 @@ class ConfigManager:
     
     def get_broker_host(self):
         """Get MQTT broker host"""
-        return self.config.get('mqtt', 'broker_host', fallback='192.168.1.173')
+        return self.config.get('mqtt', 'broker_host', fallback='192.168.1.130')
     
     def get_broker_port(self):
         """Get MQTT broker port"""

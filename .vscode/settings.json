@@ -4,7 +4,7 @@
         {
             "name": "Pull Robot Controller from Pi",
             "localPath": "${workspaceRoot}/../Rider-Robot-Controller/",
-            "remotePath": "pi@192.168.1.173:/home/pi/Rider-Robot-Controller/",
+            "remotePath": "pi@192.168.1.130:/home/pi/Rider-Robot-Controller/",
             "downOnly": true,
             "flags": "avz",
             "exclude": [
@@ -20,7 +20,7 @@
         {
             "name": "Push PC Client to Pi",
             "localPath": "${workspaceRoot}/",
-            "remotePath": "pi@192.168.1.173:/home/pi/Rider-PC-Client/",
+            "remotePath": "pi@192.168.1.130:/home/pi/Rider-PC-Client/",
             "upOnly": true,
             "flags": "avz",
             "exclude": [
@@ -36,5 +36,12 @@
     ],
     "sync-rsync.showProgress": true,
     "sync-rsync.autoShowOutput": true,
-    "sync-rsync.notification": true
+    "sync-rsync.notification": true,
+    "ROS2.distro": "jazzy",
+    "python.autoComplete.extraPaths": [
+        "/opt/ros/jazzy/lib/python3.12/site-packages"
+    ],
+    "python.analysis.extraPaths": [
+        "/opt/ros/jazzy/lib/python3.12/site-packages"
+    ]
 } 

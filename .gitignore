@@ -1,0 +1,5 @@
+browse.vc
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
