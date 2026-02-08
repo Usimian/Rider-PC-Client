@@ -22,9 +22,9 @@ class ConfigManager:
             }
             self.config['llm'] = {
                 'ollama_url': 'http://localhost:11434',
-                'default_model': 'llava:7b',
+                'default_model': 'qwen3-vl:8b',
                 'temperature': '0.7',
-                'max_tokens': '500',
+                'max_tokens': '2000',
                 'enabled': 'true'
             }
             self.save_config()
@@ -59,7 +59,7 @@ class ConfigManager:
     
     def get_llm_default_model(self):
         """Get default LLM model"""
-        return self.config.get('llm', 'default_model', fallback='llava:7b')
+        return self.config.get('llm', 'default_model', fallback='qwen3-vl:8b')
     
     def get_llm_temperature(self):
         """Get LLM temperature setting"""
@@ -67,7 +67,7 @@ class ConfigManager:
     
     def get_llm_max_tokens(self):
         """Get LLM max tokens setting"""
-        return self.config.getint('llm', 'max_tokens', fallback=500)
+        return self.config.getint('llm', 'max_tokens', fallback=2000)
     
     def is_llm_enabled(self):
         """Check if LLM features are enabled"""

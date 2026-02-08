@@ -158,7 +158,11 @@ class MainWindow:
             'set_model': self.callbacks.get('llm_set_model', lambda model: False),
             'clear_conversation': self.callbacks.get('llm_clear_conversation', lambda: None),
             'get_models': self.callbacks.get('llm_get_models', lambda: []),
-            'get_status': self.callbacks.get('llm_get_status', lambda: {"available": False})
+            'get_status': self.callbacks.get('llm_get_status', lambda: {"available": False}),
+            # Robot control callbacks for LLM commands
+            'robot_move': self.callbacks.get('robot_move', lambda x, y: None),
+            'robot_turn': self.callbacks.get('robot_turn', lambda angle: None),
+            'robot_stop': self.callbacks.get('emergency_stop', lambda: None)
         }
         
         # Only create LLM panel if LLM callbacks are available

@@ -82,15 +82,15 @@ class OllamaClient:
             }
             
             if self.debug_mode:
-                print(f"🤖 Sending request to {model} with prompt: '{prompt[:50]}...'")
-            
+                print(f"🤖 Sending request to {model}")
+
             response = self.session.post(
                 f"{self.base_url}/api/generate",
                 json=payload,
                 stream=response_callback is not None,
                 timeout=120  # Longer timeout for generation
             )
-            
+
             response.raise_for_status()
             
             if response_callback:
@@ -99,6 +99,12 @@ class OllamaClient:
             else:
                 # Handle single response
                 data = response.json()
+
+                if "error" in data:
+                    if self.debug_mode:
+                        print(f"❌ Ollama error: {data.get('error')}")
+                    return {"success": False, "error": data.get("error")}
+
                 return {
                     "success": True,
                     "response": data.get("response", ""),
@@ -128,23 +134,23 @@ class OllamaClient:
         """Handle streaming response from ollama"""
         try:
             full_response = ""
-            
+
             for line in response.iter_lines():
                 if line:
                     try:
                         data = json.loads(line.decode('utf-8'))
                         chunk = data.get("response", "")
-                        
+
                         if chunk:
                             full_response += chunk
                             callback(chunk)
-                        
+
                         if data.get("done", False):
                             break
-                            
+
                     except json.JSONDecodeError:
                         continue
-            
+
             return {
                 "success": True,
                 "response": full_response,

@@ -80,6 +80,8 @@ class ApplicationController:
             'toggle_performance': self._toggle_performance,
             'toggle_camera': self._toggle_camera,
             'send_movement': self._send_movement,
+            'robot_move': self._robot_move_distance,
+            'robot_turn': self._robot_turn,
             'emergency_stop': self._emergency_stop,
             'reset_robot': self._reset_robot,
             'reboot_pi': self._reboot_pi,
@@ -279,15 +281,43 @@ class ApplicationController:
                 print(f"[APP] Image response processing error: {e}")
     
     def _send_movement(self, x: float, y: float):
-        """Send movement command"""
+        """Send movement command (legacy format for joystick control)"""
         if not self.mqtt_client.is_connected():
             messagebox.showwarning("Not Connected", "Not connected to robot")
             return
-        
+
         self.mqtt_client.send_movement_command(x, y)
         if self.debug_mode:
             print(f"[APP] Movement command: x={x}, y={y}")
-    
+
+    def _robot_move_distance(self, distance: int, unused=None):
+        """Send move command with distance in mm (AI command format)"""
+        if not self.mqtt_client.is_connected():
+            if self.debug_mode:
+                print("⚠️ Cannot send move command - not connected to robot")
+            return
+
+        # Robot moves 3x the commanded distance, so divide by 3
+        scaled_distance = int(distance / 3)
+        self.mqtt_client.send_move_distance_command(scaled_distance)
+        if self.debug_mode:
+            direction = "forward" if distance > 0 else "backward"
+            print(f"[APP] AI Move command: {direction} {abs(distance)}mm (scaled to {scaled_distance}mm)")
+
+    def _robot_turn(self, angle: int):
+        """Send turn command with angle in degrees (AI command format)"""
+        if not self.mqtt_client.is_connected():
+            if self.debug_mode:
+                print("⚠️ Cannot send turn command - not connected to robot")
+            return
+
+        # Robot turns 1.8x the commanded angle (10% short of 2x), so scale by 1/1.8
+        scaled_angle = int(angle / 1.8)
+        self.mqtt_client.send_turn_command(scaled_angle)
+        if self.debug_mode:
+            direction = "left" if angle > 0 else "right"  # Positive = left per robot behavior
+            print(f"[APP] AI Turn command: {direction} {abs(angle)}° (scaled to {scaled_angle}°)")
+
     def _emergency_stop(self):
         """Emergency stop - immediate, no confirmation"""
         if not self.mqtt_client.is_connected():
@@ -602,7 +632,7 @@ class ApplicationController:
             threading.Thread(target=check_response, daemon=True).start()
         
         # Generate response
-        result = self.llm_manager.generate_response(prompt, use_current_image, use_streaming=False)
+        result = self.llm_manager.generate_response(prompt, use_current_image, use_streaming=True)
         
         if result.get("success"):
             # Start response handling

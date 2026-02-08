@@ -24,11 +24,11 @@ class LLMManager:
         # Conversation state
         self.conversation_history: List[ConversationMessage] = []
         self.current_image_data: Optional[str] = None
-        self.current_model: str = "llava:7b"  # Default model
+        self.current_model: str = "qwen3-vl:8b"  # Default model
         
         # Settings
         self.temperature: float = 0.7
-        self.max_tokens: int = 500
+        self.max_tokens: int = 2000  # Increased for qwen3-vl thinking mode
         
         # Status
         self.is_generating: bool = False
@@ -52,9 +52,15 @@ class LLMManager:
             if self.server_available:
                 self.available_models = self.ollama_client.get_available_models()
                 # Auto-select best available vision model
+                # Prefer qwen3-vl models, then llava
+                qwen_models = [m for m in self.available_models if 'qwen' in m.lower() and 'vl' in m.lower()]
                 vision_models = [m for m in self.available_models if 'llava' in m.lower()]
-                if vision_models:
-                    # Prefer llama3 versions
+                if qwen_models:
+                    # Prefer smaller qwen3-vl models for speed (8b over 30b)
+                    qwen_8b = [m for m in qwen_models if '8b' in m.lower()]
+                    self.current_model = qwen_8b[0] if qwen_8b else qwen_models[0]
+                elif vision_models:
+                    # Fallback to llava if no qwen available
                     llama3_models = [m for m in vision_models if 'llama3' in m.lower()]
                     self.current_model = llama3_models[0] if llama3_models else vision_models[0]
                     if self.debug_mode:
@@ -199,10 +205,75 @@ class LLMManager:
                     def stream_callback(chunk: str):
                         self.response_callback(chunk)
                 
+                # Add robot control instructions to prompt
+                robot_control_instructions = """
+CRITICAL: You MUST include JSON commands to control the robot when requested.
+
+=== ROBOT CONTROL FORMAT ===
+You MUST wrap commands in markdown JSON code blocks exactly like this:
+
+**LINEAR MOVEMENT (Forward/Backward):**
+```json
+{"action": "move", "distance": <millimeters>}
+```
+- distance: integer in millimeters
+- Positive = Forward, Negative = Backward
+- Robot moves specified distance and stops automatically
+
+**ROTATION (Turn Left/Right):**
+```json
+{"action": "turn", "angle": <degrees>}
+```
+- angle: integer in degrees
+- Positive = Turn Left, Negative = Turn Right
+- Robot rotates specified angle and stops automatically
+
+**EMERGENCY STOP:**
+```json
+{"action": "stop"}
+```
+
+=== EXAMPLES ===
+
+Move forward 20cm:
+```json
+{"action": "move", "distance": 200}
+```
+
+Move backward 30cm:
+```json
+{"action": "move", "distance": -300}
+```
+
+Turn left 90°:
+```json
+{"action": "turn", "angle": 90}
+```
+
+Turn right 45°:
+```json
+{"action": "turn", "angle": -45}
+```
+
+Stop immediately:
+```json
+{"action": "stop"}
+```
+
+=== IMPORTANT NOTES ===
+- Distance is in MILLIMETERS (10mm = 1cm, 100mm = 10cm, 1000mm = 1m)
+- Angles in DEGREES (positive = right, negative = left)
+- Robot automatically stops when movement completes
+- Always respond with both explanation AND the JSON command
+
+User request: """
+
+                full_prompt = robot_control_instructions + prompt
+
                 # Generate response
                 result = self.ollama_client.generate_with_image(
                     model=self.current_model,
-                    prompt=prompt,
+                    prompt=full_prompt,
                     image_data=image_data,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,

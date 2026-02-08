@@ -184,12 +184,32 @@ class MQTTClient:
             return False
     
     def send_movement_command(self, x: float, y: float) -> bool:
-        """Send movement command"""
+        """Send movement command (legacy format for joystick control)"""
         command = {
             'x': x,
             'y': y,
             'timestamp': time.time()
         }
+        return self.publish_command(self.topics['control_movement'], command)
+
+    def send_move_distance_command(self, distance: int) -> bool:
+        """Send move command with distance in mm (new format)"""
+        command = {
+            'action': 'move',
+            'distance': distance,
+            'timestamp': time.time()
+        }
+        print(f"[MQTT] Sending move command: {command}")
+        return self.publish_command(self.topics['control_movement'], command)
+
+    def send_turn_command(self, angle: int) -> bool:
+        """Send turn command with angle in degrees (new format)"""
+        command = {
+            'action': 'turn',
+            'angle': angle,
+            'timestamp': time.time()
+        }
+        print(f"[MQTT] Sending turn command: {command}")
         return self.publish_command(self.topics['control_movement'], command)
     
     def send_settings_command(self, action: str, value: Any = None) -> bool:

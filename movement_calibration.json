@@ -1,0 +1,50 @@
+{
+  "forward": {
+    "description": "Forward movement calibration (Y-axis positive)",
+    "calibration_points": [
+      {"speed": "stop", "value": 0, "description": "No movement"},
+      {"speed": "crawl", "value": 8, "description": "Minimum movement, very slow"},
+      {"speed": "slow", "value": 8, "description": "Slow controlled movement"},
+      {"speed": "normal", "value": 12, "description": "Normal walking speed"},
+      {"speed": "fast", "value": 18, "description": "Fast movement"},
+      {"speed": "max", "value": 20, "description": "Maximum safe speed"}
+    ]
+  },
+  "backward": {
+    "description": "Backward movement calibration (Y-axis negative)",
+    "calibration_points": [
+      {"speed": "stop", "value": 0, "description": "No movement"},
+      {"speed": "crawl", "value": -18, "description": "Minimum movement, very slow"},
+      {"speed": "slow", "value": -18, "description": "Slow controlled movement"},
+      {"speed": "normal", "value": -30, "description": "Normal walking speed"},
+      {"speed": "fast", "value": -40, "description": "Fast movement"}
+    ]
+  },
+  "turn_left": {
+    "description": "Left turn calibration (X-axis positive)",
+    "calibration_points": [
+      {"angle": "stop", "value": 0, "description": "No rotation"},
+      {"angle": "15deg", "value": 25, "description": "Small adjustment ~15 degrees"},
+      {"angle": "45deg", "value": 40, "description": "Medium turn ~45 degrees"},
+      {"angle": "90deg", "value": 85, "description": "Quarter turn ~90 degrees"},
+      {"angle": "180deg", "value": 85, "description": "Half turn ~180 degrees"}
+    ]
+  },
+  "turn_right": {
+    "description": "Right turn calibration (X-axis negative)",
+    "calibration_points": [
+      {"angle": "stop", "value": 0, "description": "No rotation"},
+      {"angle": "15deg", "value": -25, "description": "Small adjustment ~15 degrees"},
+      {"angle": "45deg", "value": -40, "description": "Medium turn ~45 degrees"},
+      {"angle": "90deg", "value": -85, "description": "Quarter turn ~90 degrees"},
+      {"angle": "180deg", "value": -85, "description": "Half turn ~180 degrees"}
+    ]
+  },
+  "notes": [
+    "These are starting values - adjust based on actual robot behavior",
+    "Test each calibration point and update values as needed",
+    "Values may need to vary based on surface type, battery level, robot load, etc.",
+    "Consider measuring actual distances/angles and recording them here",
+    "Duration of command application affects total movement - consider timing"
+  ]
+}

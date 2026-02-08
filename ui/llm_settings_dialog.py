@@ -259,7 +259,7 @@ class LLMSettingsDialog:
         self.url_var.set(self.current_settings.get('ollama_url', 'http://localhost:11434'))
         
         # Model settings
-        self.selected_model_var.set(self.current_settings.get('model', 'llava:7b'))
+        self.selected_model_var.set(self.current_settings.get('model', 'qwen3-vl:8b'))
         
         # Generation settings
         self.temp_var.set(self.current_settings.get('temperature', 0.7))
@@ -352,7 +352,7 @@ class LLMSettingsDialog:
         """Reset settings to defaults"""
         if messagebox.askyesno("Reset Settings", "Reset all settings to default values?"):
             self.url_var.set('http://localhost:11434')
-            self.selected_model_var.set('llava:7b')
+            self.selected_model_var.set('qwen3-vl:8b')
             self.temp_var.set(0.7)
             self.tokens_var.set(500)
             self.enabled_var.set(True)

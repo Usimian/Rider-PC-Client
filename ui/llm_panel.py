@@ -5,6 +5,8 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from typing import Dict, Callable, List, Optional, Any
 import time
+import json
+import re
 from datetime import datetime
 
 class LLMPanel:
@@ -14,7 +16,7 @@ class LLMPanel:
         self.debug_mode = debug
         
         # State
-        self.current_model = "llava:7b"
+        self.current_model = "qwen3-vl:8b"
         self.available_models = []
         self.server_status = "Checking..."
         self.is_generating = False
@@ -367,8 +369,14 @@ class LLMPanel:
         
         # Auto-select first vision model if current model not available
         if models and self.current_model not in models:
+            # Prefer qwen3-vl models, then llava
+            qwen_models = [m for m in models if 'qwen' in m.lower() and 'vl' in m.lower()]
             vision_models = [m for m in models if 'llava' in m.lower()]
-            if vision_models:
+            if qwen_models:
+                qwen_8b = [m for m in qwen_models if '8b' in m.lower()]
+                self.current_model = qwen_8b[0] if qwen_8b else qwen_models[0]
+                self.model_var.set(self.current_model)
+            elif vision_models:
                 self.current_model = vision_models[0]
                 self.model_var.set(self.current_model)
     
@@ -449,9 +457,74 @@ class LLMPanel:
             delattr(self, '_current_response_start')
     
     def add_complete_response(self, response: str):
-        """Add complete assistant response"""
+        """Add complete assistant response and execute any robot commands"""
         self._add_assistant_message(response)
-    
+        # Parse and execute any JSON robot commands in the response
+        self._parse_and_execute_commands(response)
+
+    def _parse_and_execute_commands(self, response: str):
+        """Parse JSON robot commands from LLM response and execute them"""
+        # Look for JSON code blocks with robot commands
+        json_pattern = r'```json\s*(\{[^`]+\})\s*```'
+        matches = re.findall(json_pattern, response, re.DOTALL)
+
+        for match in matches:
+            try:
+                command = json.loads(match)
+                self._execute_robot_command(command)
+            except json.JSONDecodeError as e:
+                if self.debug_mode:
+                    print(f"[LLM] Failed to parse JSON command: {e}")
+
+    def _execute_robot_command(self, command: Dict[str, Any]):
+        """Execute a single robot command"""
+        action = command.get('action', '').lower()
+
+        print(f"[LLM] Executing robot command: {command}")
+
+        if action == 'move':
+            distance = command.get('distance', 0)
+            robot_move = self.llm_callbacks.get('robot_move')
+            print(f"[LLM] robot_move callback: {robot_move}")
+            if robot_move:
+                print(f"[LLM] Calling robot_move({distance}, 0)")
+                # Send move command with distance (robot expects distance in payload)
+                robot_move(distance, 0)  # Second param unused but kept for compatibility
+                direction = "forward" if distance > 0 else "backward"
+                self._add_system_message(f"🤖 Executing: Move {direction} {abs(distance)}mm")
+                if self.debug_mode:
+                    print(f"[LLM] Executing move command: distance={distance}mm")
+            else:
+                print(f"[LLM] ERROR: robot_move callback not found!")
+                print(f"[LLM] Available callbacks: {list(self.llm_callbacks.keys())}")
+
+        elif action == 'turn':
+            angle = command.get('angle', 0)
+            robot_turn = self.llm_callbacks.get('robot_turn')
+            print(f"[LLM] robot_turn callback: {robot_turn}")
+            if robot_turn:
+                print(f"[LLM] Calling robot_turn({angle})")
+                robot_turn(angle)
+                direction = "right" if angle > 0 else "left"
+                self._add_system_message(f"🤖 Executing: Turn {direction} {abs(angle)}°")
+                if self.debug_mode:
+                    print(f"[LLM] Executing turn command: angle={angle}°")
+            else:
+                print(f"[LLM] ERROR: robot_turn callback not found!")
+                print(f"[LLM] Available callbacks: {list(self.llm_callbacks.keys())}")
+
+        elif action == 'stop':
+            robot_stop = self.llm_callbacks.get('robot_stop')
+            if robot_stop:
+                robot_stop()
+                self._add_system_message("🤖 Executing: STOP")
+                if self.debug_mode:
+                    print("[LLM] Executing stop command")
+
+        else:
+            if self.debug_mode:
+                print(f"[LLM] Unknown robot command action: {action}")
+
     def add_error_message(self, error: str):
         """Add error message"""
         self._add_system_message(f"Error: {error}")
