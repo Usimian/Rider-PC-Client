@@ -20,7 +20,7 @@ class MainWindow:
         """Setup the main window"""
         self.root = tk.Tk()
         self.root.title(f"Rider Robot PC Client - {self.broker_host}")
-        self.root.geometry("1600x1200")
+        self.root.geometry("1600x1240")
         self.root.configure(bg='#2b2b2b')  # Modern dark theme
         
         # Configure root window to use grid with proper weights (key for resizing!)
@@ -136,6 +136,8 @@ class MainWindow:
         # Robot Control Panel (Left side - fixed width to fit controls)
         movement_callbacks = {
             'move': self.callbacks.get('send_movement', lambda x, y: None),
+            'change_height': self.callbacks.get('change_height', lambda h: None),
+            'change_body_tilt': self.callbacks.get('change_body_tilt', lambda t: None),
             'emergency_stop': self.callbacks.get('emergency_stop', lambda: None),
             'reset_robot': self.callbacks.get('reset_robot', lambda: None),
             'reboot_pi': self.callbacks.get('reboot_pi', lambda: None),

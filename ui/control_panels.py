@@ -132,6 +132,12 @@ class MovementPanel:
     def __init__(self, parent, callbacks: Dict[str, Callable]):
         self.parent = parent
         self.callbacks = callbacks
+        self.current_height = 85  # Default robot height (60-120mm)
+        self.current_tilt = 0     # Default left/right tilt (-15 to +15)
+        self.joystick_dragging = False
+        self.last_height_send = 0  # Throttling timestamp
+        self.last_tilt_send = 0    # Throttling timestamp
+        self.send_interval = 0.1   # Send commands at most every 100ms
         self.setup_panel()
     
     def setup_panel(self):
@@ -198,7 +204,166 @@ class MovementPanel:
                            width=4, height=2, font=('Arial', 14, 'bold'),
                            bg='#555555', fg='white', activebackground='#666666')
             btn.grid(row=row, column=col, padx=2, pady=2)
-    
+
+        # Height & Tilt Joystick Control (below movement buttons)
+        height_frame = tk.Frame(content, bg='#3c3c3c')
+        height_frame.pack(pady=(20, 0))
+
+        tk.Label(height_frame, text="Height & Tilt Control", font=('Arial', 11, 'bold'),
+                bg='#3c3c3c', fg='white').pack(pady=(0, 5))
+
+        # Value displays
+        values_frame = tk.Frame(height_frame, bg='#3c3c3c')
+        values_frame.pack(pady=(0, 5))
+
+        tk.Label(values_frame, text="Height:", font=('Arial', 9),
+                bg='#3c3c3c', fg='white').grid(row=0, column=0, padx=(0, 5))
+        self.height_value_label = tk.Label(values_frame, text=f"{self.current_height}mm",
+                                          font=('Arial', 10, 'bold'), bg='#3c3c3c',
+                                          fg='#ffd700', width=6)
+        self.height_value_label.grid(row=0, column=1, padx=(0, 15))
+
+        tk.Label(values_frame, text="Tilt:", font=('Arial', 9),
+                bg='#3c3c3c', fg='white').grid(row=0, column=2, padx=(0, 5))
+        self.tilt_value_label = tk.Label(values_frame, text=f"{self.current_tilt}°",
+                                        font=('Arial', 10, 'bold'), bg='#3c3c3c',
+                                        fg='#87ceeb', width=6)
+        self.tilt_value_label.grid(row=0, column=3)
+
+        # 2D Joystick Canvas
+        self.joystick_size = 150
+        self.joystick_center = self.joystick_size // 2
+        self.joystick_radius = 60  # Movement radius
+
+        self.joystick_canvas = tk.Canvas(height_frame, width=self.joystick_size,
+                                        height=self.joystick_size, bg='#2b2b2b',
+                                        highlightthickness=1, highlightbackground='#555555')
+        self.joystick_canvas.pack()
+
+        # Draw joystick background circle
+        padding = 10
+        self.joystick_canvas.create_oval(
+            padding, padding,
+            self.joystick_size - padding, self.joystick_size - padding,
+            outline='#555555', width=2, fill='#3c3c3c'
+        )
+
+        # Draw center crosshairs
+        self.joystick_canvas.create_line(
+            self.joystick_center, padding + 5,
+            self.joystick_center, self.joystick_size - padding - 5,
+            fill='#555555', dash=(2, 2)
+        )
+        self.joystick_canvas.create_line(
+            padding + 5, self.joystick_center,
+            self.joystick_size - padding - 5, self.joystick_center,
+            fill='#555555', dash=(2, 2)
+        )
+
+        # Draw axis labels
+        self.joystick_canvas.create_text(self.joystick_center, 15,
+                                        text="↑ High", fill='white', font=('Arial', 8))
+        self.joystick_canvas.create_text(self.joystick_center, self.joystick_size - 15,
+                                        text="↓ Low", fill='white', font=('Arial', 8))
+        self.joystick_canvas.create_text(15, self.joystick_center,
+                                        text="L", fill='white', font=('Arial', 8))
+        self.joystick_canvas.create_text(self.joystick_size - 15, self.joystick_center,
+                                        text="R", fill='white', font=('Arial', 8))
+
+        # Draw joystick handle (moveable circle)
+        handle_size = 20
+        self.joystick_handle = self.joystick_canvas.create_oval(
+            self.joystick_center - handle_size, self.joystick_center - handle_size,
+            self.joystick_center + handle_size, self.joystick_center + handle_size,
+            fill='#4CAF50', outline='white', width=2
+        )
+
+        # Bind mouse events for joystick dragging
+        self.joystick_canvas.tag_bind(self.joystick_handle, '<Button-1>', self._on_joystick_press)
+        self.joystick_canvas.tag_bind(self.joystick_handle, '<B1-Motion>', self._on_joystick_drag)
+        self.joystick_canvas.tag_bind(self.joystick_handle, '<ButtonRelease-1>', self._on_joystick_release)
+        self.joystick_canvas.bind('<Button-1>', self._on_canvas_click)
+
+    def _on_canvas_click(self, event):
+        """Handle click on canvas (jump joystick to position)"""
+        self._update_joystick_position(event.x, event.y)
+
+    def _on_joystick_press(self, event):
+        """Start dragging joystick"""
+        self.joystick_dragging = True
+
+    def _on_joystick_drag(self, event):
+        """Handle joystick dragging"""
+        if self.joystick_dragging:
+            # Convert canvas coords to widget coords
+            canvas_x = self.joystick_canvas.canvasx(event.x)
+            canvas_y = self.joystick_canvas.canvasy(event.y)
+            self._update_joystick_position(canvas_x, canvas_y)
+
+    def _on_joystick_release(self, event):
+        """Stop dragging joystick"""
+        self.joystick_dragging = False
+
+    def _update_joystick_position(self, x, y):
+        """Update joystick position and send commands"""
+        # Calculate offset from center
+        dx = x - self.joystick_center
+        dy = y - self.joystick_center
+
+        # Limit to joystick radius
+        distance = (dx**2 + dy**2)**0.5
+        if distance > self.joystick_radius:
+            scale = self.joystick_radius / distance
+            dx *= scale
+            dy *= scale
+
+        # Calculate new position
+        new_x = self.joystick_center + dx
+        new_y = self.joystick_center + dy
+
+        # Move the joystick handle
+        coords = self.joystick_canvas.coords(self.joystick_handle)
+        handle_size = (coords[2] - coords[0]) / 2
+        self.joystick_canvas.coords(
+            self.joystick_handle,
+            new_x - handle_size, new_y - handle_size,
+            new_x + handle_size, new_y + handle_size
+        )
+
+        # Map to height and tilt values
+        # Y axis: -joystick_radius (top) = 120mm, +joystick_radius (bottom) = 60mm
+        height_percent = (self.joystick_radius - dy) / (2 * self.joystick_radius)
+        new_height = int(60 + height_percent * 60)  # 60-120mm range
+        new_height = max(60, min(120, new_height))  # Clamp
+
+        # X axis: -joystick_radius (left) = -15°, +joystick_radius (right) = +15°
+        tilt_percent = dx / self.joystick_radius
+        new_tilt = int(tilt_percent * 15)  # -15 to +15 degrees
+        new_tilt = max(-15, min(15, new_tilt))  # Clamp
+
+        # Update displays and send commands if values changed (with throttling)
+        current_time = time.time()
+
+        if new_height != self.current_height:
+            self.current_height = new_height
+            self.height_value_label.config(text=f"{new_height}mm")
+
+            # Send command only if enough time has passed (throttling)
+            if current_time - self.last_height_send >= self.send_interval:
+                height_callback = self.callbacks.get('change_height', lambda h: None)
+                height_callback(new_height)
+                self.last_height_send = current_time
+
+        if new_tilt != self.current_tilt:
+            self.current_tilt = new_tilt
+            self.tilt_value_label.config(text=f"{new_tilt}°")
+
+            # Send command only if enough time has passed (throttling)
+            if current_time - self.last_tilt_send >= self.send_interval:
+                tilt_callback = self.callbacks.get('change_body_tilt', lambda t: None)
+                tilt_callback(new_tilt)
+                self.last_tilt_send = current_time
+
     def get_widget(self):
         """Get the main widget"""
         return self.panel
@@ -220,56 +385,54 @@ class ImageDisplayPanel:
         
         # Status and controls frame - pack this FIRST to ensure it's always visible
         controls_frame = tk.Frame(self.panel, bg='#3c3c3c')
-        controls_frame.pack(side='bottom', fill='x', padx=20, pady=(0, 15))
-        
-        # Image info/status
-        self.status_label = tk.Label(controls_frame, text="📷 Camera", 
-                                    font=('Arial', 10), bg='#3c3c3c', fg='#ffd700')
-        self.status_label.pack(side='left')
-        
-        # Resolution selector
-        resolution_frame = tk.Frame(controls_frame, bg='#3c3c3c')
-        resolution_frame.pack(side='right', padx=(5, 0))
-        
-        tk.Label(resolution_frame, text="Resolution:", font=('Arial', 9), 
-                bg='#3c3c3c', fg='white').pack(side='left', padx=(0, 5))
-        
-        self.resolution_var = tk.StringVar(value="high")
-        resolution_combo = ttk.Combobox(resolution_frame, textvariable=self.resolution_var, 
-                                       values=["high", "low", "tiny"], state="readonly", width=8)
-        resolution_combo.pack(side='left', padx=(0, 10))
-        
-        # OPTIMIZED BUTTON LAYOUT - All buttons with comfortable spacing
-        # Save screenshot button
-        save_btn = tk.Button(controls_frame, text="💾 Save", 
-                            font=('Arial', 9), bg='#555555', fg='white', 
-                            activebackground='#666666', width=8,
-                            command=self._save_image)
-        save_btn.pack(side='right', padx=(5, 0))
+        controls_frame.pack(side='bottom', fill='x', padx=20, pady=(0, 10))
 
-        # Load image button
-        load_btn = tk.Button(controls_frame, text="📂 Load", 
-                            font=('Arial', 9), bg='#555555', fg='white', 
-                            activebackground='#666666', width=8,
-                            command=self._load_image)
-        load_btn.pack(side='right', padx=(5, 5))
-        
+        # ROW 1: Video control and resolution
+        row1 = tk.Frame(controls_frame, bg='#3c3c3c')
+        row1.pack(fill='x', pady=(0, 5))
+
         # Video feed button
         self.video_active = False
-        self.video_btn = tk.Button(controls_frame, text="🎥 Video", 
-                            font=('Arial', 9), bg='#555555', fg='white', 
-                            activebackground='#666666', width=8,
+        self.video_btn = tk.Button(row1, text="🎥 Video",
+                            font=('Arial', 9), bg='#4CAF50', fg='white',
+                            activebackground='#45a049',
                             command=self._toggle_video_feed)
-        self.video_btn.pack(side='right', padx=(5, 5))
-        
+        self.video_btn.pack(side='left')
 
-        
-        # Capture button - MOST IMPORTANT for single image capture
-        refresh_btn = tk.Button(controls_frame, text="🔄 Capture", 
-                               font=('Arial', 9, 'bold'), bg='#4CAF50', fg='white', 
-                               activebackground='#45a049', width=10,
-                               command=self._refresh_image)
-        refresh_btn.pack(side='right', padx=(5, 5))
+        # Resolution selector (right side of row 1)
+        resolution_frame = tk.Frame(row1, bg='#3c3c3c')
+        resolution_frame.pack(side='right')
+
+        tk.Label(resolution_frame, text="Resolution:", font=('Arial', 9),
+                bg='#3c3c3c', fg='white').pack(side='left', padx=(0, 5))
+
+        self.resolution_var = tk.StringVar(value="high")
+        resolution_combo = ttk.Combobox(resolution_frame, textvariable=self.resolution_var,
+                                       values=["high", "low", "tiny"], state="readonly", width=8)
+        resolution_combo.pack(side='left')
+
+        # ROW 2: File operations and status
+        row2 = tk.Frame(controls_frame, bg='#3c3c3c')
+        row2.pack(fill='x')
+
+        # Load image button (narrower)
+        load_btn = tk.Button(row2, text="📂 Load",
+                            font=('Arial', 9), bg='#555555', fg='white',
+                            activebackground='#666666', width=8,
+                            command=self._load_image)
+        load_btn.pack(side='left')
+
+        # Save screenshot button (narrower)
+        save_btn = tk.Button(row2, text="💾 Save",
+                            font=('Arial', 9), bg='#555555', fg='white',
+                            activebackground='#666666', width=8,
+                            command=self._save_image)
+        save_btn.pack(side='left', padx=(8, 0))
+
+        # Status label on right side of row 2
+        self.status_label = tk.Label(row2, text="Ready",
+                                    font=('Arial', 9), bg='#3c3c3c', fg='#ffd700')
+        self.status_label.pack(side='right')
         
         # Main image display area - pack this AFTER controls to fill remaining space
         self.image_frame = tk.Frame(self.panel, bg='#2b2b2b', relief='sunken', bd=2)
@@ -345,8 +508,8 @@ class ImageDisplayPanel:
     def _toggle_video_feed(self):
         if not self.video_active:
             self.video_active = True
-            self.video_btn.config(text="⏹ Stop")
-            self.status_label.config(text="🎥 Video feed started (tiny)")
+            self.video_btn.config(text="⏹ Stop", bg='#d32f2f', activebackground='#b71c1c')
+            self.status_label.config(text="🎥 Live (low res)")
             self._video_request_pending = False
             self._start_video_loop()
         else:
@@ -355,16 +518,16 @@ class ImageDisplayPanel:
     def _start_video_loop(self):
         if self.video_active and self.image_callback and not getattr(self, '_video_request_pending', False):
             self._video_request_pending = True
-            resolution = self.resolution_var.get()
-            self.image_callback(resolution)
+            # Use low resolution for video (better quality than tiny, still fast)
+            self.image_callback("low")
 
     def _stop_video_feed(self):
         if self.video_active:
             self.video_active = False
             self._video_request_pending = False
-            self.video_btn.config(text="🎥 Video")
-            self.status_label.config(text="📶 Video feed stopped")
-            self.panel.after(2000, lambda: self.status_label.config(text="📷 Camera"))
+            self.video_btn.config(text="🎥 Video", bg='#4CAF50', activebackground='#45a049')
+            self.status_label.config(text="Stopped")
+            self.panel.after(2000, lambda: self.status_label.config(text="Ready"))
     
 
     
@@ -464,8 +627,8 @@ class ImageDisplayPanel:
         # At the end of update_image, if video is active, schedule the next frame
         if getattr(self, 'video_active', False) and getattr(self, '_video_request_pending', False):
             self._video_request_pending = False
-            # Schedule next request immediately (or add a small delay if desired)
-            self.panel.after(1, self._start_video_loop)
+            # Add 50ms delay between frames for ~20 fps (smoother than flooding)
+            self.panel.after(50, self._start_video_loop)
     
     def get_widget(self):
         """Get the main widget"""

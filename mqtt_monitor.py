@@ -8,11 +8,19 @@ import json
 import time
 import paho.mqtt.client as mqtt
 from datetime import datetime
+import sys
+import os
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(__file__))
+from core.config_manager import ConfigManager
 
 class MQTTMonitor:
-    def __init__(self, broker_host='192.168.1.130', broker_port=1883):
-        self.broker_host = broker_host
-        self.broker_port = broker_port
+    def __init__(self, broker_host=None, broker_port=None):
+        # Load from config if not provided
+        config = ConfigManager()
+        self.broker_host = broker_host or config.get_broker_host()
+        self.broker_port = broker_port or config.get_broker_port()
         self.client_id = f"mqtt_monitor_{int(time.time())}"
         
         # MQTT client
@@ -98,11 +106,10 @@ class MQTTMonitor:
 def main():
     print("🤖 Rider Robot MQTT Monitor")
     print("=" * 50)
-    
-    # Allow custom IP
-    import sys
-    broker_ip = sys.argv[1] if len(sys.argv) > 1 else '192.168.1.130'
-    
+
+    # Allow custom IP from command line, otherwise use rider_config.ini
+    broker_ip = sys.argv[1] if len(sys.argv) > 1 else None
+
     monitor = MQTTMonitor(broker_ip)
     monitor.run()
 

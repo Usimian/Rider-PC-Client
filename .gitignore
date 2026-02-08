@@ -1,4 +1,4 @@
-browse.vc
+.vscode/browse.vc*
 *.pyc
 __pycache__/
 *.pyo

@@ -17,7 +17,7 @@ class ConfigManager:
         else:
             # Create default config
             self.config['mqtt'] = {
-                'broker_host': '192.168.1.130',
+                'broker_host': 'localhost',  # Change in rider_config.ini
                 'broker_port': '1883'
             }
             self.config['llm'] = {
@@ -35,8 +35,8 @@ class ConfigManager:
             self.config.write(f)
     
     def get_broker_host(self):
-        """Get MQTT broker host"""
-        return self.config.get('mqtt', 'broker_host', fallback='192.168.1.130')
+        """Get MQTT broker host from rider_config.ini"""
+        return self.config.get('mqtt', 'broker_host', fallback='localhost')
     
     def get_broker_port(self):
         """Get MQTT broker port"""

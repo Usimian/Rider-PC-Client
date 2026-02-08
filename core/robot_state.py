@@ -79,14 +79,18 @@ class RobotState:
         old_roll = self.data['roll']
         old_pitch = self.data['pitch']
         old_yaw = self.data['yaw']
-        
+
         self.data['roll'] = data.get('roll', 0.0)
         self.data['pitch'] = data.get('pitch', 0.0)
         self.data['yaw'] = data.get('yaw', 0.0)
         self.data['last_update'] = datetime.now()
-        
-        # Only notify if values changed significantly (avoid noise)
-        if (abs(old_roll - self.data['roll']) > 0.1 or 
+
+        # Always notify on first update (when all old values are 0.0)
+        is_first_update = (old_roll == 0.0 and old_pitch == 0.0 and old_yaw == 0.0)
+
+        # Only notify if values changed significantly (avoid noise) or it's the first update
+        if (is_first_update or
+            abs(old_roll - self.data['roll']) > 0.1 or
             abs(old_pitch - self.data['pitch']) > 0.1 or
             abs(old_yaw - self.data['yaw']) > 0.1):
             self._notify_observers('imu', {

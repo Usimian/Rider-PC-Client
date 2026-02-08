@@ -74,6 +74,8 @@ class ApplicationController:
         """Get callbacks for GUI interactions"""
         callbacks = {
             'change_speed': self._change_speed,
+            'change_height': self._change_height,
+            'change_body_tilt': self._change_body_tilt,
             'toggle_roll_balance': self._toggle_roll_balance,
             'toggle_performance': self._toggle_performance,
             'toggle_camera': self._toggle_camera,
@@ -175,11 +177,29 @@ class ApplicationController:
         """Change speed setting"""
         if not self.mqtt_client.is_connected():
             return
-        
+
         self.mqtt_client.send_settings_command('change_speed', value)
         if self.debug_mode:
             print(f"[APP] Speed changed to: {value}")
-    
+
+    def _change_height(self, value: int):
+        """Change robot height setting"""
+        if not self.mqtt_client.is_connected():
+            return
+
+        self.mqtt_client.send_settings_command('change_height', value)
+        if self.debug_mode:
+            print(f"[APP] Height changed to: {value}")
+
+    def _change_body_tilt(self, value: int):
+        """Change robot body tilt (left/right)"""
+        if not self.mqtt_client.is_connected():
+            return
+
+        self.mqtt_client.send_settings_command('change_body_tilt', value)
+        if self.debug_mode:
+            print(f"[APP] Body tilt changed to: {value}°")
+
     def _toggle_roll_balance(self):
         """Toggle roll balance setting"""
         if not self.mqtt_client.is_connected():
