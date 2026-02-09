@@ -21,14 +21,17 @@ class MQTTClient:
         # Topic structure
         self.topics = {
             'status': 'rider/status',
-            'battery': 'rider/status/battery', 
+            'battery': 'rider/status/battery',
             'imu': 'rider/status/imu',
             'control_movement': 'rider/control/movement',
             'control_settings': 'rider/control/settings',
             'control_camera': 'rider/control/camera',
             'control_system': 'rider/control/system',
             'control_image_capture': 'rider/control/image_capture',
-            'response_image_capture': 'rider/response/image_capture'
+            'response_image_capture': 'rider/response/image_capture',
+            'voice_recognized': 'rider/voice/recognized',
+            'voice_status': 'rider/voice/status',
+            'voice_partial': 'rider/voice/partial'
         }
         
         # Callbacks for different message types
@@ -211,7 +214,17 @@ class MQTTClient:
         }
         print(f"[MQTT] Sending turn command: {command}")
         return self.publish_command(self.topics['control_movement'], command)
-    
+
+    def send_speak_command(self, text: str) -> bool:
+        """Send TTS (text-to-speech) command"""
+        command = {
+            'action': 'speak',
+            'text': text,
+            'timestamp': time.time()
+        }
+        print(f"[MQTT] Sending speak command: {text}")
+        return self.publish_command(self.topics['control_movement'], command)
+
     def send_settings_command(self, action: str, value: Any = None) -> bool:
         """Send settings command"""
         command = {

@@ -7,6 +7,7 @@ from typing import Dict, Callable, List, Optional, Any
 import time
 import json
 import re
+import threading
 from datetime import datetime
 
 class LLMPanel:
@@ -20,7 +21,9 @@ class LLMPanel:
         self.available_models = []
         self.server_status = "Checking..."
         self.is_generating = False
-        
+        self.command_queue = []
+        self.executing_commands = False
+
         self.setup_panel()
         
         if debug:
@@ -463,55 +466,84 @@ class LLMPanel:
         self._parse_and_execute_commands(response)
 
     def _parse_and_execute_commands(self, response: str):
-        """Parse JSON robot commands from LLM response and execute them"""
+        """Parse JSON robot commands from LLM response and queue them for sequential execution"""
         # Look for JSON code blocks with robot commands
         json_pattern = r'```json\s*(\{[^`]+\})\s*```'
         matches = re.findall(json_pattern, response, re.DOTALL)
 
+        # Add commands to queue
         for match in matches:
             try:
                 command = json.loads(match)
-                self._execute_robot_command(command)
+                self.command_queue.append(command)
             except json.JSONDecodeError as e:
                 if self.debug_mode:
                     print(f"[LLM] Failed to parse JSON command: {e}")
+
+        # Start executing queue if not already executing
+        if self.command_queue and not self.executing_commands:
+            threading.Thread(target=self._execute_command_queue, daemon=True).start()
+
+    def _execute_command_queue(self):
+        """Execute queued commands sequentially with delays"""
+        self.executing_commands = True
+
+        while self.command_queue:
+            command = self.command_queue.pop(0)
+            print(f"[LLM] Processing queued command: {command}")
+
+            # Execute the command
+            self._execute_robot_command(command)
+
+            # Estimate delay based on command type
+            action = command.get('action', '').lower()
+            delay = 0
+
+            if action == 'move':
+                distance = abs(command.get('distance', 0))
+                # Estimate: ~100mm/sec average speed, add 1 sec buffer
+                delay = (distance / 100.0) + 1.0
+
+            elif action == 'turn':
+                angle = abs(command.get('angle', 0))
+                # Estimate: ~90°/sec average turn rate, add 1 sec buffer
+                delay = (angle / 90.0) + 1.0
+
+            elif action == 'stop':
+                delay = 0.5  # Brief pause for stop command
+
+            if delay > 0:
+                print(f"[LLM] Waiting {delay:.1f}s for movement to complete...")
+                time.sleep(delay)
+
+        self.executing_commands = False
+        print(f"[LLM] Command queue empty")
 
     def _execute_robot_command(self, command: Dict[str, Any]):
         """Execute a single robot command"""
         action = command.get('action', '').lower()
 
-        print(f"[LLM] Executing robot command: {command}")
-
         if action == 'move':
             distance = command.get('distance', 0)
             robot_move = self.llm_callbacks.get('robot_move')
-            print(f"[LLM] robot_move callback: {robot_move}")
             if robot_move:
-                print(f"[LLM] Calling robot_move({distance}, 0)")
-                # Send move command with distance (robot expects distance in payload)
                 robot_move(distance, 0)  # Second param unused but kept for compatibility
                 direction = "forward" if distance > 0 else "backward"
                 self._add_system_message(f"🤖 Executing: Move {direction} {abs(distance)}mm")
-                if self.debug_mode:
-                    print(f"[LLM] Executing move command: distance={distance}mm")
             else:
-                print(f"[LLM] ERROR: robot_move callback not found!")
-                print(f"[LLM] Available callbacks: {list(self.llm_callbacks.keys())}")
+                if self.debug_mode:
+                    print(f"[LLM] ERROR: robot_move callback not found!")
 
         elif action == 'turn':
             angle = command.get('angle', 0)
             robot_turn = self.llm_callbacks.get('robot_turn')
-            print(f"[LLM] robot_turn callback: {robot_turn}")
             if robot_turn:
-                print(f"[LLM] Calling robot_turn({angle})")
                 robot_turn(angle)
-                direction = "right" if angle > 0 else "left"
+                direction = "left" if angle > 0 else "right"
                 self._add_system_message(f"🤖 Executing: Turn {direction} {abs(angle)}°")
-                if self.debug_mode:
-                    print(f"[LLM] Executing turn command: angle={angle}°")
             else:
-                print(f"[LLM] ERROR: robot_turn callback not found!")
-                print(f"[LLM] Available callbacks: {list(self.llm_callbacks.keys())}")
+                if self.debug_mode:
+                    print(f"[LLM] ERROR: robot_turn callback not found!")
 
         elif action == 'stop':
             robot_stop = self.llm_callbacks.get('robot_stop')
@@ -528,7 +560,25 @@ class LLMPanel:
     def add_error_message(self, error: str):
         """Add error message"""
         self._add_system_message(f"Error: {error}")
-    
+
+    def handle_voice_input(self, text: str):
+        """Handle voice input from robot microphone"""
+        if not text or text.strip() == "":
+            return
+
+        if self.is_generating:
+            self._add_system_message("⚠️ AI is busy, voice input ignored")
+            return
+
+        # Add voice input message to chat with special formatting
+        self._add_user_message(f"🎤 {text}")
+
+        # Send to LLM
+        if self.llm_callbacks.get('generate_response'):
+            self.llm_callbacks['generate_response'](text, use_current_image=True)
+        else:
+            self._add_system_message("Error: LLM callback not available")
+
     def get_widget(self):
         """Return the main widget for packing"""
         return self.panel 

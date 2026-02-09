@@ -315,7 +315,22 @@ class MainWindow:
         """Add complete LLM response"""
         if hasattr(self, 'llm_panel'):
             self.llm_panel.add_complete_response(response)
-    
+
+    def handle_voice_input(self, text: str):
+        """Handle voice input from robot microphone"""
+        if hasattr(self, 'llm_panel'):
+            self.llm_panel.handle_voice_input(text)
+
+    def update_voice_status(self, status: str):
+        """Update voice recognition status indicator"""
+        if hasattr(self, 'status_bar'):
+            self.status_bar.update_voice_status(status)
+
+    def update_voice_partial(self, partial_text: str):
+        """Update partial voice recognition display"""
+        if hasattr(self, 'status_bar'):
+            self.status_bar.update_voice_status('listening', partial_text)
+
     def add_llm_error(self, error: str):
         """Add LLM error message"""
         if hasattr(self, 'llm_panel'):

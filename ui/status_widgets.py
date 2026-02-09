@@ -324,6 +324,64 @@ class CPUWidget:
         """Get the main widget"""
         return self.card
 
+
+class VoiceStatusWidget:
+    """Widget showing voice recognition status"""
+    def __init__(self, parent):
+        self.parent = parent
+        self.setup_widget()
+
+    def setup_widget(self):
+        """Setup voice status widget"""
+        self.frame = tk.Frame(self.parent, bg='#404040')
+
+        # Voice icon (emoji)
+        self.icon_label = tk.Label(self.frame, text="🎤", font=('Arial', 14),
+                                   bg='#404040', fg='gray')
+        self.icon_label.pack(side='left', padx=(0, 5))
+
+        # Status text
+        self.status_label = tk.Label(self.frame, text="Voice: Offline",
+                                     font=('Arial', 10), bg='#404040', fg='gray')
+        self.status_label.pack(side='left')
+
+        # Partial recognition text (shows what's being heard)
+        self.partial_label = tk.Label(self.frame, text="", font=('Arial', 9, 'italic'),
+                                      bg='#404040', fg='#aaaaaa')
+        self.partial_label.pack(side='left', padx=(10, 0))
+
+    def update_status(self, status: str, partial_text: str = ""):
+        """Update voice status
+        Args:
+            status: 'offline', 'ready', 'listening', 'processing'
+            partial_text: Partial recognition text to display
+        """
+        status_map = {
+            'offline': ('🎤', 'Voice: Offline', 'gray'),
+            'ready': ('🎤', 'Voice: Ready', '#4caf50'),  # Green
+            'listening': ('🔴', 'Voice: Listening', '#ff5722'),  # Red (recording)
+            'processing': ('🔄', 'Voice: Processing', '#ff9800')  # Orange
+        }
+
+        icon, text, color = status_map.get(status, status_map['offline'])
+
+        self.icon_label.config(text=icon)
+        self.status_label.config(text=text, fg=color)
+
+        # Update partial text
+        if partial_text:
+            display_text = f'"{partial_text}"'
+            if len(display_text) > 50:
+                display_text = display_text[:47] + '..."'
+            self.partial_label.config(text=display_text)
+        else:
+            self.partial_label.config(text="")
+
+    def get_widget(self):
+        """Get the main widget"""
+        return self.frame
+
+
 class StatusBar:
     def __init__(self, parent, broker_host: str):
         self.parent = parent
@@ -333,13 +391,17 @@ class StatusBar:
     def setup_widget(self):
         """Setup status bar"""
         self.bar = tk.Frame(self.parent, bg='#404040')
-        
-        self.connection_status = tk.Label(self.bar, text=f"Connecting to {self.broker_host}...", 
+
+        self.connection_status = tk.Label(self.bar, text=f"Connecting to {self.broker_host}...",
                                         bg='#404040', fg='#ffd700', font=('Arial', 11, 'bold'))
         self.connection_status.pack(side='left', padx=15, pady=8)
-        
+
+        # Voice status widget (center-left)
+        self.voice_widget = VoiceStatusWidget(self.bar)
+        self.voice_widget.get_widget().pack(side='left', padx=(30, 15), pady=8)
+
         # Current time (right side of status bar)
-        self.time_label = tk.Label(self.bar, text="--:--", font=('Arial', 11, 'bold'), 
+        self.time_label = tk.Label(self.bar, text="--:--", font=('Arial', 11, 'bold'),
                                  bg='#404040', fg='white')
         self.time_label.pack(side='right', padx=15, pady=8)
     
@@ -361,7 +423,18 @@ class StatusBar:
             self.time_label.config(text=current_time)
         except:
             pass  # GUI might be destroyed
-    
+
+    def update_voice_status(self, status: str, partial_text: str = ""):
+        """Update voice recognition status
+        Args:
+            status: 'offline', 'ready', 'listening', 'processing'
+            partial_text: Partial recognition text
+        """
+        try:
+            self.voice_widget.update_status(status, partial_text)
+        except:
+            pass  # GUI might be destroyed
+
     def get_widget(self):
         """Get the main widget"""
         return self.bar 

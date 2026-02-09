@@ -162,9 +162,30 @@ class GUIManager:
         def _update():
             available = "Connected" in status or "available" in status.lower()
             self.main_window.update_llm_status(status, available)
-        
+
         self.main_window.schedule_update(_update)
-    
+
+    def handle_voice_input(self, text: str):
+        """Handle voice input from robot"""
+        def _update():
+            self.main_window.handle_voice_input(text)
+
+        self.main_window.schedule_update(_update)
+
+    def update_voice_status(self, status: str):
+        """Update voice recognition status"""
+        def _update():
+            self.main_window.update_voice_status(status)
+
+        self.main_window.schedule_update(_update)
+
+    def update_voice_partial(self, partial_text: str):
+        """Update partial voice recognition"""
+        def _update():
+            self.main_window.update_voice_partial(partial_text)
+
+        self.main_window.schedule_update(_update)
+
     def update_llm_models(self, models):
         """Update available LLM models"""
         def _update():

@@ -113,13 +113,27 @@ class ApplicationController:
         """Setup MQTT message callbacks"""
         # Get topics from MQTT client
         topics = self.mqtt_client.get_topics()
-        
+
         # Register message handlers
         for topic_name, topic in topics.items():
             handler = self.message_handlers.get_handler(topic)
             if handler:
                 self.mqtt_client.add_message_callback(topic, handler)
-        
+
+        # Register voice callbacks
+        self.mqtt_client.add_message_callback(
+            topics['voice_recognized'],
+            self._handle_voice_recognition
+        )
+        self.mqtt_client.add_message_callback(
+            topics['voice_status'],
+            self._handle_voice_status
+        )
+        self.mqtt_client.add_message_callback(
+            topics['voice_partial'],
+            self._handle_voice_partial
+        )
+
         # Register connection callbacks
         self.mqtt_client.add_connection_callback('connect', self._on_mqtt_connect)
         self.mqtt_client.add_connection_callback('disconnect', self._on_mqtt_disconnect)
@@ -299,10 +313,24 @@ class ApplicationController:
 
         # Robot moves 3x the commanded distance, so divide by 3
         scaled_distance = int(distance / 3)
+
+        # Send TTS command for movement announcement
+        direction = "forward" if distance > 0 else "backward"
+        distance_cm = abs(distance) / 10  # Convert mm to cm
+        if distance_cm >= 100:  # If >= 100cm, say in meters
+            distance_m = distance_cm / 100
+            speech_text = f"Moving {direction} {distance_m:.1f} meters"
+        elif distance_cm >= 10:  # >= 10cm, say in cm
+            speech_text = f"Moving {direction} {int(distance_cm)} centimeters"
+        else:  # < 10cm, say in mm
+            speech_text = f"Moving {direction} {abs(distance)} millimeters"
+
+        self.mqtt_client.send_speak_command(speech_text)
         self.mqtt_client.send_move_distance_command(scaled_distance)
+
         if self.debug_mode:
-            direction = "forward" if distance > 0 else "backward"
             print(f"[APP] AI Move command: {direction} {abs(distance)}mm (scaled to {scaled_distance}mm)")
+            print(f"[APP] TTS: {speech_text}")
 
     def _robot_turn(self, angle: int):
         """Send turn command with angle in degrees (AI command format)"""
@@ -313,10 +341,16 @@ class ApplicationController:
 
         # Robot turns 1.8x the commanded angle (10% short of 2x), so scale by 1/1.8
         scaled_angle = int(angle / 1.8)
+
+        # Send TTS command for turn announcement
+        direction = "left" if angle > 0 else "right"
+        speech_text = f"Turning {direction} {abs(angle)} degrees"
+        self.mqtt_client.send_speak_command(speech_text)
         self.mqtt_client.send_turn_command(scaled_angle)
+
         if self.debug_mode:
-            direction = "left" if angle > 0 else "right"  # Positive = left per robot behavior
             print(f"[APP] AI Turn command: {direction} {abs(angle)}° (scaled to {scaled_angle}°)")
+            print(f"[APP] TTS: {speech_text}")
 
     def _emergency_stop(self):
         """Emergency stop - immediate, no confirmation"""
@@ -689,11 +723,41 @@ class ApplicationController:
         """Handle LLM status updates"""
         if self.debug_mode:
             print(f"🤖 LLM Status: {status}")
-        
+
         # Forward to GUI if available
         if hasattr(self, 'gui_manager'):
             self.gui_manager.handle_llm_status(status)
-    
+
+    def _handle_voice_recognition(self, payload: dict):
+        """Handle voice recognition from robot"""
+        text = payload.get('text', '').strip()
+        if not text:
+            return
+
+        print(f"🎤 Voice recognized: '{text}'")
+
+        # Forward to GUI for display and LLM processing
+        if hasattr(self, 'gui_manager') and self.gui_manager:
+            self.gui_manager.handle_voice_input(text)
+
+    def _handle_voice_status(self, payload: dict):
+        """Handle voice status updates from robot"""
+        status = payload.get('status', 'offline')
+        if self.debug_mode:
+            print(f"🎤 Voice status: {status}")
+
+        # Forward to GUI
+        if hasattr(self, 'gui_manager') and self.gui_manager:
+            self.gui_manager.update_voice_status(status)
+
+    def _handle_voice_partial(self, payload: dict):
+        """Handle partial voice recognition from robot"""
+        partial_text = payload.get('partial', '').strip()
+
+        # Forward to GUI (no debug print - too noisy)
+        if hasattr(self, 'gui_manager') and self.gui_manager:
+            self.gui_manager.update_voice_partial(partial_text)
+
     def _llm_test_connection(self, url: str) -> bool:
         """Test connection to LLM server"""
         if not self.llm_manager:
