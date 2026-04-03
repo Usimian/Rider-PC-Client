@@ -106,4 +106,32 @@ class ConfigManager:
         if 'llm' not in self.config:
             self.config.add_section('llm')
         self.config.set('llm', 'enabled', str(enabled).lower())
-        self.save_config() 
+        self.save_config()
+
+    # Movement scale factor methods
+    # Scale factor = divisor: commanded_mm / scale = value sent to robot
+    def get_move_forward_scale(self) -> float:
+        return self.config.getfloat('calibration', 'move_forward_scale', fallback=3.0)
+
+    def get_move_backward_scale(self) -> float:
+        return self.config.getfloat('calibration', 'move_backward_scale', fallback=3.0)
+
+    def get_turn_left_scale(self) -> float:
+        return self.config.getfloat('calibration', 'turn_left_scale', fallback=1.8)
+
+    def get_turn_right_scale(self) -> float:
+        return self.config.getfloat('calibration', 'turn_right_scale', fallback=1.8)
+
+    def set_move_scales(self, forward: float, backward: float):
+        if 'calibration' not in self.config:
+            self.config.add_section('calibration')
+        self.config.set('calibration', 'move_forward_scale', str(forward))
+        self.config.set('calibration', 'move_backward_scale', str(backward))
+        self.save_config()
+
+    def set_turn_scales(self, left: float, right: float):
+        if 'calibration' not in self.config:
+            self.config.add_section('calibration')
+        self.config.set('calibration', 'turn_left_scale', str(left))
+        self.config.set('calibration', 'turn_right_scale', str(right))
+        self.save_config()

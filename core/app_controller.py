@@ -2,6 +2,7 @@
 # coding=utf-8
 
 import signal
+import threading
 import time
 import sys
 from typing import Dict, Any, List
@@ -20,6 +21,7 @@ class ApplicationController:
         self.cleanup_done = False  # Flag to prevent multiple cleanup calls
         self._shutting_down = False  # Flag to prevent multiple signal handling
         self.voice_enabled = True  # Voice commands enabled by default
+        self._pending_voice_text = None  # Voice text waiting for image capture
         
         # Initialize core components
         self.config_manager = ConfigManager()
@@ -184,6 +186,8 @@ class ApplicationController:
         """Handle MQTT connection events"""
         if success:
             self.gui_manager.update_connection_status(True)
+            # Tell the robot the current voice state so its MIC indicator is correct
+            self.mqtt_client.send_voice_control(self.voice_enabled)
         else:
             self.gui_manager.update_connection_status(False, "Connection failed")
     
@@ -291,6 +295,13 @@ class ApplicationController:
                         image_size = data.get('image_size', 'unknown size')
                         resolution = data.get('resolution', 'unknown')
                         print(f"[APP] Image received: {request_id} ({image_size}, {resolution})")
+
+                    # Process any voice command that was waiting for an image
+                    if self._pending_voice_text:
+                        pending = self._pending_voice_text
+                        self._pending_voice_text = None
+                        if hasattr(self, 'gui_manager') and self.gui_manager:
+                            self.gui_manager.handle_voice_input(pending)
                 else:
                     # Success but no image data
                     error_msg = "No image data received"
@@ -327,26 +338,27 @@ class ApplicationController:
                 print("⚠️ Cannot send move command - not connected to robot")
             return
 
-        # Robot moves 3x the commanded distance, so divide by 3
-        scaled_distance = int(distance / 3)
+        if distance >= 0:
+            scale = self.config_manager.get_move_forward_scale()
+            direction = "forward"
+        else:
+            scale = self.config_manager.get_move_backward_scale()
+            direction = "backward"
+        scaled_distance = int(distance / scale)
 
-        # Send TTS command for movement announcement
-        direction = "forward" if distance > 0 else "backward"
-        distance_cm = abs(distance) / 10  # Convert mm to cm
-        if distance_cm >= 100:  # If >= 100cm, say in meters
-            distance_m = distance_cm / 100
-            speech_text = f"Moving {direction} {distance_m:.1f} meters"
-        elif distance_cm >= 10:  # >= 10cm, say in cm
+        distance_cm = abs(distance) / 10
+        if distance_cm >= 100:
+            speech_text = f"Moving {direction} {distance_cm / 100:.1f} meters"
+        elif distance_cm >= 10:
             speech_text = f"Moving {direction} {int(distance_cm)} centimeters"
-        else:  # < 10cm, say in mm
+        else:
             speech_text = f"Moving {direction} {abs(distance)} millimeters"
 
         self.mqtt_client.send_speak_command(speech_text)
         self.mqtt_client.send_move_distance_command(scaled_distance)
 
         if self.debug_mode:
-            print(f"[APP] AI Move command: {direction} {abs(distance)}mm (scaled to {scaled_distance}mm)")
-            print(f"[APP] TTS: {speech_text}")
+            print(f"[APP] Move {direction} {abs(distance)}mm ÷ {scale} = {scaled_distance}mm sent")
 
     def _robot_turn(self, angle: int):
         """Send turn command with angle in degrees (AI command format)"""
@@ -355,18 +367,20 @@ class ApplicationController:
                 print("⚠️ Cannot send turn command - not connected to robot")
             return
 
-        # Robot turns 1.8x the commanded angle (10% short of 2x), so scale by 1/1.8
-        scaled_angle = int(angle / 1.8)
+        if angle >= 0:
+            scale = self.config_manager.get_turn_left_scale()
+            direction = "left"
+        else:
+            scale = self.config_manager.get_turn_right_scale()
+            direction = "right"
+        scaled_angle = int(angle / scale)
 
-        # Send TTS command for turn announcement
-        direction = "left" if angle > 0 else "right"
         speech_text = f"Turning {direction} {abs(angle)} degrees"
         self.mqtt_client.send_speak_command(speech_text)
         self.mqtt_client.send_turn_command(scaled_angle)
 
         if self.debug_mode:
-            print(f"[APP] AI Turn command: {direction} {abs(angle)}° (scaled to {scaled_angle}°)")
-            print(f"[APP] TTS: {speech_text}")
+            print(f"[APP] Turn {direction} {abs(angle)}° ÷ {scale} = {scaled_angle}° sent")
 
     def _emergency_stop(self):
         """Emergency stop - immediate, no confirmation"""
@@ -547,10 +561,11 @@ class ApplicationController:
             
             # Connect to MQTT
             self.mqtt_client.connect()
-            
-            # Initialize LLM GUI integration
-            self._initialize_llm_gui()
-            
+
+            # Initialize LLM GUI in background so it doesn't block mainloop startup
+            if self.llm_manager:
+                threading.Thread(target=self._initialize_llm_gui, daemon=True).start()
+
             # Setup window close handler
             self.gui_manager.set_close_callback(self._window_close_handler)
             
@@ -755,12 +770,26 @@ class ApplicationController:
         if not self.voice_enabled:
             return
 
+        # If LLM has no image yet, capture one first then process the voice command
+        if self.llm_manager and not self.llm_manager.current_image_data:
+            self._pending_voice_text = text
+            self._request_image_capture()
+            return
+
         # Forward to GUI for display and LLM processing
         if hasattr(self, 'gui_manager') and self.gui_manager:
             self.gui_manager.handle_voice_input(text)
 
     def _handle_voice_status(self, payload: dict):
         """Handle voice status updates from robot"""
+        # Sync enabled/disabled state if robot sent it (e.g. button D toggled)
+        if 'enabled' in payload:
+            enabled = bool(payload['enabled'])
+            self.voice_enabled = enabled
+            if hasattr(self, 'gui_manager') and self.gui_manager:
+                self.gui_manager.set_voice_enabled(enabled)
+            return
+
         status = payload.get('status', 'offline')
         if self.debug_mode:
             print(f"🎤 Voice status: {status}")

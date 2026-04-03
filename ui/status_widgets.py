@@ -194,37 +194,36 @@ class CPUWidget:
         cpu_frame = tk.Frame(self.card, bg='#3c3c3c')
         cpu_frame.pack(pady=(10, 5), padx=8, fill='x')
         
-        self.cpu_value_label = tk.Label(cpu_frame, text="0%", font=('Arial', 9, 'bold'), 
-                                       bg='#3c3c3c', fg='#cccccc', width=6, anchor='e')
-        self.cpu_value_label.pack(side='left')
-        
+        tk.Label(cpu_frame, text="CPU", font=('Arial', 8),
+                bg='#3c3c3c', fg='#87ceeb', width=5, anchor='w').pack(side='left')
+
         # Make canvas expand to fill most of available space
-        self.cpu_canvas = tk.Canvas(cpu_frame, height=24, bg='#2b2b2b', 
+        self.cpu_canvas = tk.Canvas(cpu_frame, height=24, bg='#2b2b2b',
                                    highlightthickness=0, bd=0)
         self.cpu_canvas.pack(side='left', padx=(5, 5), fill='x', expand=True)
-        
-        tk.Label(cpu_frame, text="CPU", font=('Arial', 8), 
-                bg='#3c3c3c', fg='#87ceeb').pack(side='left')
-        
-        # Load row
-        load_frame = tk.Frame(self.card, bg='#3c3c3c')
-        load_frame.pack(pady=(0, 10), padx=8, fill='x')
-        
-        self.load_value_label = tk.Label(load_frame, text="0.0", font=('Arial', 9, 'bold'), 
-                                        bg='#3c3c3c', fg='#cccccc', width=6, anchor='e')
-        self.load_value_label.pack(side='left')
-        
-        # Make canvas expand to fill most of available space
-        self.load_canvas = tk.Canvas(load_frame, height=24, bg='#2b2b2b', 
+
+        self.cpu_value_label = tk.Label(cpu_frame, text="0%", font=('Arial', 9, 'bold'),
+                                       bg='#3c3c3c', fg='#cccccc', width=6, anchor='e')
+        self.cpu_value_label.pack(side='left')
+
+        # Temp row
+        temp_frame = tk.Frame(self.card, bg='#3c3c3c')
+        temp_frame.pack(pady=(0, 10), padx=8, fill='x')
+
+        tk.Label(temp_frame, text="Temp", font=('Arial', 8),
+                bg='#3c3c3c', fg='#87ceeb', width=5, anchor='w').pack(side='left')
+
+        self.temp_canvas = tk.Canvas(temp_frame, height=24, bg='#2b2b2b',
                                     highlightthickness=0, bd=0)
-        self.load_canvas.pack(side='left', padx=(5, 5), fill='x', expand=True)
-        
-        tk.Label(load_frame, text="Load", font=('Arial', 8), 
-                bg='#3c3c3c', fg='#87ceeb').pack(side='left')
-        
+        self.temp_canvas.pack(side='left', padx=(5, 5), fill='x', expand=True)
+
+        self.temp_value_label = tk.Label(temp_frame, text="0°C", font=('Arial', 9, 'bold'),
+                                        bg='#3c3c3c', fg='#cccccc', width=6, anchor='e')
+        self.temp_value_label.pack(side='left')
+
         # Draw initial empty bars
         self.draw_cpu_bar(0)
-        self.draw_load_bar(0)
+        self.draw_temp_bar(0)
     
     def draw_cpu_bar(self, cpu_percent):
         """Draw CPU percentage bar"""
@@ -264,46 +263,28 @@ class CPUWidget:
             self.cpu_canvas.create_rectangle(fill_x1, fill_y1, fill_x2, fill_y2, 
                                            outline='', fill=fill_color)
     
-    def draw_load_bar(self, load_value):
-        """Draw load bar (0-4 scale)"""
-        self.load_canvas.delete("all")
-        
-        # Get current canvas width dynamically
-        self.load_canvas.update_idletasks()
-        canvas_width = self.load_canvas.winfo_width()
-        canvas_height = self.load_canvas.winfo_height()
-        
-        # Use the actual full canvas width without any limitations
-        # Remove all width restrictions to use complete available space
-        
-        # Draw fill based on load (0-4 scale) directly on canvas background
-        if load_value > 0:
-            # Clamp load value to 0-4 range
-            clamped_load = min(max(load_value, 0), 4)
-            
-            # Use complete actual canvas dimensions for fill area
-            fill_x1 = 0
-            fill_y1 = 0
-            fill_width = int(canvas_width * clamped_load / 4)
-            fill_x2 = fill_x1 + fill_width
-            fill_y2 = canvas_height
-            
-            # Ensure minimum width if there's any value
-            if fill_width < 1 and load_value > 0:
+    def draw_temp_bar(self, temp_c):
+        """Draw CPU temperature bar (0-100°C scale)"""
+        self.temp_canvas.delete("all")
+
+        self.temp_canvas.update_idletasks()
+        canvas_width = self.temp_canvas.winfo_width()
+        canvas_height = self.temp_canvas.winfo_height()
+
+        if temp_c > 0:
+            fill_width = int(canvas_width * min(temp_c, 100) / 100)
+            if fill_width < 1:
                 fill_width = 1
-                fill_x2 = fill_x1 + fill_width
-                
-            # Color based on load
-            if load_value >= 3.0:
-                fill_color = '#f44336'  # Red - overloaded
-            elif load_value >= 1.5:
-                fill_color = '#ff9800'  # Orange - high load
+
+            if temp_c >= 75:
+                fill_color = '#f44336'   # Red
+            elif temp_c >= 60:
+                fill_color = '#ff9800'   # Yellow/orange
             else:
-                fill_color = '#4caf50'  # Green - normal load
-            
-            # Draw the fill rectangle directly on canvas using full width
-            self.load_canvas.create_rectangle(fill_x1, fill_y1, fill_x2, fill_y2, 
-                                            outline='', fill=fill_color)
+                fill_color = '#4caf50'   # Green
+
+            self.temp_canvas.create_rectangle(0, 0, fill_width, canvas_height,
+                                              outline='', fill=fill_color)
     
     def update_cpu_data(self, data: Dict[str, float]):
         """Update CPU display"""
@@ -313,10 +294,10 @@ class CPUWidget:
             self.cpu_value_label.config(text=f"{cpu_percent:.1f}%")
             self.draw_cpu_bar(cpu_percent)
             
-            # Update 1-minute load average
-            load_1min = data.get('cpu_load_1min', 0.0)
-            self.load_value_label.config(text=f"{load_1min:.2f}")
-            self.draw_load_bar(load_1min)
+            # Update CPU temperature
+            cpu_temp = data.get('cpu_temp', 0.0)
+            self.temp_value_label.config(text=f"{cpu_temp:.0f}°C")
+            self.draw_temp_bar(cpu_temp)
         except:
             pass  # GUI might be destroyed
     
@@ -358,9 +339,9 @@ class VoiceStatusWidget:
         """
         status_map = {
             'offline': ('🎤', 'Voice: Offline', 'gray'),
-            'ready': ('🎤', 'Voice: Ready', '#4caf50'),  # Green
-            'listening': ('🔴', 'Voice: Listening', '#ff5722'),  # Red (recording)
-            'processing': ('🔄', 'Voice: Processing', '#ff9800')  # Orange
+            'ready':      ('🎤', 'Voice: Active', '#4caf50'),   # Green
+            'listening':  ('🎤', 'Voice: Active', '#4caf50'),   # Green
+            'processing': ('🎤', 'Voice: Active', '#ff9800'),   # Orange
         }
 
         icon, text, color = status_map.get(status, status_map['offline'])
@@ -387,7 +368,7 @@ class StatusBar:
         self.parent = parent
         self.broker_host = broker_host
         self.toggle_voice_callback = toggle_voice_callback
-        self._last_voice_status = 'offline'
+        self._last_voice_status = 'ready'
         self.setup_widget()
 
     def setup_widget(self):
@@ -413,6 +394,8 @@ class StatusBar:
         # Voice status widget
         self.voice_widget = VoiceStatusWidget(self.bar)
         self.voice_widget.get_widget().pack(side='left', padx=(2, 15), pady=8)
+        # Set initial display based on default enabled state
+        self.voice_widget.update_status(self._last_voice_status if self.voice_enabled_var.get() else 'offline')
 
         # Current time (right side of status bar)
         self.time_label = tk.Label(self.bar, text="--:--", font=('Arial', 11, 'bold'),
@@ -427,6 +410,11 @@ class StatusBar:
         if self.toggle_voice_callback:
             self.toggle_voice_callback(enabled)
     
+    def set_voice_enabled(self, enabled: bool):
+        """Sync checkbox state from robot without triggering the toggle callback"""
+        self.voice_enabled_var.set(enabled)
+        self.voice_widget.update_status(self._last_voice_status if enabled else 'offline')
+
     def update_connection_status(self, connected: bool, message: str = None):
         """Update connection status"""
         if connected:

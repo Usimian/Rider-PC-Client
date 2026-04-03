@@ -262,9 +262,10 @@ Stop immediately:
 
 === IMPORTANT NOTES ===
 - Distance is in MILLIMETERS (10mm = 1cm, 100mm = 10cm, 1000mm = 1m)
-- Angles in DEGREES (positive = right, negative = left)
+- Angles in DEGREES (positive = left, negative = right)
 - Robot automatically stops when movement completes
 - Always respond with both explanation AND the JSON command
+- ONLY generate JSON commands for the EXACT movement requested. Do NOT add extra move or turn commands beyond what was asked.
 
 User request: """
 

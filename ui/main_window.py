@@ -20,7 +20,7 @@ class MainWindow:
         """Setup the main window"""
         self.root = tk.Tk()
         self.root.title(f"Rider Robot PC Client - {self.broker_host}")
-        self.root.geometry("1600x1240")
+        self.root.geometry("1600x1315")
         self.root.configure(bg='#2b2b2b')  # Modern dark theme
         
         # Configure root window to use grid with proper weights (key for resizing!)
@@ -331,6 +331,11 @@ class MainWindow:
         """Update partial voice recognition display"""
         if hasattr(self, 'status_bar'):
             self.status_bar.update_voice_status('listening', partial_text)
+
+    def set_voice_enabled(self, enabled: bool):
+        """Sync voice enabled checkbox from robot state without firing toggle callback"""
+        if hasattr(self, 'status_bar'):
+            self.status_bar.set_voice_enabled(enabled)
 
     def add_llm_error(self, error: str):
         """Add LLM error message"""

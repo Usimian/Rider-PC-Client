@@ -32,7 +32,8 @@ class MQTTClient:
             'voice_recognized': 'rider/voice/recognized',
             'voice_status': 'rider/voice/status',
             'voice_partial': 'rider/voice/partial',
-            'voice_control': 'rider/voice/control'
+            'voice_control': 'rider/voice/control',
+            'client_disconnect': 'rider/client/disconnect'
         }
         
         # Callbacks for different message types
@@ -64,7 +65,14 @@ class MQTTClient:
             self.mqtt_client.on_connect = self._on_connect
             self.mqtt_client.on_disconnect = self._on_disconnect
             self.mqtt_client.on_message = self._on_message
-            
+
+            # LWT: broker publishes this immediately if we disconnect ungracefully
+            self.mqtt_client.will_set(
+                self.topics['client_disconnect'],
+                json.dumps({'source': 'pc_client', 'reason': 'lost_connection'}),
+                qos=1
+            )
+
             print(f"Connecting to MQTT broker at {self.broker_host}:{self.broker_port} using MQTT 5.0")
             self.mqtt_client.connect(self.broker_host, self.broker_port, 60)
             self.mqtt_client.loop_start()
@@ -106,11 +114,19 @@ class MQTTClient:
             self.send_emergency_stop()
             self.send_movement_stop()
             
+            # Tell robot we're disconnecting before dropping the connection
+            self.mqtt_client.publish(
+                self.topics['client_disconnect'],
+                json.dumps({'source': 'pc_client', 'reason': 'graceful_disconnect'}),
+                qos=1
+            )
+            time.sleep(0.1)  # Let the message flush
+
             print("📡 Disconnecting from MQTT broker...")
-            
+
             # Stop the network loop
             self.mqtt_client.loop_stop()
-            
+
             # Proper MQTT disconnect
             self.mqtt_client.disconnect()
             
@@ -293,9 +309,9 @@ class MQTTClient:
                 print("[DEBUG] Subscribing to topics:")
             
             for topic_name, topic in self.topics.items():
-                if topic_name.startswith('control'):
-                    self.debug_print(f"  Skipping control topic: {topic}")
-                    continue  # Don't subscribe to control topics
+                if topic_name.startswith('control') or topic_name == 'client_disconnect':
+                    self.debug_print(f"  Skipping publish-only topic: {topic}")
+                    continue
                 client.subscribe(topic)
                 self.debug_print(f"  Subscribed to {topic}")
             
@@ -303,6 +319,8 @@ class MQTTClient:
             client.subscribe(self.topics['response_image_capture'])
             self.debug_print(f"  Subscribed to {self.topics['response_image_capture']}")
             
+            # (no explicit "connected" publish needed — robot tracks activity via __on_message)
+
             # Notify connection callbacks
             if 'connect' in self._connection_callbacks:
                 self._connection_callbacks['connect'](True)

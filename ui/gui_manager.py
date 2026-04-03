@@ -118,7 +118,7 @@ class GUIManager:
                 self.main_window.update_speed(data['speed_scale'])
             
             # Update CPU data if any CPU fields are present
-            cpu_fields = ['cpu_percent', 'cpu_load_1min']
+            cpu_fields = ['cpu_percent', 'cpu_temp']
             if any(field in data for field in cpu_fields):
                 cpu_data = self.robot_state.get_cpu_data()
                 self.main_window.update_cpu_data(cpu_data)
@@ -176,6 +176,13 @@ class GUIManager:
         """Update voice recognition status"""
         def _update():
             self.main_window.update_voice_status(status)
+
+        self.main_window.schedule_update(_update)
+
+    def set_voice_enabled(self, enabled: bool):
+        """Sync the voice enabled checkbox without triggering the toggle callback"""
+        def _update():
+            self.main_window.set_voice_enabled(enabled)
 
         self.main_window.schedule_update(_update)
 
