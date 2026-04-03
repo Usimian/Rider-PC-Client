@@ -19,6 +19,7 @@ class ApplicationController:
         self.debug_mode = debug
         self.cleanup_done = False  # Flag to prevent multiple cleanup calls
         self._shutting_down = False  # Flag to prevent multiple signal handling
+        self.voice_enabled = True  # Voice commands enabled by default
         
         # Initialize core components
         self.config_manager = ConfigManager()
@@ -79,6 +80,8 @@ class ApplicationController:
             'toggle_roll_balance': self._toggle_roll_balance,
             'toggle_performance': self._toggle_performance,
             'toggle_camera': self._toggle_camera,
+            'toggle_voice': self._toggle_voice,
+            'set_volume': self._set_volume,
             'send_movement': self._send_movement,
             'robot_move': self._robot_move_distance,
             'robot_turn': self._robot_turn,
@@ -241,10 +244,23 @@ class ApplicationController:
         if not self.mqtt_client.is_connected():
             messagebox.showwarning("Not Connected", "Not connected to robot")
             return
-        
+
         self.mqtt_client.send_camera_command('toggle_camera')
         if self.debug_mode:
             print("[APP] Camera toggled")
+
+    def _set_volume(self, value: int):
+        """Send volume level (0-100) to robot"""
+        if self.mqtt_client.is_connected():
+            self.mqtt_client.send_settings_command('set_volume', int(value))
+
+    def _toggle_voice(self, enabled: bool):
+        """Set voice commands on/off — also pauses STT on the robot"""
+        self.voice_enabled = enabled
+        state = "enabled" if enabled else "disabled"
+        print(f"🎤 Voice commands {state}")
+        if self.mqtt_client.is_connected():
+            self.mqtt_client.send_voice_control(enabled)
     
     def _request_image_capture(self, resolution: str = "high"):
         """Request image capture from robot"""
@@ -735,6 +751,9 @@ class ApplicationController:
             return
 
         print(f"🎤 Voice recognized: '{text}'")
+
+        if not self.voice_enabled:
+            return
 
         # Forward to GUI for display and LLM processing
         if hasattr(self, 'gui_manager') and self.gui_manager:

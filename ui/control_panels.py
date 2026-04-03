@@ -62,45 +62,77 @@ class FeaturesPanel:
     def __init__(self, parent, callbacks: Dict[str, Callable]):
         self.parent = parent
         self.callbacks = callbacks
+        self._volume_after_id = None
         self.setup_panel()
-    
+
     def setup_panel(self):
         """Setup robot features panel"""
-        self.panel = tk.LabelFrame(self.parent, text="🤖 ROBOT FEATURES", 
+        self.panel = tk.LabelFrame(self.parent, text="🤖 ROBOT FEATURES",
                                   font=('Arial', 12, 'bold'), bg='#3c3c3c', fg='#87ceeb',
-                                  relief='solid', bd=1, height=200)
-        
+                                  relief='solid', bd=1, height=260)
+
         # Prevent the LabelFrame from shrinking below its set height
         self.panel.pack_propagate(False)
-        
+
         grid = tk.Frame(self.panel, bg='#3c3c3c')
         grid.pack(padx=20, pady=15, fill='both', expand=False)
-        
+
         # Feature status indicators
         features = [
             ("Roll Balance", "roll_balance", "toggle_roll_balance"),
-            ("Performance Mode", "performance", "toggle_performance"), 
+            ("Performance Mode", "performance", "toggle_performance"),
             ("Camera", "camera", "toggle_camera")
         ]
-        
+
         self.status_labels = {}
         for i, (name, attr, callback_key) in enumerate(features):
             feature_row = tk.Frame(grid, bg='#3c3c3c')
             feature_row.pack(fill='x', pady=8)
-            
-            tk.Label(feature_row, text=f"{name}:", font=('Arial', 12, 'bold'), 
+
+            tk.Label(feature_row, text=f"{name}:", font=('Arial', 12, 'bold'),
                     bg='#3c3c3c', fg='white', width=15, anchor='w').pack(side='left')
-            
-            status_label = tk.Label(feature_row, text="OFF", font=('Arial', 12, 'bold'), 
+
+            status_label = tk.Label(feature_row, text="OFF", font=('Arial', 12, 'bold'),
                                    bg='#3c3c3c', fg='red', width=6)
             status_label.pack(side='left', padx=(5, 10))
             self.status_labels[attr] = status_label
-            
+
             callback = self.callbacks.get(callback_key, lambda: None)
-            tk.Button(feature_row, text="Toggle", command=callback, 
-                     font=('Arial', 9), bg='#555555', fg='white', 
+            tk.Button(feature_row, text="Toggle", command=callback,
+                     font=('Arial', 9), bg='#555555', fg='white',
                      activebackground='#666666', width=8).pack(side='right')
+
+        # Volume control row
+        vol_row = tk.Frame(grid, bg='#3c3c3c')
+        vol_row.pack(fill='x', pady=8)
+
+        tk.Label(vol_row, text="Volume:", font=('Arial', 12, 'bold'),
+                bg='#3c3c3c', fg='white', width=15, anchor='w').pack(side='left')
+
+        self._volume_val_label = tk.Label(vol_row, text="80%", font=('Arial', 12, 'bold'),
+                                          bg='#3c3c3c', fg='#87ceeb', width=5)
+        self._volume_val_label.pack(side='right')
+
+        self._volume_var = tk.IntVar(value=80)
+        self._volume_slider = tk.Scale(
+            vol_row, from_=0, to=100, orient='horizontal',
+            variable=self._volume_var, showvalue=False,
+            bg='#3c3c3c', fg='white', troughcolor='#555555',
+            highlightthickness=0, bd=0, sliderlength=16,
+            command=self._on_volume_change
+        )
+        self._volume_slider.pack(side='left', fill='x', expand=True, padx=(5, 5))
     
+    def _on_volume_change(self, value):
+        """Called as slider moves — debounce then send to robot."""
+        val = int(value)
+        self._volume_val_label.config(text=f"{val}%")
+        if self._volume_after_id:
+            self.panel.after_cancel(self._volume_after_id)
+        self._volume_after_id = self.panel.after(
+            150, lambda: self.callbacks.get('set_volume', lambda v: None)(val)
+        )
+
     def update_feature_status(self, feature: str, enabled: bool):
         """Update individual feature status"""
         if feature in self.status_labels:

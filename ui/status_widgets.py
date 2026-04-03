@@ -383,11 +383,13 @@ class VoiceStatusWidget:
 
 
 class StatusBar:
-    def __init__(self, parent, broker_host: str):
+    def __init__(self, parent, broker_host: str, toggle_voice_callback=None):
         self.parent = parent
         self.broker_host = broker_host
+        self.toggle_voice_callback = toggle_voice_callback
+        self._last_voice_status = 'offline'
         self.setup_widget()
-    
+
     def setup_widget(self):
         """Setup status bar"""
         self.bar = tk.Frame(self.parent, bg='#404040')
@@ -396,14 +398,34 @@ class StatusBar:
                                         bg='#404040', fg='#ffd700', font=('Arial', 11, 'bold'))
         self.connection_status.pack(side='left', padx=15, pady=8)
 
-        # Voice status widget (center-left)
+        # Voice enable checkbox (to the left of voice status)
+        self.voice_enabled_var = tk.BooleanVar(value=True)
+        self.voice_checkbox = tk.Checkbutton(
+            self.bar, text="", variable=self.voice_enabled_var,
+            command=self._on_voice_toggle,
+            bg='#404040', fg='white',
+            selectcolor='#404040', activebackground='#404040',
+            highlightthickness=0, bd=0,
+            cursor='hand2'
+        )
+        self.voice_checkbox.pack(side='left', padx=(30, 0), pady=8)
+
+        # Voice status widget
         self.voice_widget = VoiceStatusWidget(self.bar)
-        self.voice_widget.get_widget().pack(side='left', padx=(30, 15), pady=8)
+        self.voice_widget.get_widget().pack(side='left', padx=(2, 15), pady=8)
 
         # Current time (right side of status bar)
         self.time_label = tk.Label(self.bar, text="--:--", font=('Arial', 11, 'bold'),
                                  bg='#404040', fg='white')
         self.time_label.pack(side='right', padx=15, pady=8)
+
+    def _on_voice_toggle(self):
+        """Called when voice checkbox is toggled"""
+        enabled = self.voice_enabled_var.get()
+        # Update voice widget directly — no async needed, we're on the main thread
+        self.voice_widget.update_status(self._last_voice_status if enabled else 'offline')
+        if self.toggle_voice_callback:
+            self.toggle_voice_callback(enabled)
     
     def update_connection_status(self, connected: bool, message: str = None):
         """Update connection status"""
@@ -417,10 +439,11 @@ class StatusBar:
         self.connection_status.config(text=text, fg=color)
     
     def update_time(self):
-        """Update time display"""
+        """Update time display — only redraws when the minute changes"""
         try:
             current_time = datetime.now().strftime("%H:%M")
-            self.time_label.config(text=current_time)
+            if self.time_label.cget('text') != current_time:
+                self.time_label.config(text=current_time)
         except:
             pass  # GUI might be destroyed
 
@@ -431,7 +454,9 @@ class StatusBar:
             partial_text: Partial recognition text
         """
         try:
-            self.voice_widget.update_status(status, partial_text)
+            self._last_voice_status = status
+            if self.voice_enabled_var.get():
+                self.voice_widget.update_status(status, partial_text)
         except:
             pass  # GUI might be destroyed
 

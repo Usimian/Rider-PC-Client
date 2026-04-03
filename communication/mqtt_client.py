@@ -31,7 +31,8 @@ class MQTTClient:
             'response_image_capture': 'rider/response/image_capture',
             'voice_recognized': 'rider/voice/recognized',
             'voice_status': 'rider/voice/status',
-            'voice_partial': 'rider/voice/partial'
+            'voice_partial': 'rider/voice/partial',
+            'voice_control': 'rider/voice/control'
         }
         
         # Callbacks for different message types
@@ -251,6 +252,14 @@ class MQTTClient:
         }
         return self.publish_command(self.topics['control_system'], command)
     
+    def send_voice_control(self, enabled: bool) -> bool:
+        """Send voice enable/disable command to robot"""
+        command = {
+            'enabled': enabled,
+            'timestamp': time.time()
+        }
+        return self.publish_command(self.topics['voice_control'], command)
+
     def send_image_capture_request(self, resolution: str = "high") -> str:
         """Send image capture request and return the request ID"""
         request_id = f"img_{int(time.time() * 1000)}"  # Unique ID with milliseconds

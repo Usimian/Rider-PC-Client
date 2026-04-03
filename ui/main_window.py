@@ -40,7 +40,8 @@ class MainWindow:
     def create_widgets(self):
         """Create all GUI widgets"""
         # Status bar at top
-        self.status_bar = StatusBar(self.root, self.broker_host)
+        toggle_voice_cb = self.callbacks.get('toggle_voice', lambda: None)
+        self.status_bar = StatusBar(self.root, self.broker_host, toggle_voice_callback=toggle_voice_cb)
         self.status_bar.get_widget().grid(row=0, column=0, sticky="ew")
         
         # Main container with padding - use grid to work with root grid configuration
