@@ -3,3 +3,13 @@
 __pycache__/
 *.pyo
 *.pyd
+
+# Large model files - see README "External assets"
+*.pt
+# Backup archives
+*.tar.gz
+# Flash / servo dumps (transient, regenerable)
+*.bin
+# PlatformIO build output
+.pio/
+

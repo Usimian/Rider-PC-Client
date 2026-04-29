@@ -401,12 +401,16 @@ class MovementPanel:
         return self.panel
 
 class ImageDisplayPanel:
-    def __init__(self, parent, image_callback: Callable = None, llm_callback: Callable = None):
+    def __init__(self, parent, image_callback: Callable = None, llm_callback: Callable = None,
+                 yolo_callback: Callable = None):
         self.parent = parent
         self.image_callback = image_callback  # Callback to request image from robot
         self.llm_callback = llm_callback  # Callback to send image to LLM
+        self.yolo_callback = yolo_callback  # Callback to trigger YOLO detection
         self.current_image = None  # Store current PIL Image
         self.current_image_data = None  # Store current base64 image data
+        self.current_detections = []  # Latest YOLO detections
+        self.show_detections = True  # Whether to draw detection overlay
         self.setup_panel()
     
     def setup_panel(self):
@@ -419,52 +423,46 @@ class ImageDisplayPanel:
         controls_frame = tk.Frame(self.panel, bg='#3c3c3c')
         controls_frame.pack(side='bottom', fill='x', padx=20, pady=(0, 10))
 
-        # ROW 1: Video control and resolution
-        row1 = tk.Frame(controls_frame, bg='#3c3c3c')
-        row1.pack(fill='x', pady=(0, 5))
+        # Row 1: action buttons
+        btn_row = tk.Frame(controls_frame, bg='#3c3c3c')
+        btn_row.pack(fill='x', pady=(0, 4))
 
-        # Video feed button
         self.video_active = False
-        self.video_btn = tk.Button(row1, text="🎥 Video",
+        self.video_btn = tk.Button(btn_row, text="🎥 Video",
                             font=('Arial', 9), bg='#4CAF50', fg='white',
-                            activebackground='#45a049',
+                            activebackground='#45a049', width=8,
                             command=self._toggle_video_feed)
         self.video_btn.pack(side='left')
 
-        # Resolution selector (right side of row 1)
-        resolution_frame = tk.Frame(row1, bg='#3c3c3c')
-        resolution_frame.pack(side='right')
+        tk.Button(btn_row, text="📂 Load",
+                  font=('Arial', 9), bg='#555555', fg='white',
+                  activebackground='#666666', width=6,
+                  command=self._load_image).pack(side='left', padx=(6, 0))
 
-        tk.Label(resolution_frame, text="Resolution:", font=('Arial', 9),
-                bg='#3c3c3c', fg='white').pack(side='left', padx=(0, 5))
+        tk.Button(btn_row, text="💾 Save",
+                  font=('Arial', 9), bg='#555555', fg='white',
+                  activebackground='#666666', width=6,
+                  command=self._save_image).pack(side='left', padx=(6, 0))
 
-        self.resolution_var = tk.StringVar(value="high")
-        resolution_combo = ttk.Combobox(resolution_frame, textvariable=self.resolution_var,
-                                       values=["high", "low", "tiny"], state="readonly", width=8)
-        resolution_combo.pack(side='left')
+        self.status_label = tk.Label(btn_row, text="",
+                                     font=('Arial', 9), bg='#3c3c3c', fg='#ffd700')
+        self.status_label.pack(side='left', padx=(10, 0))
 
-        # ROW 2: File operations and status
-        row2 = tk.Frame(controls_frame, bg='#3c3c3c')
-        row2.pack(fill='x')
+        # Row 2: continuous left, resolution right
+        opt_row = tk.Frame(controls_frame, bg='#3c3c3c')
+        opt_row.pack(fill='x')
 
-        # Load image button (narrower)
-        load_btn = tk.Button(row2, text="📂 Load",
-                            font=('Arial', 9), bg='#555555', fg='white',
-                            activebackground='#666666', width=8,
-                            command=self._load_image)
-        load_btn.pack(side='left')
+        self.continuous_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(opt_row, text="Continuous detection", variable=self.continuous_var,
+                       font=('Arial', 9), bg='#3c3c3c', fg='white',
+                       selectcolor='#7B68EE', activebackground='#3c3c3c',
+                       activeforeground='white').pack(side='left')
 
-        # Save screenshot button (narrower)
-        save_btn = tk.Button(row2, text="💾 Save",
-                            font=('Arial', 9), bg='#555555', fg='white',
-                            activebackground='#666666', width=8,
-                            command=self._save_image)
-        save_btn.pack(side='left', padx=(8, 0))
-
-        # Status label on right side of row 2
-        self.status_label = tk.Label(row2, text="Ready",
-                                    font=('Arial', 9), bg='#3c3c3c', fg='#ffd700')
-        self.status_label.pack(side='right')
+        self._resolution_map = {"640×480": "high", "320×240": "low", "160×120": "tiny"}
+        self.resolution_var = tk.StringVar(value="640×480")
+        ttk.Combobox(opt_row, textvariable=self.resolution_var,
+                     values=list(self._resolution_map.keys()),
+                     state="readonly", width=8).pack(side='right')
         
         # Main image display area - pack this AFTER controls to fill remaining space
         self.image_frame = tk.Frame(self.panel, bg='#2b2b2b', relief='sunken', bd=2)
@@ -484,7 +482,7 @@ class ImageDisplayPanel:
         self._stop_video_feed()
         if self.image_callback:
             self.status_label.config(text="🔄 Image capture...")
-            resolution = self.resolution_var.get()
+            resolution = self._resolution_map.get(self.resolution_var.get(), "high")
             self.image_callback(resolution)
         else:
             self.status_label.config(text="⚠️ No image capture callback available")
@@ -559,7 +557,7 @@ class ImageDisplayPanel:
             self._video_request_pending = False
             self.video_btn.config(text="🎥 Video", bg='#4CAF50', activebackground='#45a049')
             self.status_label.config(text="Stopped")
-            self.panel.after(2000, lambda: self.status_label.config(text="Ready"))
+            self.panel.after(2000, lambda: self.status_label.config(text=""))
     
 
     
@@ -637,6 +635,10 @@ class ImageDisplayPanel:
                 size_kb = len(img_bytes) / 1024
                 self.status_label.config(text=f"📷({img_width}x{img_height})")
                 
+                # Re-apply last detections immediately to avoid flicker between frames
+                if self.current_detections:
+                    self._redraw_with_detections()
+
                 # AUTOMATICALLY send image to LLM system when captured
                 if self.llm_callback and image_data:
                     try:
@@ -645,6 +647,10 @@ class ImageDisplayPanel:
                             print("🤖 Image automatically sent to LLM system")
                     except Exception as llm_error:
                         print(f"⚠️ Failed to send image to LLM: {llm_error}")
+
+                # Continuous YOLO detection
+                if getattr(self, 'continuous_var', None) and self.continuous_var.get():
+                    self._run_yolo()
                 
             except Exception as e:
                 self.image_label.config(
@@ -661,7 +667,58 @@ class ImageDisplayPanel:
             self._video_request_pending = False
             # Add 50ms delay between frames for ~20 fps (smoother than flooding)
             self.panel.after(50, self._start_video_loop)
-    
+
+    def _run_yolo(self):
+        """Trigger YOLO detection on current image"""
+        if self.current_image_data and self.yolo_callback:
+            self.yolo_callback()
+
+    def update_detections(self, detections: list):
+        """Update YOLO detection overlay on current image"""
+        self.current_detections = detections
+        if self.current_image and detections is not None:
+            self._redraw_with_detections()
+
+    def _redraw_with_detections(self):
+        """Redraw the displayed image with YOLO bounding boxes"""
+        from PIL import ImageDraw
+
+        img = self.current_image.copy()
+        draw = ImageDraw.Draw(img)
+
+        colors = ['#FF4444', '#44FF44', '#4444FF', '#FFFF44', '#FF44FF',
+                  '#44FFFF', '#FF8844', '#88FF44', '#4488FF', '#FF4488']
+        class_colors = {}
+
+        for det in self.current_detections:
+            label = det['label']
+            conf = det['confidence']
+            x1, y1, x2, y2 = det['bbox']
+
+            if label not in class_colors:
+                class_colors[label] = colors[len(class_colors) % len(colors)]
+            color = class_colors[label]
+
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+
+            text = f"{label} {conf:.2f}"
+            text_y = max(y1 - 16, 0)
+            text_w = len(text) * 7 + 4
+            draw.rectangle([x1, text_y, x1 + text_w, text_y + 16], fill=color)
+            draw.text((x1 + 2, text_y + 1), text, fill='black')
+
+        self.image_frame.update_idletasks()
+        display_width = max(self.image_frame.winfo_width() - 20, 200)
+        display_height = max(self.image_frame.winfo_height() - 20, 150)
+
+        iw, ih = img.size
+        scale = min(display_width / iw, display_height / ih)
+        display_img = img.resize((int(iw * scale), int(ih * scale)), Image.Resampling.LANCZOS)
+
+        photo = ImageTk.PhotoImage(display_img)
+        self.image_label.config(image=photo, text="", compound='center')
+        self.image_label.image = photo
+
     def get_widget(self):
         """Get the main widget"""
-        return self.panel 
+        return self.panel

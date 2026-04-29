@@ -218,9 +218,20 @@ class GUIManager:
         """Add LLM error"""
         def _update():
             self.main_window.add_llm_error(error)
-        
+
         self.main_window.schedule_update(_update)
-    
+
+    def update_yolo_detections(self, detections: list):
+        """Update YOLO detection overlay"""
+        def _update():
+            self.main_window.update_yolo_detections(detections)
+
+        self.main_window.schedule_update(_update)
+
+    def get_current_image_data(self):
+        """Get current image data from image panel"""
+        return self.main_window.get_current_image_data()
+
     def set_close_callback(self, callback: Callable):
         """Set callback for window close event"""
         self.main_window.set_close_callback(callback)

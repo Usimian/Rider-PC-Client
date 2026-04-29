@@ -117,7 +117,8 @@ class MainWindow:
         feature_callbacks = {
             'toggle_roll_balance': self.callbacks.get('toggle_roll_balance', lambda: None),
             'toggle_performance': self.callbacks.get('toggle_performance', lambda: None),
-            'toggle_camera': self.callbacks.get('toggle_camera', lambda: None)
+            'toggle_camera': self.callbacks.get('toggle_camera', lambda: None),
+            'set_volume': self.callbacks.get('set_volume', lambda v: None)
         }
         self.features_panel = FeaturesPanel(middle_row, feature_callbacks)
         self.features_panel.get_widget().grid(row=0, column=1, sticky="ew")
@@ -150,7 +151,8 @@ class MainWindow:
         # Image Display Panel (Center - expandable)
         image_callback = self.callbacks.get('request_image_capture', lambda resolution: None)
         llm_callback = self.callbacks.get('llm_send_image', lambda image_data: None)
-        self.image_panel = ImageDisplayPanel(bottom_row, image_callback, llm_callback)
+        yolo_callback = self.callbacks.get('yolo_run_detection', None)
+        self.image_panel = ImageDisplayPanel(bottom_row, image_callback, llm_callback, yolo_callback)
         self.image_panel.get_widget().grid(row=0, column=1, sticky="nsew", padx=(0, 10))
         
         # LLM Panel (Right side - expandable)
@@ -163,7 +165,9 @@ class MainWindow:
             # Robot control callbacks for LLM commands
             'robot_move': self.callbacks.get('robot_move', lambda x, y: None),
             'robot_turn': self.callbacks.get('robot_turn', lambda angle: None),
-            'robot_stop': self.callbacks.get('emergency_stop', lambda: None)
+            'robot_stop': self.callbacks.get('emergency_stop', lambda: None),
+            'speak': self.callbacks.get('speak'),
+            'stop_speaking': self.callbacks.get('stop_speaking')
         }
         
         # Only create LLM panel if LLM callbacks are available
@@ -341,6 +345,17 @@ class MainWindow:
         """Add LLM error message"""
         if hasattr(self, 'llm_panel'):
             self.llm_panel.add_error_message(error)
+
+    def update_yolo_detections(self, detections: list):
+        """Update YOLO detection overlay on image panel"""
+        if hasattr(self, 'image_panel'):
+            self.image_panel.update_detections(detections)
+
+    def get_current_image_data(self):
+        """Get current base64 image data from image panel"""
+        if hasattr(self, 'image_panel'):
+            return self.image_panel.current_image_data
+        return None
 
     def _emergency_close(self):
         """Emergency close handler"""

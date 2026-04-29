@@ -33,7 +33,9 @@ class MQTTClient:
             'voice_status': 'rider/voice/status',
             'voice_partial': 'rider/voice/partial',
             'voice_control': 'rider/voice/control',
-            'client_disconnect': 'rider/client/disconnect'
+            'client_disconnect': 'rider/client/disconnect',
+            'yolo_detections': 'rider/yolo/detections',
+            'voice_stop': 'rider/voice/stop'
         }
         
         # Callbacks for different message types
@@ -275,6 +277,21 @@ class MQTTClient:
             'timestamp': time.time()
         }
         return self.publish_command(self.topics['voice_control'], command)
+
+    def send_stop_tts(self) -> bool:
+        """Tell the robot to stop speaking immediately"""
+        import time as _time
+        return self.publish_command(self.topics['voice_stop'], {'timestamp': _time.time()})
+
+    def send_yolo_detections(self, detections: list) -> bool:
+        """Publish YOLO detection results to robot"""
+        import time as _time
+        command = {
+            'detections': detections,
+            'count': len(detections),
+            'timestamp': _time.time()
+        }
+        return self.publish_command(self.topics['yolo_detections'], command)
 
     def send_image_capture_request(self, resolution: str = "high") -> str:
         """Send image capture request and return the request ID"""

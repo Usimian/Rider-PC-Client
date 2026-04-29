@@ -258,16 +258,20 @@ class LLMPanel:
             self._add_system_message("Error: LLM callback not available")
     
     def _clear_chat(self):
-        """Clear chat history"""
+        """Clear chat history and stop any ongoing speech"""
+        # Stop robot speaking immediately
+        stop = self.llm_callbacks.get('stop_speaking')
+        if stop:
+            stop()
+
         self.chat_display.config(state=tk.NORMAL)
         self.chat_display.delete("1.0", tk.END)
         self.chat_display.config(state=tk.DISABLED)
-        
-        # Clear LLM conversation history
+
         if self.llm_callbacks.get('clear_conversation'):
             self.llm_callbacks['clear_conversation']()
-        
-        self._add_system_message("Conversation cleared. Ready for new questions!")
+
+        self._add_system_message("Ready.")
     
     def _show_settings(self):
         """Show LLM settings dialog"""
@@ -462,8 +466,26 @@ class LLMPanel:
     def add_complete_response(self, response: str):
         """Add complete assistant response and execute any robot commands"""
         self._add_assistant_message(response)
-        # Parse and execute any JSON robot commands in the response
         self._parse_and_execute_commands(response)
+        self._speak_response(response)
+
+    def _speak_response(self, response: str):
+        """Speak the text portion of the response via robot TTS"""
+        speak = self.llm_callbacks.get('speak')
+        if not speak:
+            return
+
+        # Strip <think>...</think> blocks (qwen thinking mode)
+        text = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL)
+        # Strip markdown code blocks
+        text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
+        # Strip markdown formatting
+        text = re.sub(r'[*_#`]', '', text)
+        # Collapse whitespace
+        text = ' '.join(text.split())
+
+        if text:
+            speak(text)
 
     def _parse_and_execute_commands(self, response: str):
         """Parse JSON robot commands from LLM response and queue them for sequential execution"""

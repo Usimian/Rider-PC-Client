@@ -8,6 +8,12 @@ A desktop monitoring client that mirrors the robot's LCD screen display.
 - Python 3.7+ with tkinter
 - Network connection to the robot
 
+### External assets (not in repo)
+The following files are required at runtime but are excluded from the repo due to size. Re-download to recreate the working environment:
+- `yolo11x.pt` — YOLO v11 large model. Download from Ultralytics: https://github.com/ultralytics/assets/releases
+- `yolov8n.pt` — YOLO v8 nano model. Same source.
+- `rider_backup.tar.gz` — Full robot home directory backup (411MB). Recreate by tarring `~` on the robot Pi.
+
 ### Installation
 1. Install dependencies:
    ```bash

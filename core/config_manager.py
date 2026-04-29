@@ -27,6 +27,12 @@ class ConfigManager:
                 'max_tokens': '2000',
                 'enabled': 'true'
             }
+            self.config['yolo'] = {
+                'enabled': 'true',
+                'model': 'yolo11x.pt',
+                'confidence': '0.5',
+                'auto_detect': 'false'
+            }
             self.save_config()
     
     def save_config(self):
@@ -134,4 +140,29 @@ class ConfigManager:
             self.config.add_section('calibration')
         self.config.set('calibration', 'turn_left_scale', str(left))
         self.config.set('calibration', 'turn_right_scale', str(right))
+        self.save_config()
+
+    # YOLO Configuration Methods
+    def is_yolo_enabled(self) -> bool:
+        return self.config.getboolean('yolo', 'enabled', fallback=True)
+
+    def get_yolo_model(self) -> str:
+        return self.config.get('yolo', 'model', fallback='yolo11x.pt')
+
+    def get_yolo_confidence(self) -> float:
+        return self.config.getfloat('yolo', 'confidence', fallback=0.5)
+
+    def is_yolo_auto_detect(self) -> bool:
+        return self.config.getboolean('yolo', 'auto_detect', fallback=False)
+
+    def set_yolo_enabled(self, enabled: bool):
+        if 'yolo' not in self.config:
+            self.config.add_section('yolo')
+        self.config.set('yolo', 'enabled', str(enabled).lower())
+        self.save_config()
+
+    def set_yolo_auto_detect(self, auto: bool):
+        if 'yolo' not in self.config:
+            self.config.add_section('yolo')
+        self.config.set('yolo', 'auto_detect', str(auto).lower())
         self.save_config()

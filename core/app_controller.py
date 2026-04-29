@@ -11,6 +11,7 @@ from tkinter import messagebox
 from .config_manager import ConfigManager
 from .robot_state import RobotState
 from .llm_manager import LLMManager
+from .yolo_manager import YOLOManager
 from communication.mqtt_client import MQTTClient
 from communication.message_handlers import MessageHandlers
 from ui.gui_manager import GUIManager
@@ -27,6 +28,23 @@ class ApplicationController:
         self.config_manager = ConfigManager()
         self.robot_state = RobotState()
         
+        # Initialize YOLO (if enabled)
+        self.yolo_manager = None
+        if self.config_manager.is_yolo_enabled():
+            try:
+                self.yolo_manager = YOLOManager(
+                    model_name=self.config_manager.get_yolo_model(),
+                    confidence=self.config_manager.get_yolo_confidence(),
+                    debug=debug
+                )
+                self.yolo_manager.set_detection_callback(self._handle_yolo_detections)
+                if debug:
+                    print("✅ YOLO Manager initialized")
+            except Exception as e:
+                if debug:
+                    print(f"⚠️ YOLO Manager initialization failed: {e}")
+                self.yolo_manager = None
+
         # Initialize LLM (if enabled)
         self.llm_manager = None
         if self.config_manager.is_llm_enabled():
@@ -98,6 +116,14 @@ class ApplicationController:
             'request_image_capture': self._request_image_capture
         }
         
+        callbacks['speak'] = self._speak_text
+        callbacks['stop_speaking'] = self._stop_speaking
+
+        # Add YOLO callbacks if available
+        if self.yolo_manager:
+            callbacks['yolo_run_detection'] = self._run_yolo_on_current_image
+            callbacks['yolo_set_auto'] = self.config_manager.set_yolo_auto_detect
+
         # Add LLM callbacks if available
         if self.llm_manager:
             callbacks.update({
@@ -295,6 +321,10 @@ class ApplicationController:
                         image_size = data.get('image_size', 'unknown size')
                         resolution = data.get('resolution', 'unknown')
                         print(f"[APP] Image received: {request_id} ({image_size}, {resolution})")
+
+                    # Run YOLO detection if auto-detect enabled
+                    if self.yolo_manager and self.config_manager.is_yolo_auto_detect():
+                        self.yolo_manager.run_detection(image_data)
 
                     # Process any voice command that was waiting for an image
                     if self._pending_voice_text:
@@ -597,6 +627,13 @@ class ApplicationController:
             except Exception as e:
                 print(f"⚠️ Safety shutdown commands failed: {e}")
             
+            # Cleanup YOLO manager
+            try:
+                if hasattr(self, 'yolo_manager') and self.yolo_manager:
+                    self.yolo_manager.cleanup()
+            except Exception as e:
+                print(f"⚠️ YOLO cleanup failed: {e}")
+
             # Cleanup LLM manager
             try:
                 if hasattr(self, 'llm_manager') and self.llm_manager:
@@ -805,6 +842,38 @@ class ApplicationController:
         # Forward to GUI (no debug print - too noisy)
         if hasattr(self, 'gui_manager') and self.gui_manager:
             self.gui_manager.update_voice_partial(partial_text)
+
+    def _speak_text(self, text: str):
+        """Send text to robot TTS"""
+        if self.mqtt_client.is_connected() and text.strip():
+            self.mqtt_client.send_speak_command(text.strip())
+
+    def _stop_speaking(self):
+        """Stop robot TTS immediately"""
+        if self.mqtt_client.is_connected():
+            self.mqtt_client.send_stop_tts()
+
+    def _handle_yolo_detections(self, detections: list):
+        """Handle YOLO detection results — publish to MQTT and update GUI overlay"""
+        # Publish to robot via MQTT
+        if self.mqtt_client.is_connected():
+            self.mqtt_client.send_yolo_detections(detections)
+
+        # Update GUI overlay
+        if hasattr(self, 'gui_manager'):
+            self.gui_manager.update_yolo_detections(detections)
+
+        if self.debug_mode:
+            labels = [f"{d['label']}({d['confidence']:.2f})" for d in detections]
+            print(f"[YOLO] {len(detections)} detections: {', '.join(labels) or 'none'}")
+
+    def _run_yolo_on_current_image(self):
+        """Manually trigger YOLO on the current image in the GUI"""
+        if not self.yolo_manager:
+            return
+        image_data = self.gui_manager.get_current_image_data()
+        if image_data:
+            self.yolo_manager.run_detection(image_data)
 
     def _llm_test_connection(self, url: str) -> bool:
         """Test connection to LLM server"""

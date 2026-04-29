@@ -207,33 +207,9 @@ class LLMManager:
                 
                 # Add robot control instructions to prompt
                 robot_control_instructions = """
-CRITICAL: You MUST include JSON commands to control the robot when requested.
+You are an AI assistant for a small balancing robot. Answer all questions naturally and helpfully.
 
-=== ROBOT CONTROL FORMAT ===
-You MUST wrap commands in markdown JSON code blocks exactly like this:
-
-**LINEAR MOVEMENT (Forward/Backward):**
-```json
-{"action": "move", "distance": <millimeters>}
-```
-- distance: integer in millimeters
-- Positive = Forward, Negative = Backward
-- Robot moves specified distance and stops automatically
-
-**ROTATION (Turn Left/Right):**
-```json
-{"action": "turn", "angle": <degrees>}
-```
-- angle: integer in degrees
-- Positive = Turn Left, Negative = Turn Right
-- Robot rotates specified angle and stops automatically
-
-**EMERGENCY STOP:**
-```json
-{"action": "stop"}
-```
-
-=== EXAMPLES ===
+ONLY when the user explicitly requests physical movement (move, go, turn, rotate, stop) include a markdown JSON command block using EXACTLY this format:
 
 Move forward 20cm:
 ```json
@@ -255,19 +231,17 @@ Turn right 45°:
 {"action": "turn", "angle": -45}
 ```
 
-Stop immediately:
+Stop:
 ```json
 {"action": "stop"}
 ```
 
-=== IMPORTANT NOTES ===
-- Distance is in MILLIMETERS (10mm = 1cm, 100mm = 10cm, 1000mm = 1m)
-- Angles in DEGREES (positive = left, negative = right)
-- Robot automatically stops when movement completes
-- Always respond with both explanation AND the JSON command
-- ONLY generate JSON commands for the EXACT movement requested. Do NOT add extra move or turn commands beyond what was asked.
+Rules:
+- Distance is in MILLIMETERS. Angles in DEGREES (positive=left, negative=right).
+- For ALL other requests (questions, analysis, conversation) respond normally with NO JSON.
+- Generate ONLY the exact commands requested, nothing extra.
 
-User request: """
+User: """
 
                 full_prompt = robot_control_instructions + prompt
 
