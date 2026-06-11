@@ -78,6 +78,29 @@ static bool readWheel(uint8_t id, int* pos, int* vel) {
   return false;
 }
 
+// Standard FeeTech 1-byte register write (for leg servos)
+static void writeServoReg(uint8_t id, uint8_t reg, uint8_t val) {
+  uint8_t ck = ~(id + 0x04 + 0x03 + reg + val);
+  uint8_t buf[8] = {0xFF,0xFF,id,0x04,0x03,reg,val,ck};
+  Serial2.write(buf, 8);
+}
+
+// Leg servos (IDs 12/22) are standard position servos: read 2 bytes @ 0x24,
+// reply = FF FF id 04 ERR posL posH CK (no bus echo on this hardware).
+static int readLeg(uint8_t id) {
+  while (Serial2.available()) Serial2.read();
+  uint8_t ck = ~(id + 0x04 + 0x02 + 0x24 + 0x02);
+  uint8_t req[8] = {0xFF,0xFF,id,0x04,0x02,0x24,0x02,ck};
+  Serial2.write(req, 8);
+  delay(3);
+  uint8_t buf[20]; int n=0; unsigned long t0=millis();
+  while (millis()-t0 < 6 && n < (int)sizeof(buf)) if (Serial2.available()) buf[n++]=Serial2.read();
+  for (int i=0; i+6 < n; i++)
+    if (buf[i]==0xFF && buf[i+1]==0xFF && buf[i+2]==id && buf[i+3]==0x04)
+      return buf[i+5] | (buf[i+6] << 8);
+  return -1;
+}
+
 static void accumOdom(long* odom, int* last, int pos) {
   if (*last >= 0) {
     int d = pos - *last;
@@ -114,20 +137,34 @@ void setup() {
   imuWrite(REG_PWR_MGMT0, 0x0F);
   delay(100);
 
+  // leg servos limp so they can be moved by hand to find limits (reg 0x18 = torque enable)
+  writeServoReg(12, 0x18, 0); delay(5);
+  writeServoReg(22, 0x18, 0); delay(5);
+  Serial.println("Leg torque OFF (move legs by hand to limits).");
+
   // prime wheel positions
   int pl=0,vl=0,pr=0,vr=0;
   pollBoth(&pl,&vl,&pr,&vr);
   Serial.printf("Initial wheel pos: L=%d R=%d\n", pl, pr);
 
-  // gentle drive proof: +40 then -40 on LEFT wheel
-  Serial.println("Torque wiggle on LEFT wheel...");
-  unsigned long t0 = millis();
-  while (millis() - t0 < 400) { sendWheelTorque(40, 0); pollBoth(&pl,&vl,&pr,&vr);
-    Serial.printf("  +tor odomL=%ld vL=%d\n", odomL, vl); delay(20); }
-  t0 = millis();
-  while (millis() - t0 < 400) { sendWheelTorque(-40, 0); pollBoth(&pl,&vl,&pr,&vr);
-    Serial.printf("  -tor odomL=%ld vL=%d\n", odomL, vl); delay(20); }
-  for (int i=0;i<5;i++){ sendWheelTorque(0,0); delay(10); }
+  // gentle drive proof + sign check on BOTH wheels (wheels free)
+  unsigned long t0;
+  Serial.println("L +tor:");
+  t0=millis(); while(millis()-t0<400){ sendWheelTorque(40,0); pollBoth(&pl,&vl,&pr,&vr);
+    Serial.printf("  odomL=%ld odomR=%ld\n", odomL, odomR); delay(20);}
+  for(int i=0;i<3;i++){sendWheelTorque(0,0);delay(10);}
+  Serial.println("L -tor:");
+  t0=millis(); while(millis()-t0<400){ sendWheelTorque(-40,0); pollBoth(&pl,&vl,&pr,&vr);
+    Serial.printf("  odomL=%ld odomR=%ld\n", odomL, odomR); delay(20);}
+  for(int i=0;i<3;i++){sendWheelTorque(0,0);delay(10);}
+  Serial.println("R +tor:");
+  t0=millis(); while(millis()-t0<400){ sendWheelTorque(0,40); pollBoth(&pl,&vl,&pr,&vr);
+    Serial.printf("  odomL=%ld odomR=%ld\n", odomL, odomR); delay(20);}
+  for(int i=0;i<3;i++){sendWheelTorque(0,0);delay(10);}
+  Serial.println("R -tor:");
+  t0=millis(); while(millis()-t0<400){ sendWheelTorque(0,-40); pollBoth(&pl,&vl,&pr,&vr);
+    Serial.printf("  odomL=%ld odomR=%ld\n", odomL, odomR); delay(20);}
+  for(int i=0;i<5;i++){ sendWheelTorque(0,0); delay(10); }
   Serial.println("Wiggle done. Streaming IMU + wheel odometry...");
 }
 
@@ -137,10 +174,7 @@ void loop() {
   float roll  = atan2f((float)ay,(float)az)*57.2958f;
   float pitch = atan2f(-(float)ax, sqrtf((float)ay*ay+(float)az*az))*57.2958f;
 
-  int pl=0,vl=0,pr=0,vr=0;
-  pollBoth(&pl,&vl,&pr,&vr);
-
-  Serial.printf("roll=%6.1f pitch=%6.1f gy=%5d | L odom=%6ld v=%4d | R odom=%6ld v=%4d\n",
-                roll, pitch, gy, odomL, vl, odomR, vr);
+  int legL = readLeg(12), legR = readLeg(22);
+  Serial.printf("roll=%6.1f | gx=%5d | legL=%5d legR=%5d\n", roll, gx, legL, legR);
   delay(40);
 }
