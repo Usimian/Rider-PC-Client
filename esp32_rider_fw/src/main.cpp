@@ -101,6 +101,28 @@ static int readLeg(uint8_t id) {
   return -1;
 }
 
+// Leg goal position: these (XGO) servos use a NON-STANDARD Goal_Position at
+// reg 0x06 (2 bytes) — verified empirically (0x2A/0x35 do nothing). Torque
+// enable is reg 0x18. The slow per-cycle ramp (caller) controls speed.
+static void writeLegGoal(uint8_t id, int pos) {
+  uint8_t lo = pos & 0xFF, hi = (pos >> 8) & 0xFF;
+  uint8_t ck = ~(id + 0x05 + 0x03 + 0x06 + lo + hi);
+  uint8_t buf[9] = {0xFF,0xFF,id,0x05,0x03,0x06,lo,hi,ck};
+  Serial2.write(buf, 9);
+}
+
+// Leg stance (from measured limits): mid = safe standing target; clamp to range.
+#define LEG_MID_L 918
+#define LEG_MID_R 82
+#define LEG_L_MIN 863
+#define LEG_L_MAX 974
+#define LEG_R_MIN 30
+#define LEG_R_MAX 135
+#define LEG_VEL   200          // low/gentle move speed
+static bool  legHold = false;
+static float legTgtL = LEG_MID_L, legTgtR = LEG_MID_R;
+static int clampi(int v,int lo,int hi){ return v<lo?lo:(v>hi?hi:v); }
+
 static void accumOdom(long* odom, int* last, int pos) {
   if (*last >= 0) {
     int d = pos - *last;
@@ -137,44 +159,50 @@ void setup() {
   imuWrite(REG_PWR_MGMT0, 0x0F);
   delay(100);
 
-  // leg servos limp so they can be moved by hand to find limits (reg 0x18 = torque enable)
+  // leg servos limp at boot (reg 0x18 = torque enable). Commands control hold.
   writeServoReg(12, 0x18, 0); delay(5);
   writeServoReg(22, 0x18, 0); delay(5);
-  Serial.println("Leg torque OFF (move legs by hand to limits).");
-
-  // prime wheel positions
-  int pl=0,vl=0,pr=0,vr=0;
-  pollBoth(&pl,&vl,&pr,&vr);
-  Serial.printf("Initial wheel pos: L=%d R=%d\n", pl, pr);
-
-  // gentle drive proof + sign check on BOTH wheels (wheels free)
-  unsigned long t0;
-  Serial.println("L +tor:");
-  t0=millis(); while(millis()-t0<400){ sendWheelTorque(40,0); pollBoth(&pl,&vl,&pr,&vr);
-    Serial.printf("  odomL=%ld odomR=%ld\n", odomL, odomR); delay(20);}
-  for(int i=0;i<3;i++){sendWheelTorque(0,0);delay(10);}
-  Serial.println("L -tor:");
-  t0=millis(); while(millis()-t0<400){ sendWheelTorque(-40,0); pollBoth(&pl,&vl,&pr,&vr);
-    Serial.printf("  odomL=%ld odomR=%ld\n", odomL, odomR); delay(20);}
-  for(int i=0;i<3;i++){sendWheelTorque(0,0);delay(10);}
-  Serial.println("R +tor:");
-  t0=millis(); while(millis()-t0<400){ sendWheelTorque(0,40); pollBoth(&pl,&vl,&pr,&vr);
-    Serial.printf("  odomL=%ld odomR=%ld\n", odomL, odomR); delay(20);}
-  for(int i=0;i<3;i++){sendWheelTorque(0,0);delay(10);}
-  Serial.println("R -tor:");
-  t0=millis(); while(millis()-t0<400){ sendWheelTorque(0,-40); pollBoth(&pl,&vl,&pr,&vr);
-    Serial.printf("  odomL=%ld odomR=%ld\n", odomL, odomR); delay(20);}
-  for(int i=0;i<5;i++){ sendWheelTorque(0,0); delay(10); }
-  Serial.println("Wiggle done. Streaming IMU + wheel odometry...");
+  Serial.println("Legs LIMP. Commands:  'h' = hold mid stance (gentle ramp)   'o' = limp");
 }
 
 void loop() {
+  // ---- command interface ----
+  if (Serial.available()) {
+    char c = Serial.read();
+    if (c == 'h') {
+      int cl = readLeg(12), cr = readLeg(22);
+      if (cl > 0 && cr > 0) {
+        legTgtL = cl; legTgtR = cr;                 // start ramp from current (no snap)
+        writeLegGoal(12, cl);
+        writeLegGoal(22, cr);
+        writeServoReg(12, 0x18, 1);                 // enable torque holding current pos
+        writeServoReg(22, 0x18, 1);
+        legHold = true;
+        Serial.printf("# HOLD on: from L=%d R=%d -> mid %d/%d\n", cl, cr, LEG_MID_L, LEG_MID_R);
+      } else Serial.println("# leg read failed, not enabling");
+    } else if (c == 'o') {
+      legHold = false;
+      writeServoReg(12, 0x18, 0);
+      writeServoReg(22, 0x18, 0);
+      Serial.println("# limp");
+    }
+  }
+
   int16_t ax,ay,az,gx,gy,gz;
   imuReadData(&ax,&ay,&az,&gx,&gy,&gz);
-  float roll  = atan2f((float)ay,(float)az)*57.2958f;
-  float pitch = atan2f(-(float)ax, sqrtf((float)ay*ay+(float)az*az))*57.2958f;
+  float roll = atan2f((float)ay,(float)az)*57.2958f;
 
   int legL = readLeg(12), legR = readLeg(22);
-  Serial.printf("roll=%6.1f | gx=%5d | legL=%5d legR=%5d\n", roll, gx, legL, legR);
+
+  if (legHold) {
+    // ramp targets toward mid at 1 count/cycle (~25/s -> ~4s full range), clamped — gentle
+    if (legTgtL < LEG_MID_L) legTgtL += 1; else if (legTgtL > LEG_MID_L) legTgtL -= 1;
+    if (legTgtR < LEG_MID_R) legTgtR += 1; else if (legTgtR > LEG_MID_R) legTgtR -= 1;
+    writeLegGoal(12, clampi((int)legTgtL, LEG_L_MIN, LEG_L_MAX));
+    writeLegGoal(22, clampi((int)legTgtR, LEG_R_MIN, LEG_R_MAX));
+  }
+
+  Serial.printf("roll=%6.1f | legL=%5d legR=%5d | hold=%d tgtL=%d tgtR=%d\n",
+                roll, legL, legR, legHold, (int)legTgtL, (int)legTgtR);
   delay(40);
 }
