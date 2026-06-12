@@ -32,11 +32,11 @@
 
 // ---------------- shared state (tuned live; scalar volatiles) ----------------
 volatile bool  gEnabled   = false;   // balance OFF until 'e'
-volatile float gKp        = 6.0f;    // torque per degree of tilt error
-volatile float gKd        = 0.30f;   // torque per (deg/s) of tilt rate
+volatile float gKp        = 18.0f;   // torque per degree of tilt error (RIG-Omni ref=32)
+volatile float gKd        = 1.0f;    // torque per (deg/s) of tilt rate (RIG-Omni ref=1.6)
 volatile float gSetpoint  = 0.0f;    // balance tilt (deg); capture/tune live
-volatile float gPolarity  = 1.0f;    // +1 / -1, flip if it drives the wrong way
-volatile int   gUMax      = 60;      // torque clamp (start modest)
+volatile float gPolarity  = -1.0f;   // -1 = CORRECT (verified balancing 2026-06-11; +1 ran away)
+volatile int   gUMax      = 110;     // torque clamp (wheels break loose ~60 under load)
 volatile float gFallDeg   = 25.0f;   // cut torque past this tilt error
 // telemetry (written by task, read by loop)
 volatile float tTheta=0, tThetaDot=0, tU=0;
@@ -97,6 +97,8 @@ static void balanceTask(void*){
     float u = 0.0f;
     if(gEnabled && fabsf(err) <= gFallDeg){
       u = gPolarity * (gKp*err + gKd*rate);
+      // stiction boost (RIG-Omni style): punch past the wheels' deadzone
+      if(u > 20.0f) u += 10.0f; else if(u < -20.0f) u -= 10.0f;
       u = clampf(u, -(float)gUMax, (float)gUMax);
     }
     wheelTorque((int16_t)u, (int16_t)(-u));   // mirrored: L:+u, R:-u
