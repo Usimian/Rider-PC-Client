@@ -123,38 +123,53 @@ void setup(){
 
   Serial.printf("\n=== Rider balance FW ===  IMU WHO_AM_I=0x%02X\n", imuRead(REG_WHO_AM_I));
   Serial.println("Legs FORCED torque-OFF (never enabled). Balance DISABLED.");
-  Serial.println("Cmds: e/d enable/disable | f flip polarity | c capture setpoint");
-  Serial.println("      q/a Kp -/+ | w/s Kd -/+ | z/x setpoint -/+ | [ /] Umax -/+ | ? status");
+  Serial.println("Cmds (newline-terminated): en 1|0 | kp <v> | kd <v> | umax <v> |");
+  Serial.println("  set <deg> | cap | pol <+/-v> | d (disable) | get");
 
   xTaskCreatePinnedToCore(balanceTask, "balance", 4096, NULL, 12, NULL, 1);
 }
 
+// Line-based command protocol (newline-terminated "<cmd> [value]"), usable by
+// the Pi (shares UART0) or any host. Every command is ACKed with full state.
+//   en <0|1>   enable/disable     d          quick disable
+//   kp <v>     set Kp             kd <v>     set Kd
+//   umax <v>   set torque clamp   set <v>    set tilt setpoint (deg)
+//   cap        setpoint = current tilt       pol <v>   polarity (sign of v)
+//   get        report state
+static void ackState(){
+  Serial.printf("# en=%d Kp=%.2f Kd=%.2f set=%.2f pol=%+.0f Umax=%d\n",
+                gEnabled,gKp,gKd,gSetpoint,gPolarity,gUMax);
+}
+static void applyCmd(char* s){
+  while(*s==' ') s++;
+  char* sp=s; while(*sp && *sp!=' ') sp++;
+  float v=0;
+  if(*sp){ *sp=0; v=atof(sp+1); }
+  if      (!strcmp(s,"en"))   gEnabled=(v!=0.0f);
+  else if (!strcmp(s,"d"))    gEnabled=false;
+  else if (!strcmp(s,"kp"))   gKp=v;
+  else if (!strcmp(s,"kd"))   gKd=v;
+  else if (!strcmp(s,"umax")) gUMax=(int)v;
+  else if (!strcmp(s,"set"))  gSetpoint=v;
+  else if (!strcmp(s,"cap"))  gSetpoint=tTheta;
+  else if (!strcmp(s,"pol"))  gPolarity=(v<0.0f?-1.0f:1.0f);
+  else if (!strcmp(s,"get")||!strcmp(s,"?")) {}
+  else { Serial.printf("# ? '%s'\n", s); return; }
+  ackState();
+}
+
 void loop(){
   static uint32_t tp=0;
-  // --- live commands (USB) ---
+  static char buf[40]; static int n=0;
   while(Serial.available()){
     char c=Serial.read();
-    switch(c){
-      case 'e': gEnabled=true;  Serial.println("# BALANCE ENABLED"); break;
-      case 'd': gEnabled=false; Serial.println("# disabled"); break;
-      case 'f': gPolarity=-gPolarity; Serial.printf("# polarity=%+.0f\n",gPolarity); break;
-      case 'c': gSetpoint=tTheta; Serial.printf("# setpoint captured=%.2f\n",gSetpoint); break;
-      case 'q': gKp=fmaxf(0,gKp-0.5f); break;
-      case 'a': gKp+=0.5f; break;
-      case 'w': gKd=fmaxf(0,gKd-0.05f); break;
-      case 's': gKd+=0.05f; break;
-      case 'z': gSetpoint-=0.5f; break;
-      case 'x': gSetpoint+=0.5f; break;
-      case '[': gUMax=max(0,gUMax-10); break;
-      case ']': gUMax+=10; break;
-      case '?': Serial.printf("# en=%d Kp=%.1f Kd=%.2f set=%.2f pol=%+.0f Umax=%d\n",
-                  gEnabled,gKp,gKd,gSetpoint,gPolarity,gUMax); break;
-    }
+    if(c=='\n'||c=='\r'){ if(n>0){ buf[n]=0; applyCmd(buf); n=0; } }
+    else if(n<39) buf[n++]=c;
   }
-  // --- telemetry @ ~20 Hz ---
+  // --- telemetry @ ~20 Hz (parseable key=value) ---
   if(millis()-tp >= 50){
     tp=millis();
-    Serial.printf("th=%6.2f rate=%7.1f u=%5.0f | en=%d Kp=%.1f Kd=%.2f set=%.2f pol=%+.0f Umax=%d\n",
+    Serial.printf("th=%.2f rate=%.1f u=%.0f en=%d Kp=%.2f Kd=%.2f set=%.2f pol=%+.0f Umax=%d\n",
       tTheta, tThetaDot, tU, gEnabled, gKp, gKd, gSetpoint, gPolarity, gUMax);
   }
 }
