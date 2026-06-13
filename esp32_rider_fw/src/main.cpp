@@ -68,6 +68,7 @@ volatile int   gPosClamp = 120;     // per-cycle goal delta clamp (factory +/-12
 // --- control-loop period: factory runs ~167Hz (3x vTaskDelay(2ms)=6ms). Our per-sample
 // filter/integral constants are tuned for THAT rate, so pace the loop to match. ---
 volatile int   gLoopUs   = 3000;    // target loop period (us); ~253Hz measured (balancing rate)
+volatile int   gWheelFault = 0;     // 0=ok; else ID of a wheel that dropped off the bus (auto-disabled)
 
 // telemetry (written by task, read by loop)
 volatile float tTheta=0, tRate=0, tU=0, tWheelX=0, tWheelVx=0;
@@ -298,9 +299,19 @@ static void balanceTask(void*){
     float rate = pit_gyro;
 
     // --- read ONE wheel this cycle, update odometry ---
+    static int failL=0, failR=0;            // consecutive per-wheel read failures
     int p=0,v=0;
     bool ok = wheelRead(pollId,&p,&v);
-    if(ok) odomUpdate(pollId,p,v); else hzFail++;
+    if(ok){ odomUpdate(pollId,p,v); if(pollId==LEFT_W) failL=0; else failR=0; }
+    else { hzFail++; if(pollId==LEFT_W) failL++; else failR++; }
+    // --- wheel-dropout guard: a wheel that stops answering (e.g. ID21 falling off
+    //     the bus) leaves the robot on one wheel -> pivots and falls. Auto-disable
+    //     + flag the offending ID instead of running away on contaminated data. ---
+    if(gEnabled && (failL > 12 || failR > 12)){
+      gEnabled = false; gWheelFault = (failL>12)? LEFT_W : RIGHT_W;
+      char wb[72]; int wk=snprintf(wb,sizeof(wb),"# WHEEL FAULT id=%d off bus -> DISABLED\n",gWheelFault);
+      emit(wb,wk);
+    }
     if(gDumpRead){
       char b[200]; int k=snprintf(b,sizeof(b),"# rd id=%d ok=%d n=%d p=%d v=%d raw=",pollId,ok,gRawN,p,v);
       for(int i=0;i<gRawN && k<(int)sizeof(b)-4;i++) k+=snprintf(b+k,sizeof(b)-k,"%02X ",gRaw[i]);
@@ -412,8 +423,8 @@ static void emit(const char* b, int k){ Serial.write((const uint8_t*)b,k); Seria
 static void ackState(){
   char b[210];
   int k = snprintf(b, sizeof(b),
-    "# en=%d kppos=%.1f kpvel=%.3f kivel=%.3f kppit=%.1f kdpit=%.2f izero=%.1f set=%.2f vx=%.2f pol=%+.0f psign=%+.0f Umax=%d ff=%.0f ffb=%.0f clp=%.2f slew=%.1f posmode=%d torlim=%d gbias=%.2f\n",
-    gEnabled,gKpPos,gKpVel,gKiVel,gKpPit,gKdPit,gImuZero,gSetpoint,gVx,gPolarity,gPosSign,gUMax,gFF,gFFband,gCtrlLP,gSlewDeg,gPosMode,gTorLim,gGyroBias);
+    "# en=%d kppos=%.1f kpvel=%.3f kivel=%.3f kppit=%.1f kdpit=%.2f izero=%.1f set=%.2f vx=%.2f pol=%+.0f psign=%+.0f Umax=%d ff=%.0f ffb=%.0f clp=%.2f slew=%.1f posmode=%d torlim=%d fault=%d gbias=%.2f\n",
+    gEnabled,gKpPos,gKpVel,gKiVel,gKpPit,gKdPit,gImuZero,gSetpoint,gVx,gPolarity,gPosSign,gUMax,gFF,gFFband,gCtrlLP,gSlewDeg,gPosMode,gTorLim,gWheelFault,gGyroBias);
   emit(b,k);
 }
 static void applyCmd(char* s){
@@ -421,7 +432,7 @@ static void applyCmd(char* s){
   char* sp=s; while(*sp && *sp!=' ') sp++;
   float v=0;
   if(*sp){ *sp=0; v=atof(sp+1); }
-  if      (!strcmp(s,"en"))    gEnabled=(v!=0.0f);
+  if      (!strcmp(s,"en"))  { gEnabled=(v!=0.0f); if(gEnabled) gWheelFault=0; }  // clear fault on fresh enable
   else if (!strcmp(s,"d"))     gEnabled=false;
   else if (!strcmp(s,"kppos")) gKpPos=v;               // cascade gains
   else if (!strcmp(s,"kpvel")) gKpVel=v;
