@@ -12,12 +12,12 @@ from stable_baselines3.common.vec_env import VecNormalize
 from rider_env import RiderBalanceEnv
 
 
-def make_env():
-    return RiderBalanceEnv(add_noise=True)
+def make_env(domain_rand=False, frame_stack=1):
+    return lambda: RiderBalanceEnv(add_noise=True, domain_rand=domain_rand, frame_stack=frame_stack)
 
 
-def evaluate(model, vecnorm, n=5):
-    env = RiderBalanceEnv(add_noise=False)
+def evaluate(model, vecnorm, frame_stack=1, n=5):
+    env = RiderBalanceEnv(add_noise=False, frame_stack=frame_stack)
     results = []
     for s in range(n):
         obs, _ = env.reset(seed=100 + s)
@@ -39,9 +39,11 @@ if __name__ == "__main__":
     ap.add_argument("--steps", type=int, default=300_000)
     ap.add_argument("--nenv", type=int, default=8)
     ap.add_argument("--out", default="ppo_rider")
+    ap.add_argument("--domain_rand", action="store_true")
+    ap.add_argument("--frame_stack", type=int, default=1)
     args = ap.parse_args()
 
-    venv = make_vec_env(make_env, n_envs=args.nenv)
+    venv = make_vec_env(make_env(args.domain_rand, args.frame_stack), n_envs=args.nenv)
     venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
     model = PPO("MlpPolicy", venv, verbose=0, device="cpu", n_steps=1024, batch_size=2048,
                 gamma=0.997, gae_lambda=0.95, learning_rate=3e-4,
@@ -54,5 +56,5 @@ if __name__ == "__main__":
 
     venv.training = False
     print("eval (deterministic, noise off):")
-    for i, (t, xmax, stood) in enumerate(evaluate(model, venv)):
+    for i, (t, xmax, stood) in enumerate(evaluate(model, venv, args.frame_stack)):
         print(f"  ep{i}: survived {t:5.2f}s  max|x|={xmax:.3f} m  {'STOOD' if stood else 'fell'}")

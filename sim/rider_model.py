@@ -16,7 +16,8 @@ def build_mjcf(p: RiderParams) -> str:
     half_track = p.track_width_m / 2.0
     wheel_mass_pair = p.wheel_mass_kg * 2.0
     r = p.wheel_radius_m
-    tmax = p.torque_max_Nm
+    vmax = p.vel_max_rad_s
+    frng = p.vel_forcerange_Nm
     return f"""<mujoco model="rider_balancer">
   <option timestep="{p.physics_timestep_s}" gravity="0 0 -9.81" integrator="implicitfast"/>
   <visual><headlight diffuse="0.6 0.6 0.6"/><global offwidth="640" offheight="480"/></visual>
@@ -39,7 +40,11 @@ def build_mjcf(p: RiderParams) -> str:
     </body>
   </worldbody>
   <actuator>
-    <motor name="wheel" joint="wheel_spin" gear="1" ctrlrange="{-tmax} {tmax}"/>
+    <!-- velocity servo: the real wheel is velocity-controlled (measured). The
+         tight internal loop is modeled stiffly here (kv); the real 13ms lag +
+         3ms latency live in ActuatorModel, which shapes the velocity setpoint. -->
+    <velocity name="wheel" joint="wheel_spin" kv="{p.vel_kv}"
+              ctrlrange="{-vmax} {vmax}" forcerange="{-frng} {frng}"/>
   </actuator>
 </mujoco>
 """

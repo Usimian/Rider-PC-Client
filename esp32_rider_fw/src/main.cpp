@@ -90,6 +90,8 @@ volatile float gSlewDeg = 5.0f;     // per-cycle slew clamp on the smoothed pitc
                                     // apparent gravity vector -> estimator reads "level" while still
                                     // leaning -> runaway in the lean direction. Accel must trim SLOWLY.
 volatile bool  gDoGcal=false;       // 'gcal' -> recalibrate gyro bias (robot must be still + disabled)
+volatile bool  gStepCap=false;      // 'stepcap' -> capture wheel step response (stand only, disabled)
+volatile int   gStepCmd=200;        // step magnitude (wheel torque field) for the capture
 static void emit(const char* b, int k);   // fwd decl (defined below)
 
 // IMU / filter constants
@@ -305,6 +307,32 @@ static void balanceTask(void*){
       }
     }
 
+    // --- step-response capture (stand only, disabled): apply a torque step to the
+    //     wheels and log velocity at full read rate, to measure actuator latency /
+    //     lag / gain and whether the command behaves as torque (vel ramps) or
+    //     velocity (vel settles). Dumps "# cap i t_us cmd vel" then "# cap done". ---
+    if(gStepCap && !gEnabled){
+      gStepCap=false;
+      static uint32_t capT[128]; static int16_t capV[128]; static int16_t capU[128];
+      uint8_t wid = gPollLock ? (uint8_t)gPollLock : (uint8_t)LEFT_W;
+      wheelTorqueEnAll(1);
+      uint32_t t0=micros();
+      for(int i=0;i<128;i++){
+        int cmd = (i<16) ? 0 : gStepCmd;            // 16 baseline samples, then step
+        wheelTorque((int16_t)cmd, (int16_t)(-cmd)); // mirrored, as in balance
+        int pp=0,vv=0; bool ok=wheelRead(wid,&pp,&vv);
+        capT[i]=micros()-t0; capU[i]=(int16_t)cmd; capV[i]= ok ? (int16_t)vv : (int16_t)-32768;
+      }
+      wheelTorque(0,0); wheelTorqueEnAll(0);
+      for(int i=0;i<128;i++){
+        char b[56]; int k=snprintf(b,sizeof(b),"# cap %d %lu %d %d\n",
+                                   i,(unsigned long)capT[i],capU[i],capV[i]);
+        emit(b,k); vTaskDelay(2);
+      }
+      emit("# cap done\n",11);
+      continue;
+    }
+
     // --- dt ---
     uint32_t now = micros();
     float dt = (now - lastUs) * 1e-6f; lastUs = now;
@@ -490,6 +518,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"lock")){ gPollLock=(int)v; }     // poll only this wheel ID (0=alternate)
   else if (!strcmp(s,"cfgdump")){ gCfgDumpId=(int)v; return; }  // dump servo config regs
   else if (!strcmp(s,"gcal")){ gDoGcal=true; return; } // recalibrate gyro bias (hold still)
+  else if (!strcmp(s,"stepcap")){ if(v!=0.0f) gStepCmd=(int)v; gStepCap=true; return; } // wheel step-response capture
   else if (!strcmp(s,"ff"))    gFF=v;                  // friction feed-forward magnitude
   else if (!strcmp(s,"ffband")) gFFband=v;             // friction FF deadband
   else if (!strcmp(s,"cfa"))   gCfAlpha=clampf(v,0.9f,0.9999f); // compl-filter gyro weight

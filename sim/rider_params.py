@@ -21,20 +21,22 @@ class RiderParams:
     gyro_lsb_per_dps: float = 16.4         # KNOWN   ICM-42670 gyro scale
     control_hz: float = 250.0              # KNOWN   measured loop rate (lhz~251, deterministic)
 
-    # ---------- mass / inertia (ESTIMATED: weigh to refine) ----------
-    track_width_m: float = 0.10            # ESTIMATED  lateral wheel separation
-    body_mass_kg: float = 0.65             # ESTIMATED  torso + electronics + battery
-    wheel_mass_kg: float = 0.05            # ESTIMATED  per wheel
-    com_height_m: float = 0.09             # ESTIMATED  CoM height above the wheel axle
-    body_half_extent_m: tuple = (0.03, 0.045, 0.06)  # ESTIMATED  torso box half-sizes (x,y,z)
+    # ---------- mass / inertia (MEASURED 2026-06-13, except wheel split) ----------
+    track_width_m: float = 0.097           # MEASURED  wheel center-to-center (97 mm)
+    body_mass_kg: float = 0.48             # MEASURED  560 g total - ~80 g wheels
+    wheel_mass_kg: float = 0.04            # ESTIMATED  per wheel (total weighed, split is a guess)
+    com_height_m: float = 0.045            # MEASURED  CoM 75 mm above floor - 30 mm axle = 45 mm above pivot
+    body_half_extent_m: tuple = (0.025, 0.04, 0.05)  # ESTIMATED  torso box half-sizes (x,y,z)
 
-    # ---------- actuator model (BENCH: characterize, make-or-break) ----------
-    cmd_mode: str = "torque"               # BENCH   "torque"|"velocity" - which the servo tracks cleanly
-    torque_max_Nm: float = 0.5             # BENCH   wheel torque saturation (placeholder)
-    vel_max_rad_s: float = 30.0            # BENCH   wheel speed saturation (placeholder)
-    actuator_tau_s: float = 0.02           # BENCH   first-order command-tracking lag
-    deadband_frac: float = 0.0             # BENCH   no-response fraction of range (tight loop => ~0)
-    latency_s: float = 0.010               # BENCH   command/comms round-trip delay
+    # ---------- actuator model (MEASURED 2026-06-13, bench step-response) ----------
+    cmd_mode: str = "velocity"             # MEASURED  command is a velocity setpoint (settles, linear in cmd)
+    vel_max_rad_s: float = 30.0            # action=1 -> 30 rad/s (measured 0.129 rad/s per raw cmd unit; cmd 200 -> 22.8)
+    actuator_tau_s: float = 0.013          # MEASURED  first-order lag, amplitude-independent
+    deadband_frac: float = 0.0             # MEASURED  negligible (only a small low-end gain droop)
+    latency_s: float = 0.003               # MEASURED  ~3 ms command -> response onset
+    vel_kv: float = 5.0                    # sim velocity-servo gain (stiff; the real lag lives in ActuatorModel)
+    vel_forcerange_Nm: float = 1.0         # sim wheel torque cap
+    torque_max_Nm: float = 0.5             # (unused in velocity mode; kept for reference)
 
     # ---------- sensing noise (ESTIMATED: for domain randomization) ----------
     gyro_noise_dps: float = 1.0            # ESTIMATED  gyro white-noise std
