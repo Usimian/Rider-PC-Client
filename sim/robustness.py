@@ -69,7 +69,7 @@ def sweep(model, vn, field, frame_stack=1, n=5):
 
 
 # (model name, frame_stack used at training)
-MODELS = [("ppo_rider", 1), ("ppo_rider_dr", 1), ("ppo_rider_dr_fs", 8)]
+MODELS = [("ppo_v_dr_final", 2)]
 
 if __name__ == "__main__":
     import os

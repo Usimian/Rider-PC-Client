@@ -34,8 +34,10 @@ class RiderParams:
     actuator_tau_s: float = 0.013          # MEASURED  first-order lag, amplitude-independent
     deadband_frac: float = 0.0             # MEASURED  negligible (only a small low-end gain droop)
     latency_s: float = 0.003               # MEASURED  ~3 ms command -> response onset
-    vel_kv: float = 5.0                    # sim velocity-servo gain (stiff; the real lag lives in ActuatorModel)
-    vel_forcerange_Nm: float = 1.0         # sim wheel torque cap
+    vel_kv: float = 5.0                    # sim velocity-servo gain (higher overshoots on the tiny wheel inertia)
+    vel_forcerange_Nm: float = 1.0         # sim wheel torque cap (the real 13ms tracking lag lives in ActuatorModel)
+    wheel_armature: float = 0.003          # reflected motor-rotor inertia on wheel DOF (rotor x gear^2); makes wheel
+                                           # velocity smooth like the real geared servo -- was the key fidelity fix
     torque_max_Nm: float = 0.5             # (unused in velocity mode; kept for reference)
 
     # ---------- sensing noise (ESTIMATED: for domain randomization) ----------

@@ -109,9 +109,12 @@ class RiderBalanceEnv(gym.Env):
         (self.q_wheel, self.d_wheel) = qadr("wheel_spin")
 
         self.action_space = spaces.Box(-1.0, 1.0, (1,), np.float32)
-        # single-frame obs: [pitch(rad), pitch_rate(rad/s), x_err(m), x_vel(m/s), wheel_vel(rad/s)]
-        # frame_stack>1 gives the policy history so it can infer latency/velocity state.
-        high1 = np.array([np.pi, 50.0, 5.0, 10.0, 200.0], np.float32)
+        # single-frame obs: [pitch, pitch_rate, x_err, x_vel, wheel_vel, INT_pitch, INT_x]
+        # The two integral terms are the key to velocity-mode: the body responds to
+        # the derivative of the commanded velocity, so static feedback can't stabilize
+        # -- integral (PI-like) state can. Both are trivial to accumulate on the ESP32.
+        self._int_clip = (1.0, 2.0)        # clamps (rad*s, m*s) to prevent windup
+        high1 = np.array([np.pi, 50.0, 5.0, 10.0, 200.0, 1.0, 2.0], np.float32)
         high = np.tile(high1, self.frame_stack)
         self.observation_space = spaces.Box(-high, high, dtype=np.float32)
         self._stack = deque(maxlen=self.frame_stack)
@@ -132,7 +135,8 @@ class RiderBalanceEnv(gym.Env):
             d2r = np.pi / 180.0
             pitch += np.random.normal(0, self.p.accel_pitch_noise_deg * d2r)
             pitch_rate += np.random.normal(0, self.p.gyro_noise_dps * d2r)
-        return np.array([pitch, pitch_rate, x - self.target_x, x_vel, wheel_vel], np.float32)
+        return np.array([pitch, pitch_rate, x - self.target_x, x_vel, wheel_vel,
+                         self._pitch_int, self._x_int], np.float32)
 
     def _obs(self):
         return np.concatenate(self._stack).astype(np.float32)
@@ -160,10 +164,15 @@ class RiderBalanceEnv(gym.Env):
         if self.domain_rand:
             self._randomize()
         # small random initial lean; starts resting on the wheel (chassis pos puts wheel on floor)
-        self.data.qpos[self.q_pitch] = self.np_random.uniform(-0.05, 0.05)
+        # realistic "let go from a near-still hold": small lean, small pitch rate.
+        self.data.qpos[self.q_pitch] = self.np_random.uniform(-0.06, 0.06)
+        self.data.qvel[self.d_pitch] = self.np_random.uniform(-0.20, 0.20)
         mujoco.mj_forward(self.model, self.data)
         self.act.reset()
         self._steps = 0
+        self._prev_a = 0.0
+        self._pitch_int = 0.0
+        self._x_int = 0.0
         s = self._single_obs()
         self._stack.clear()
         for _ in range(self.frame_stack):
@@ -177,14 +186,23 @@ class RiderBalanceEnv(gym.Env):
             mujoco.mj_step(self.model, self.data)
         self._steps += 1
 
+        a = float(np.asarray(action).flat[0])
         pitch, pitch_rate, x, x_vel, wheel_vel = self._raw_state()
         fell = abs(pitch) > 0.40                       # ~23 deg
-        upright = np.cos(pitch)                        # 1 upright, falls off with lean
-        pos_pen = 2.0 * (x - self.target_x) ** 2
-        act_pen = 0.01 * float(np.asarray(action).flat[0]) ** 2
-        reward = upright - pos_pen - act_pen
+        # Balance dominates; position is a gentle secondary objective; smoothness
+        # matters in velocity mode (jerky velocity cmd = jerky cart accel).
+        upright = np.cos(pitch)                        # ~1 upright
+        pos_pen = 3.0 * (x - self.target_x) ** 2       # hold position tightly (plant can afford it now)
+        act_pen = 0.005 * a ** 2
+        rate_pen = 0.05 * (a - self._prev_a) ** 2      # command-smoothness
+        reward = upright - pos_pen - act_pen - rate_pen
         if fell:
             reward -= 10.0
+        self._prev_a = a
+        # accumulate integral state (clamped to prevent windup)
+        ci, cx = self._int_clip
+        self._pitch_int = float(np.clip(self._pitch_int + pitch * self.ctrl_dt, -ci, ci))
+        self._x_int = float(np.clip(self._x_int + (x - self.target_x) * self.ctrl_dt, -cx, cx))
         terminated = bool(fell)
         truncated = self._steps >= self.max_steps
         self._stack.append(self._single_obs())

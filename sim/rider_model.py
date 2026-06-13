@@ -33,7 +33,7 @@ def build_mjcf(p: RiderParams) -> str:
       <geom name="torso" type="box" pos="0 0 {p.com_height_m}" size="{hx} {hy} {hz}"
             mass="{p.body_mass_kg}" rgba="0.85 0.5 0.2 1"/>
       <body name="wheels" pos="0 0 0">
-        <joint name="wheel_spin" type="hinge" axis="0 1 0"/>
+        <joint name="wheel_spin" type="hinge" axis="0 1 0" armature="{p.wheel_armature}"/>
         <geom name="wheel" type="cylinder" fromto="0 {-half_track} 0 0 {half_track} 0"
               size="{r}" mass="{wheel_mass_pair}" rgba="0.1 0.1 0.1 1"/>
       </body>

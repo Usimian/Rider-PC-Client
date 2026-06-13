@@ -16,7 +16,7 @@ def make_env(domain_rand=False, frame_stack=1):
     return lambda: RiderBalanceEnv(add_noise=True, domain_rand=domain_rand, frame_stack=frame_stack)
 
 
-def evaluate(model, vecnorm, frame_stack=1, n=5):
+def evaluate(model, vecnorm, frame_stack=1, n=20):
     env = RiderBalanceEnv(add_noise=False, frame_stack=frame_stack)
     results = []
     for s in range(n):
@@ -34,6 +34,16 @@ def evaluate(model, vecnorm, frame_stack=1, n=5):
     return results
 
 
+def summarize(results):
+    stood = sum(1 for _, _, s in results if s)
+    full = [t for t, _, s in results if s]
+    held = [x for _, x, s in results if s]
+    import numpy as _np
+    print(f"  STOOD {stood}/{len(results)}  "
+          f"mean survive {_np.mean([t for t, _, _ in results]):.2f}s  "
+          f"(stood eps: hold max|x| mean {_np.mean(held) if held else float('nan'):.3f} m)")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--steps", type=int, default=300_000)
@@ -45,9 +55,10 @@ if __name__ == "__main__":
 
     venv = make_vec_env(make_env(args.domain_rand, args.frame_stack), n_envs=args.nenv)
     venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
-    model = PPO("MlpPolicy", venv, verbose=0, device="cpu", n_steps=1024, batch_size=2048,
+    model = PPO("MlpPolicy", venv, verbose=1, device="cpu", n_steps=1024, batch_size=2048,
                 gamma=0.997, gae_lambda=0.95, learning_rate=3e-4,
-                policy_kwargs=dict(net_arch=[64, 64]))
+                policy_kwargs=dict(net_arch=[64, 64]),
+                tensorboard_log="./tb")
     print(f"training PPO: {args.steps} steps, {args.nenv} envs, net [64,64] ...")
     model.learn(total_timesteps=args.steps, progress_bar=False)
     model.save(args.out)
@@ -55,6 +66,6 @@ if __name__ == "__main__":
     print(f"saved -> {args.out}.zip (+ vecnorm)\n")
 
     venv.training = False
-    print("eval (deterministic, noise off):")
-    for i, (t, xmax, stood) in enumerate(evaluate(model, venv, args.frame_stack)):
-        print(f"  ep{i}: survived {t:5.2f}s  max|x|={xmax:.3f} m  {'STOOD' if stood else 'fell'}")
+    print("eval (deterministic, noise off, 20 seeds):")
+    res = evaluate(model, venv, args.frame_stack)
+    summarize(res)
