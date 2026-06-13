@@ -116,15 +116,26 @@ static void imuData(int16_t*ax,int16_t*ay,int16_t*az,int16_t*gx,int16_t*gy,int16
 }
 
 // ---------------- servo bus (all Serial2 access is in the balance task) ------
+// Drain the echo + status reply after a 1-byte write so a following write can't
+// transmit into the previous servo's reply (half-duplex collision). Back-to-back
+// un-drained writes here corrupted right-wheel ID21 (the 2nd write collided with
+// ID11's reply) -> silent until power-cycle. Reproduced + fixed 2026-06-12.
+static void busSettle(){
+  Serial2.flush();                                  // wait for our TX to finish
+  uint32_t t0=micros();
+  while(micros()-t0 < 700) if(Serial2.available()) Serial2.read();  // consume echo+reply, leave bus idle
+}
 static void legTorqueOff(uint8_t id){   // standard 1-byte write reg 0x18 = 0
+  while(Serial2.available()) Serial2.read();
   uint8_t ck = ~(id + 0x04 + 0x03 + 0x18 + 0x00);
   uint8_t buf[8] = {0xFF,0xFF,id,0x04,0x03,0x18,0x00,ck};
-  Serial2.write(buf,8);
+  Serial2.write(buf,8); busSettle();
 }
 static void wheelSetReg(uint8_t id, uint8_t reg, uint8_t val){  // 1-byte reg write
+  while(Serial2.available()) Serial2.read();
   uint8_t ck = ~(id + 0x04 + 0x03 + reg + val);
   uint8_t buf[8] = {0xFF,0xFF,id,0x04,0x03,reg,val,ck};
-  Serial2.write(buf,8);
+  Serial2.write(buf,8); busSettle();
 }
 static void wheelTorque(int16_t tl,int16_t tr){  // SYNC_WRITE reg 0x1E both wheels
   uint8_t buf[18];
@@ -133,6 +144,18 @@ static void wheelTorque(int16_t tl,int16_t tr){  // SYNC_WRITE reg 0x1E both whe
   buf[12]=RIGHT_W;buf[13]=0;buf[14]=0;buf[15]=tr&0xFF; buf[16]=(tr>>8)&0xFF;
   uint8_t chk=0; for(int i=2;i<17;i++) chk+=buf[i]; buf[17]=~chk;
   Serial2.write(buf,18); Serial2.flush();
+}
+// Torque enable/disable BOTH wheels via one SYNC_WRITE to reg 0x18 (broadcast 0xFE ->
+// NO status reply per FeeTech protocol). Replaces back-to-back addressed wheelSetReg
+// writes whose replies collided on the half-duplex bus and bricked a wheel until
+// power-cycle. Broadcast = no reply = no possible collision.
+static void wheelTorqueEnAll(uint8_t on){
+  uint8_t buf[12];
+  buf[0]=0xFF;buf[1]=0xFF;buf[2]=0xFE;buf[3]=8;buf[4]=0x83;buf[5]=0x18;buf[6]=0x01;
+  buf[7]=LEFT_W; buf[8]=on;
+  buf[9]=RIGHT_W;buf[10]=on;
+  uint8_t chk=0; for(int i=2;i<11;i++) chk+=buf[i]; buf[11]=~chk;
+  Serial2.write(buf,12); Serial2.flush();
 }
 // Factory R-1.1.3 wheel command (WritePos_Sync_kp): SYNC_WRITE reg 0x1E carrying
 // per-servo [position(2), torque(2)] — the servo's internal position loop drives
@@ -359,7 +382,7 @@ static void balanceTask(void*){
     static int torqAcc=0;                   // factory-style rate-limited torque accumulator
     bool driving = (gEnabled && !fallen) || (!gEnabled && gTestTor!=0);
     if(driving){
-      if(!wasDriving){ wheelSetReg(LEFT_W,0x18,1); wheelSetReg(RIGHT_W,0x18,1);  // enable on entry
+      if(!wasDriving){ wheelTorqueEnAll(1);                                      // enable both (broadcast, no collision)
                        torqAcc=0; }                                             // seed accumulator at 0
       float uout = u;
       if(gEnabled && !fallen && gDither>0){ uout += (float)(gDither*ditherSign); ditherSign = -ditherSign; }
@@ -380,7 +403,7 @@ static void balanceTask(void*){
       // command and would COAST forever. Actively command velocity 0 (burst, in
       // case a frame is dropped) BEFORE releasing torque, so the wheels stop dead.
       for(int i=0;i<5;i++){ wheelTorque(0,0); }
-      wheelSetReg(LEFT_W,0x18,0); wheelSetReg(RIGHT_W,0x18,0);
+      wheelTorqueEnAll(0);                                  // disable both (broadcast, no collision)
     }
     wasDriving = driving;
 
@@ -456,7 +479,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"rd")){ gDumpRead=true; return; } // dump next raw read frame
   else if (!strcmp(s,"wt")){ gTestTor=(int)v; }        // stand-only wheel torque test
   else if (!strcmp(s,"wmode")){ wheelSetReg(LEFT_W,0x11,(uint8_t)v); wheelSetReg(RIGHT_W,0x11,(uint8_t)v); } // wheel mode reg 0x11
-  else if (!strcmp(s,"wten")){ wheelSetReg(LEFT_W,0x18,(uint8_t)v); wheelSetReg(RIGHT_W,0x18,(uint8_t)v); }  // wheel torque enable reg 0x18
+  else if (!strcmp(s,"wten")){ wheelTorqueEnAll((uint8_t)v); }  // wheel torque enable reg 0x18 (broadcast)
   else if (!strcmp(s,"lock")){ gPollLock=(int)v; }     // poll only this wheel ID (0=alternate)
   else if (!strcmp(s,"cfgdump")){ gCfgDumpId=(int)v; return; }  // dump servo config regs
   else if (!strcmp(s,"gcal")){ gDoGcal=true; return; } // recalibrate gyro bias (hold still)
