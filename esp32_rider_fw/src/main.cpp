@@ -22,6 +22,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include "rider_policy.h"   // auto-generated PPO policy weights (sim/export_policy.py)
 
 // ---------------- pins / IMU regs ----------------
 #define SDA_PIN 18
@@ -54,6 +55,15 @@ volatile float gVx       = 0.0f;    // commanded forward velocity (0 = hold)
 volatile float gPolarity = 1.0f;    // +1 for cascade (pitDes-pitch order) = our verified tilt/rate sign
 volatile float gPosSign  = -1.0f;   // wheel vel/pos cascade sign (-1: our pitch axis is inverted vs factory)
 volatile float gPosErrSign = 1.0f;  // position-loop correction sign (empirically found; flip with 'pesign')
+// ---- neural-policy control (ADDITIVE; PID stays the default). 'pol 1' to enable. ----
+// SIM-TRAINED, NOT YET HW-VERIFIED. Obs/action signs almost certainly need an
+// on-robot check (flip with 'polsign', and watch the obs match the sim's SI units).
+volatile bool  gPolMode  = false;   // 'pol 1' -> run the trained policy instead of the PID
+volatile float gPolSign  = 1.0f;    // action->wheel-command sign (verify on robot)
+static const float POL_DEG2RAD     = 0.017453292f;
+static const float POL_WHEEL_R     = 0.03f;      // wheel radius (m) -> x_vel = wheel_omega*r
+static const float POL_VELMAX_RADS = 30.0f;      // action=1 -> 30 rad/s (sim vel_max)
+static const float POL_RAW_PER_RADS= 7.764f;     // raw wheel-cmd per rad/s (1/0.1288, measured)
 volatile int   gUMax     = 1000;    // output clamp = factory pid_pit.UMax class (was throttled to 110)
 volatile float gFF       = 10.0f;   // stiction boost beyond +/-FFband (factory: +10 past 20)
 volatile float gFFband   = 20.0f;   // boost threshold
@@ -283,6 +293,21 @@ static void odomUpdate(uint8_t id, int pos, int vel){
   wheel_vx = (wheel1_vel + wheel2_vel) / 2.0f;
 }
 
+// ---- neural-policy inference: 14-dim obs -> action in [-1,1] (deterministic).
+//      z = clip((obs-mean)/sqrt(var+eps)); a = clip(W2 tanh(W1 tanh(W0 z+b0)+b1)+b2).
+//      Validated against SB3 to 1.9e-7 in sim/export_policy.py. ~5k MACs, microseconds. ----
+static float policyInfer(const float* obs){
+  float z[POL_OBS], h0[64], h1[64];
+  for(int i=0;i<POL_OBS;i++){
+    float v=(obs[i]-POL_MEAN[i])/sqrtf(POL_VAR[i]+POL_EPS);
+    z[i]= v>POL_CLIP?POL_CLIP:(v<-POL_CLIP?-POL_CLIP:v);
+  }
+  for(int j=0;j<64;j++){ float s=POL_B0[j]; for(int i=0;i<POL_OBS;i++) s+=POL_W0[j][i]*z[i];  h0[j]=tanhf(s); }
+  for(int j=0;j<64;j++){ float s=POL_B1[j]; for(int i=0;i<64;i++)     s+=POL_W1[j][i]*h0[i]; h1[j]=tanhf(s); }
+  float a=POL_B2[0]; for(int i=0;i<64;i++) a+=POL_W2[0][i]*h1[i];
+  return a>1.0f?1.0f:(a<-1.0f?-1.0f:a);
+}
+
 // ---------------- balance task (core 1) ----------------
 static void balanceTask(void*){
   for(int i=0;i<3;i++){ legTorqueOff(LEFT_LEG); legTorqueOff(RIGHT_LEG); wheelTorque(0,0); vTaskDelay(2); }
@@ -388,8 +413,31 @@ static void balanceTask(void*){
     rateF = gCtrlLP*rateF + (1.0f-gCtrlLP)*dqf;              // same LP on rate
     float qErr  = pitch - gImuZero;                  // for fall/telemetry (lean error from base)
     bool fallen = (fabsf(qErr) > gFallDeg) || (fabsf(wheel_x - stable_pos) > gMaxPosErr);
+    static bool  polInit=false;          // neural-policy episode state (reset on disable)
+    static float polIpitch=0,polIx=0,polPrevX=0,polPrevFrame[7]={0};
     float u = 0.0f;
-    if(gEnabled && !fallen){
+    if(gEnabled && !fallen && gPolMode){
+      // ---- neural-policy control: assemble obs in the SIM's SI units ----
+      float pr_pitch = pitch * POL_DEG2RAD;          // lean from setpoint (rad)
+      float pr_rate  = dqf   * POL_DEG2RAD;          // pitch rate (rad/s)
+      float xerr     = wheel_x - stable_pos;         // position error (m, trustworthy)
+      float xvel=0.0f, wvel=0.0f;
+      if(!polInit){ polIpitch=0; polIx=0; polPrevX=wheel_x; }
+      else {
+        xvel = (wheel_x - polPrevX) / (dt>1e-4f?dt:0.004f);  // m/s from position (exact units)
+        wvel = xvel / POL_WHEEL_R;                            // wheel rad/s
+        polPrevX = wheel_x;
+        polIpitch = clampf(polIpitch + pr_pitch*dt, -1.0f, 1.0f);
+        polIx     = clampf(polIx     + xerr*dt,     -2.0f, 2.0f);
+      }
+      float frame[7]={pr_pitch,pr_rate,xerr,xvel,wvel,polIpitch,polIx};
+      if(!polInit){ for(int k=0;k<7;k++) polPrevFrame[k]=frame[k]; polInit=true; }
+      float obs[POL_OBS];                            // frame_stack=2: [prev_frame, curr_frame]
+      for(int k=0;k<7;k++){ obs[k]=polPrevFrame[k]; obs[7+k]=frame[k]; }
+      for(int k=0;k<7;k++) polPrevFrame[k]=frame[k];
+      u = gPolSign * policyInfer(obs) * POL_VELMAX_RADS * POL_RAW_PER_RADS;  // -> raw wheel velocity cmd
+      u = clampf(u, -(float)gUMax, (float)gUMax);
+    } else if(gEnabled && !fallen){
       // live gains -> structs
       pidPos.Kp=gKpPos; pidVel.Kp=gKpVel; pidVel.Ki=gKiVel; pidPit.Kp=gKpPit;
       // --- factory cascade: pos(P) -> vel target ; vel(PI) -> lean ; pitch(P) -> torque ---
@@ -407,6 +455,7 @@ static void balanceTask(void*){
       u = clampf(u, -(float)gUMax, (float)gUMax);
     } else {
       pidReset(&pidPos); pidReset(&pidVel); pidReset(&pidPit);   // clear PID state when idle
+      polInit = false;                                           // re-init policy episode on next enable
       if(!gEnabled && gTestTor!=0) u = (float)gTestTor;          // stand-only debug
     }
     // Output: drive wheels only when actively balancing (or stand-test). When idle,
@@ -519,6 +568,8 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"cfgdump")){ gCfgDumpId=(int)v; return; }  // dump servo config regs
   else if (!strcmp(s,"gcal")){ gDoGcal=true; return; } // recalibrate gyro bias (hold still)
   else if (!strcmp(s,"stepcap")){ if(v!=0.0f) gStepCmd=(int)v; gStepCap=true; return; } // wheel step-response capture
+  else if (!strcmp(s,"pol"))    gPolMode=(v!=0.0f);   // neural-policy control on/off (additive; PID is default)
+  else if (!strcmp(s,"polsign")) gPolSign=(v<0.0f?-1.0f:1.0f);  // flip action->wheel sign (verify on robot)
   else if (!strcmp(s,"ff"))    gFF=v;                  // friction feed-forward magnitude
   else if (!strcmp(s,"ffband")) gFFband=v;             // friction FF deadband
   else if (!strcmp(s,"cfa"))   gCfAlpha=clampf(v,0.9f,0.9999f); // compl-filter gyro weight
