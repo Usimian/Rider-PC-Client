@@ -78,8 +78,15 @@ np.savez(name + "_export.npz", **out)
 
 
 # --- emit C header ---
+def _fl(v):
+    s = "%.8g" % float(v)                      # ensure a valid C float literal (e.g. "0" -> "0.0f")
+    if not any(c in s for c in ".eEnf"):
+        s += ".0"
+    return s + "f"
+
+
 def carr(a):
-    return "{" + ",".join(f"{v:.8g}f" for v in np.asarray(a).ravel()) + "}"
+    return "{" + ",".join(_fl(v) for v in np.asarray(a).ravel()) + "}"
 
 
 with open(name + "_policy.h", "w") as f:

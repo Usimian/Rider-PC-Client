@@ -60,6 +60,14 @@ volatile float gPosErrSign = 1.0f;  // position-loop correction sign (empiricall
 // on-robot check (flip with 'polsign', and watch the obs match the sim's SI units).
 volatile bool  gPolMode  = false;   // 'pol 1' -> run the trained policy instead of the PID
 volatile float gPolSign  = 1.0f;    // action->wheel-command sign (verify on robot)
+// Code-based position hold: policy stays a PURE balancer (its position obs are
+// neutralized); a simple outer loop biases the balance SETPOINT toward a target
+// tick so the balancer drives there. 'poshold <deg/m>' (0=off), 'posmax <deg>'.
+volatile float gPosHoldK   = 5.0f;  // setpoint-bias P gain (deg per meter of position error); 0 = pure balance
+volatile float gPosHoldKi  = 3.0f;  // setpoint-bias I gain (deg per m*s); kills the steady-state offset (tuned on robot)
+volatile float gPosHoldKd  = 8.0f;  // setpoint-bias D gain (deg per m/s); damps the approach (tuned on robot)
+volatile float gPosHoldMax = 3.0f;  // max setpoint bias (deg)
+volatile float gPosTarget  = 0.0f;  // position setpoint (m, wheel_x frame); anchored at enable, moved via 'ptgt'
 static const float POL_DEG2RAD     = 0.017453292f;
 static const float POL_WHEEL_R     = 0.03f;      // wheel radius (m) -> x_vel = wheel_omega*r
 static const float POL_VELMAX_RADS = 30.0f;      // action=1 -> 30 rad/s (sim vel_max)
@@ -412,25 +420,39 @@ static void balanceTask(void*){
     else pitchF += (pn > pitchF ? gSlewDeg : -gSlewDeg);
     rateF = gCtrlLP*rateF + (1.0f-gCtrlLP)*dqf;              // same LP on rate
     float qErr  = pitch - gImuZero;                  // for fall/telemetry (lean error from base)
-    bool fallen = (fabsf(qErr) > gFallDeg) || (fabsf(wheel_x - stable_pos) > gMaxPosErr);
+    // position-runaway cutout: in policy mode measure from the COMMANDED target
+    // (the robot legitimately drives to targets), else from the enable home.
+    float posRef = gPolMode ? gPosTarget : stable_pos;
+    bool fallen = (fabsf(qErr) > gFallDeg) || (fabsf(wheel_x - posRef) > gMaxPosErr);
     static bool  polInit=false;          // neural-policy episode state (reset on disable)
-    static float polIpitch=0,polIx=0,polPrevX=0,polPrevFrame[7]={0};
+    static float polIpitch=0,polPrevX=0,polPrevFrame[7]={0},posErrInt=0;
     float u = 0.0f;
     if(gEnabled && !fallen && gPolMode){
-      // ---- neural-policy control: assemble obs in the SIM's SI units ----
-      float pr_pitch = pitch * POL_DEG2RAD;          // lean from setpoint (rad)
-      float pr_rate  = dqf   * POL_DEG2RAD;          // pitch rate (rad/s)
-      float xerr     = wheel_x - stable_pos;         // position error (m, trustworthy)
+      // ---- neural-policy control: PURE balancer + code-based position hold ----
+      // Pitch sign flipped to the sim frame (MEASURED: forward lean -> th DECREASES,
+      // but sim wants forward=+pitch). Position handled in CODE: bias the setpoint
+      // toward gPosTarget so the balancer drives there; the policy's position obs
+      // (x_err, x_int) are zeroed so it doesn't fight. Velocity obs kept for damping.
+      float posErr  = wheel_x - gPosTarget;                 // m
       float xvel=0.0f, wvel=0.0f;
-      if(!polInit){ polIpitch=0; polIx=0; polPrevX=wheel_x; }
+      if(!polInit){ polIpitch=0; polPrevX=wheel_x; gPosTarget=wheel_x; posErr=0.0f; posErrInt=0; }
       else {
         xvel = (wheel_x - polPrevX) / (dt>1e-4f?dt:0.004f);  // m/s from position (exact units)
         wvel = xvel / POL_WHEEL_R;                            // wheel rad/s
         polPrevX = wheel_x;
-        polIpitch = clampf(polIpitch + pr_pitch*dt, -1.0f, 1.0f);
-        polIx     = clampf(polIx     + xerr*dt,     -2.0f, 2.0f);
+        // integrate position error, anti-windup so the I-contribution alone can't exceed the bias clamp
+        float kiLim = (gPosHoldKi>0.01f) ? (gPosHoldMax/gPosHoldKi) : 1e6f;
+        posErrInt = clampf(posErrInt + posErr*dt, -kiLim, kiLim);
       }
-      float frame[7]={pr_pitch,pr_rate,xerr,xvel,wvel,polIpitch,polIx};
+      // DAMPED PI+D position loop. Sign VERIFIED on robot: +gPosHoldK drives back
+      // TOWARD gPosTarget (opposite sign ran away). I-term kills the steady-state
+      // offset (a P-only loop parks short of target against a constant bias); D damps.
+      float biasDeg = clampf(gPosHoldK*posErr + gPosHoldKi*posErrInt + gPosHoldKd*xvel,
+                             -gPosHoldMax, gPosHoldMax);
+      float pr_pitch = (biasDeg - pitch) * POL_DEG2RAD;   // = -(theta-(setpoint+bias)) in rad
+      float pr_rate  = -dqf * POL_DEG2RAD;                // pitch rate (rad/s), sim frame
+      if(polInit) polIpitch = clampf(polIpitch + pr_pitch*dt, -1.0f, 1.0f);
+      float frame[7]={pr_pitch,pr_rate,0.0f,xvel,wvel,polIpitch,0.0f};  // x_err=0,x_int=0 (pos in code)
       if(!polInit){ for(int k=0;k<7;k++) polPrevFrame[k]=frame[k]; polInit=true; }
       float obs[POL_OBS];                            // frame_stack=2: [prev_frame, curr_frame]
       for(int k=0;k<7;k++){ obs[k]=polPrevFrame[k]; obs[7+k]=frame[k]; }
@@ -568,8 +590,13 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"cfgdump")){ gCfgDumpId=(int)v; return; }  // dump servo config regs
   else if (!strcmp(s,"gcal")){ gDoGcal=true; return; } // recalibrate gyro bias (hold still)
   else if (!strcmp(s,"stepcap")){ if(v!=0.0f) gStepCmd=(int)v; gStepCap=true; return; } // wheel step-response capture
-  else if (!strcmp(s,"pol"))    gPolMode=(v!=0.0f);   // neural-policy control on/off (additive; PID is default)
+  else if (!strcmp(s,"polrun")) gPolMode=(v!=0.0f);   // neural-policy control on/off (additive; PID is default; 'pol' is gPolarity!)
   else if (!strcmp(s,"polsign")) gPolSign=(v<0.0f?-1.0f:1.0f);  // flip action->wheel sign (verify on robot)
+  else if (!strcmp(s,"poshold")) gPosHoldK=v;          // code position-hold P gain (deg/m); 0 = pure balance
+  else if (!strcmp(s,"poshi"))   gPosHoldKi=v;         // code position-hold I gain (deg per m*s); kills offset
+  else if (!strcmp(s,"poshd"))   gPosHoldKd=v;         // code position-hold D gain (deg per m/s)
+  else if (!strcmp(s,"posmax"))  gPosHoldMax=v;        // max setpoint bias (deg)
+  else if (!strcmp(s,"ptgt"))    gPosTarget=v;         // position SETPOINT (m, wheel_x frame)
   else if (!strcmp(s,"ff"))    gFF=v;                  // friction feed-forward magnitude
   else if (!strcmp(s,"ffband")) gFFband=v;             // friction FF deadband
   else if (!strcmp(s,"cfa"))   gCfAlpha=clampf(v,0.9f,0.9999f); // compl-filter gyro weight
@@ -599,8 +626,8 @@ void loop(){
     tp=millis();
     char b[240];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f rate=%.1f wx=%.3f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f\n",
-      tTheta, tRate, tWheelX, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, gKpPit, gKdPit, gKpPos, gKpVel, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail);
+      "th=%.2f rate=%.1f wx=%.3f ptgt=%.3f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f polrun=%d poshold=%.1f\n",
+      tTheta, tRate, tWheelX, gPosTarget, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, gKpPit, gKdPit, gKpPos, gKpVel, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, gPolMode, gPosHoldK);
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     emit(b,k);
   }

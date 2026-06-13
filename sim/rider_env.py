@@ -76,10 +76,14 @@ class RiderBalanceEnv(gym.Env):
 
     def __init__(self, params: RiderParams = None, render_mode=None,
                  max_seconds: float = 10.0, target_x: float = 0.0, add_noise: bool = True,
-                 domain_rand: bool = False, frame_stack: int = 1):
+                 domain_rand: bool = False, frame_stack: int = 1, pure_balance: bool = True):
         super().__init__()
         self.p = params or DEFAULT
         self.frame_stack = frame_stack
+        # pure_balance: position is handled by a CODE loop on the robot (the firmware
+        # feeds the policy x_err=0, x_int=0), so train the policy that way -- no position
+        # objective, position obs zeroed. Removes the train/deploy mismatch + the wobble.
+        self.pure_balance = pure_balance
         self.model = mujoco.MjModel.from_xml_string(build_mjcf(self.p))
         self.data = mujoco.MjData(self.model)
         self.render_mode = render_mode
@@ -135,8 +139,10 @@ class RiderBalanceEnv(gym.Env):
             d2r = np.pi / 180.0
             pitch += np.random.normal(0, self.p.accel_pitch_noise_deg * d2r)
             pitch_rate += np.random.normal(0, self.p.gyro_noise_dps * d2r)
-        return np.array([pitch, pitch_rate, x - self.target_x, x_vel, wheel_vel,
-                         self._pitch_int, self._x_int], np.float32)
+        xerr = 0.0 if self.pure_balance else (x - self.target_x)   # firmware zeros these (pos in code)
+        xint = 0.0 if self.pure_balance else self._x_int
+        return np.array([pitch, pitch_rate, xerr, x_vel, wheel_vel,
+                         self._pitch_int, xint], np.float32)
 
     def _obs(self):
         return np.concatenate(self._stack).astype(np.float32)
@@ -189,12 +195,12 @@ class RiderBalanceEnv(gym.Env):
         a = float(np.asarray(action).flat[0])
         pitch, pitch_rate, x, x_vel, wheel_vel = self._raw_state()
         fell = abs(pitch) > 0.40                       # ~23 deg
-        # Balance dominates; position is a gentle secondary objective; smoothness
-        # matters in velocity mode (jerky velocity cmd = jerky cart accel).
         upright = np.cos(pitch)                        # ~1 upright
-        pos_pen = 3.0 * (x - self.target_x) ** 2       # hold position tightly (plant can afford it now)
-        act_pen = 0.005 * a ** 2
-        rate_pen = 0.05 * (a - self._prev_a) ** 2      # command-smoothness
+        # pure_balance: NO position objective (code does position). Heavy command-
+        # smoothness to kill the on-robot shimmy (jerky velocity cmd = jerky cart accel).
+        pos_pen = 0.0 if self.pure_balance else 0.75 * (x - self.target_x) ** 2
+        act_pen = 0.01 * a ** 2
+        rate_pen = (0.30 if self.pure_balance else 0.05) * (a - self._prev_a) ** 2
         reward = upright - pos_pen - act_pen - rate_pen
         if fell:
             reward -= 10.0

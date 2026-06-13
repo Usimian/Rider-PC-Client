@@ -4,3 +4,4 @@ tb/
 *.zip
 *.pkl
 *.npz
+*_policy.h
