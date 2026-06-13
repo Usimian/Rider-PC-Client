@@ -139,6 +139,9 @@ class RiderBalanceEnv(gym.Env):
             d2r = np.pi / 180.0
             pitch += np.random.normal(0, self.p.accel_pitch_noise_deg * d2r)
             pitch_rate += np.random.normal(0, self.p.gyro_noise_dps * d2r)
+        # NOTE: training on quantized-encoder velocity (the 'qnoise' experiment) hurt
+        # balance and was abandoned; the deployed policy trains on clean velocity and the
+        # FIRMWARE low-passes the velocity obs instead (polvlp) to kill the shimmy.
         xerr = 0.0 if self.pure_balance else (x - self.target_x)   # firmware zeros these (pos in code)
         xint = 0.0 if self.pure_balance else self._x_int
         return np.array([pitch, pitch_rate, xerr, x_vel, wheel_vel,
