@@ -53,6 +53,7 @@ volatile float gSetpoint = 4.18f;   // measured true balance tilt (our frame); p
 volatile float gVx       = 0.0f;    // commanded forward velocity (0 = hold)
 volatile float gPolarity = 1.0f;    // +1 for cascade (pitDes-pitch order) = our verified tilt/rate sign
 volatile float gPosSign  = -1.0f;   // wheel vel/pos cascade sign (-1: our pitch axis is inverted vs factory)
+volatile float gPosErrSign = 1.0f;  // position-loop correction sign (empirically found; flip with 'pesign')
 volatile int   gUMax     = 1000;    // output clamp = factory pid_pit.UMax class (was throttled to 110)
 volatile float gFF       = 10.0f;   // stiction boost beyond +/-FFband (factory: +10 past 20)
 volatile float gFFband   = 20.0f;   // boost threshold
@@ -73,6 +74,7 @@ volatile int   gWheelFault = 0;     // 0=ok; else ID of a wheel that dropped off
 // telemetry (written by task, read by loop)
 volatile float tTheta=0, tRate=0, tU=0, tWheelX=0, tWheelVx=0;
 volatile float tLoopHz=0, tReadFail=0;   // measured control-loop rate & read-fail %
+volatile float tDtMaxMs=0;               // worst-case cycle period (ms) since last report (ground-truth stall detector)
 volatile bool  gDumpRead=false;     // 'rd' -> task dumps next raw read frame
 volatile int   gTestTor=0;          // 'wt <v>' -> direct wheel torque when DISABLED (stand test)
 volatile int   gPollLock=0;         // 'lock <id>' -> poll only that wheel (0 = alternate)
@@ -288,6 +290,7 @@ static void balanceTask(void*){
   uint8_t pollId = LEFT_W;            // alternate which wheel we read each cycle
   uint32_t lastUs = micros(); uint32_t n=0;
   uint32_t hzN=0, hzFail=0, hzT=millis();   // loop-rate / read-fail measurement
+  float dtMaxAcc=0;                          // worst-case raw cycle period this report window
   for(;;){
     // --- on-demand gyro recal (only while disabled + still) ---
     if(gDoGcal && !gEnabled){ wheelTorque(0,0); calibrateGyro(); gDoGcal=false; primed=false; fpInit=false; }
@@ -305,9 +308,10 @@ static void balanceTask(void*){
     // --- dt ---
     uint32_t now = micros();
     float dt = (now - lastUs) * 1e-6f; lastUs = now;
+    if(dt > dtMaxAcc) dtMaxAcc = dt;            // capture RAW period BEFORE the safety clamp below
     if(dt <= 0 || dt > 0.05f) dt = 0.006f;
     hzN++;
-    if(millis()-hzT >= 250){ uint32_t el=millis()-hzT; tLoopHz=hzN*1000.0f/el; tReadFail=hzFail*100.0f/hzN; hzN=0; hzFail=0; hzT=millis(); }
+    if(millis()-hzT >= 250){ uint32_t el=millis()-hzT; tLoopHz=hzN*1000.0f/el; tReadFail=hzFail*100.0f/hzN; tDtMaxMs=dtMaxAcc*1000.0f; dtMaxAcc=0; hzN=0; hzFail=0; hzT=millis(); }
 
     // --- IMU -> tilt + rate ---
     int16_t ax,ay,az,gx,gy,gz; imuData(&ax,&ay,&az,&gx,&gy,&gz);
@@ -361,7 +365,9 @@ static void balanceTask(void*){
       // live gains -> structs
       pidPos.Kp=gKpPos; pidVel.Kp=gKpVel; pidVel.Ki=gKiVel; pidPit.Kp=gKpPit;
       // --- factory cascade: pos(P) -> vel target ; vel(PI) -> lean ; pitch(P) -> torque ---
-      pidPos.Des = stable_pos;          pidPos.FB = gPosSign * wheel_x;   calPID(&pidPos);
+      // position error in the home frame: ZERO at enable (stable_pos==wheel_x), so no
+      // start kick regardless of the absolute odometer offset. Sign found empirically.
+      pidPos.Des = gPosErrSign * (wheel_x - stable_pos);  pidPos.FB = 0.0f;  calPID(&pidPos);
       pidVel.Des = gVx + pidPos.U;      pidVel.FB = gPosSign * wheel_vx;  calPID(&pidVel);
       pidPit.Des = gImuZero + pidVel.U; pidPit.FB = pitchF;               calPID(&pidPit);
       float pitU = pidPit.U;
@@ -475,6 +481,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"vx"))    gVx=v;
   else if (!strcmp(s,"pol"))   gPolarity=(v<0.0f?-1.0f:1.0f);
   else if (!strcmp(s,"psign")) gPosSign=(v<0.0f?-1.0f:1.0f);
+  else if (!strcmp(s,"pesign")) gPosErrSign=(v<0.0f?-1.0f:1.0f);  // flip position-loop correction sign
   else if (!strcmp(s,"home"))  stable_pos=tWheelX;     // re-home here
   else if (!strcmp(s,"rd")){ gDumpRead=true; return; } // dump next raw read frame
   else if (!strcmp(s,"wt")){ gTestTor=(int)v; }        // stand-only wheel torque test
@@ -512,8 +519,8 @@ void loop(){
     tp=millis();
     char b[240];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f rate=%.1f wx=%.3f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f rfail=%.0f\n",
-      tTheta, tRate, tWheelX, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, gKpPit, gKdPit, gKpPos, gKpVel, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tReadFail);
+      "th=%.2f rate=%.1f wx=%.3f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f\n",
+      tTheta, tRate, tWheelX, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, gKpPit, gKdPit, gKpPos, gKpVel, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail);
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     emit(b,k);
   }
