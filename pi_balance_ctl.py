@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Pi-side control of the Rider self-balance firmware (esp32_rider_fw).
 
-Runs on the Raspberry Pi and talks to the ESP32 over the shared UART using the
-firmware's newline-terminated ASCII protocol. The ESP32's UART0 is exposed to
-the Pi as /dev/ttyAMA0 (a.k.a. /dev/serial0) and to USB-C as /dev/ttyUSB0 — so
-only ONE host should send at a time (stop the stock rider-controller service /
-don't drive from the workstation simultaneously).
+Runs on the Raspberry Pi and talks to the ESP32 using the firmware's
+newline-terminated ASCII protocol. The Pi is wired to the ESP32's UART1
+(ESP32 IO4=RX / IO5=TX) and sees it as /dev/ttyAMA0 (a.k.a. /dev/serial0).
+The firmware mirrors the same command/telemetry interface on UART1 (Pi) AND
+UART0 (USB-C, /dev/ttyUSB0) — so only ONE host should send at a time (stop the
+stock rider-controller service / don't drive from the workstation at once).
 
 Commands the firmware understands (one per line):
   en 1 | en 0   enable/disable balance       d        quick disable
