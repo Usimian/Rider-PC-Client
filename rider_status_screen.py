@@ -41,18 +41,26 @@ lcd.Init()
 lcd.clear()
 ser = serial.Serial(PORT, 115200, timeout=0.1)
 
-# physical buttons on the XGO 2-inch board (active-low, pull-up). C = upper-left,
-# next to the RIDER text -> balance start/stop toggle.
-BTN_BALANCE = 17                # GPIO17 = C button (upper-left)
+# physical buttons on the XGO 2-inch board (active-low, pull-up). Mapped BY POSITION
+# on 2026-06-14 (GPIOs from the XGO CM4 key.py; labels A/B/C/D, but position is what we use):
+#   upper-left  = GPIO17 (C)  -> balance start/stop toggle (next to the RIDER text)
+#   upper-right = GPIO22 (D)  -> (free)
+#   lower-left  = GPIO23 (B)  -> hold ~1.5s = sudo poweroff
+#   lower-right = GPIO24 (A)  -> (free)
+BTN_BALANCE = 17                # upper-left  (C)
+BTN_POWER   = 23                # lower-left  (B) -> poweroff on ~1.5s hold
 try:
     _chip = lgpio.gpiochip_open(0)
     lgpio.gpio_claim_input(_chip, BTN_BALANCE, lgpio.SET_PULL_UP)
+    lgpio.gpio_claim_input(_chip, BTN_POWER,   lgpio.SET_PULL_UP)
     btn_ok = True
 except Exception as e:
     print("button GPIO unavailable: %s" % e, flush=True)
     btn_ok = False
 btn_prev = 1                    # 1 = released (pulled up)
 btn_last = 0.0                  # last-press time (debounce)
+pwr_down_t = 0.0                # power-button press-start time (0 = released)
+pwr_fired = False               # poweroff already triggered this hold
 
 tel = {}
 cmd_q = queue.Queue()           # inbound MQTT -> ESP32 line commands
@@ -89,6 +97,16 @@ def controller_connected():
     return _ctrl["on"]
 
 
+def do_poweroff():
+    """Shut the Pi down (pi has NOPASSWD sudo). Triggered by the lower-left button
+    held ~1.5s, or the GUI's rider/control/system 'poweroff_pi' command."""
+    print("POWEROFF requested -> sudo poweroff", flush=True)
+    try:
+        subprocess.Popen(["sudo", "poweroff"])
+    except Exception as e:
+        print("poweroff failed: %s" % e, flush=True)
+
+
 # ---------------- MQTT (republish + relay) ----------------
 def on_connect(client, userdata, flags, reason_code, properties=None):
     for t in ("rider/control/line", "rider/control/system",
@@ -112,6 +130,8 @@ def on_message(client, userdata, msg):
             cmd_q.put("en 0")
         elif c in ("enable", "balance_on"):
             cmd_q.put("en 1")
+        elif c in ("poweroff_pi", "poweroff", "shutdown"):   # GUI "POWER OFF PI" button
+            do_poweroff()
     # movement/settings: logged only for now (full mapping is the GUI-reconcile step)
     else:
         print("relay: unmapped %s %s" % (t, p), flush=True)
@@ -293,6 +313,17 @@ while True:
             else:
                 ser.write(b"polrun 1\nen 1\n")                      # idle -> arm policy + enable
         btn_prev = lvl
+        # power button (lower-left, GPIO23): HOLD ~1.5s -> sudo poweroff (hold, not tap,
+        # so a stray press can't shut the robot down mid-use).
+        if lgpio.gpio_read(_chip, BTN_POWER) == 0:
+            if pwr_down_t == 0.0:
+                pwr_down_t = tnow
+            elif not pwr_fired and tnow - pwr_down_t >= 1.5:
+                pwr_fired = True
+                do_poweroff()
+        else:
+            pwr_down_t = 0.0
+            pwr_fired = False
     now = time.time()
     if now - last_render >= 0.2:        # LCD ~5 Hz
         last_render = now
