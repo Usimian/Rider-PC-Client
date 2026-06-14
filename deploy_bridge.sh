@@ -26,6 +26,13 @@ set -euo pipefail
 /home/pi/xgovenv/bin/pip install -q paho-mqtt lgpio pyserial psutil pillow
 # 2. ensure the broker is up
 sudo systemctl enable --now mosquitto >/dev/null 2>&1 || true
+# 2b. boot-speed: mask NetworkManager-wait-online. It burns ~6s waiting for full WiFi
+#     connectivity, which gated the whole boot (mosquitto Wants=network-online.target, and
+#     rider-bridge/rider-joystick order after mosquitto). The broker + our services only
+#     use the LOCAL connection, so network-online.target resolving immediately is fine ->
+#     services come up ~6s sooner. (Removing it from mosquitto via drop-in didn't reset
+#     cleanly on this systemd; masking the wait service is the reliable fix.)
+sudo systemctl mask NetworkManager-wait-online.service
 # 3. install the systemd units
 sudo install -m 644 /tmp/rider-bridge.service   /etc/systemd/system/rider-bridge.service
 sudo install -m 644 /tmp/rider-joystick.service /etc/systemd/system/rider-joystick.service
