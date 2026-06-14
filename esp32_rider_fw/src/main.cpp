@@ -66,14 +66,25 @@ volatile float gPolVelLP = 0.7f;    // low-pass on the velocity FED TO THE POLIC
 // neutralized); a simple outer loop biases the balance SETPOINT toward a target
 // tick so the balancer drives there. 'poshold <deg/m>' (0=off), 'posmax <deg>'.
 volatile float gPosHoldK   = 5.0f;  // setpoint-bias P gain (deg per meter of position error); 0 = pure balance
-volatile float gPosHoldKi  = 2.5f;  // setpoint-bias I gain (deg per m*s); kills steady-state offset (auto-tuned)
-volatile float gPosHoldKd  = 28.0f; // setpoint-bias D gain (deg per m/s); damps the approach (auto-tuned)
+volatile float gPosHoldKi  = 1.0f;  // setpoint-bias I gain (deg per m*s); kills steady-state offset. 1.0 (was 2.5):
+                                    // 2.5 wound up -> 0.18Hz hunt; 1.0 is the knee (halved the hunt). Robot 2026-06-14.
+volatile float gPosHoldKd  = 20.0f; // setpoint-bias D gain (deg per m/s) -- HOLD/close-in damping ONLY now.
+                                    // SPLIT from the drive gain (gDriveKd): holding wants HIGH damping (20 killed both
+                                    // the slow hunt -> 34mm and the reverse shimmy -> 1.0x); driving wants it low (it's
+                                    // the velocity-tracking loop, where high rang -> forward shimmy). Robot 2026-06-14.
+volatile float gDriveKd    = 10.0f; // velocity-DRIVE gain (deg per m/s): used while moving (stick drive or ptgt slew).
+                                    // 10 has the phase margin for the ~50ms wheel-vel delay (28/20 rang while driving).
 volatile float gPosHoldMax = 5.0f;  // max setpoint bias / braking authority (deg) (auto-tuned)
 volatile float gPosIntBand = 0.15f; // only integrate within this dist of target (m) -> no windup during moves
+volatile float gPosDeadband= 0.012f;// hold dead-band (m): when settled within this of target, STOP chasing the
+                                    // exact center (P off, I frozen, D kept) so the loop can't limit-cycle against
+                                    // wheel stiction -> robot sits STILL instead of hunting. 0=off. live-tune 'posdb'
 volatile float gPosVmax    = 0.35f; // move speed cap (m/s): full-stick drive speed. 0.35 = tuned clean-stop ceiling (0.6 overshot/toppled). live-tune via 'posvmax'
 volatile float gPosAmax    = 0.8f;  // accel cap (m/s^2) on the drive-velocity ramp: gentle accel kills the lurch/oscillation. live-tune via 'posamax'
 volatile float gTurn       = 0.0f;  // wheel differential (raw) ADDED to both wheel cmds -> yaw. Computed by the yaw-rate controller each loop.
 volatile float gTurnMax    = 250.0f;// clamp on |gTurn| (raw)
+volatile float gWheelDZ    = 5.0f;  // per-wheel anti-stiction floor (raw), applied DURING TURNS only: keeps
+                                    // neither wheel in the stiction band so a turn can't go one-sided. live-tune 'wheeldz'
 volatile float gYawRateCmd = 0.0f;  // commanded yaw rate (rad/s) from the stick; full stick = +/-2 rad/s. set via 'turnrate'
 volatile float gYawKp      = 40.0f; // wheel-differential (raw) per rad/s of yaw-rate error (FB trim; 120 oscillated)
 volatile float gYawFF      = 75.0f; // FEEDFORWARD differential (raw) per rad/s commanded -> firm turn open-loop, low FB gain stays stable
@@ -81,6 +92,10 @@ volatile float gTurnLP     = 0.5f;  // low-pass on the turn output (0=off..0.95)
 volatile float gYawFb      = -1.0f; // yaw-rate FEEDBACK sign (-1 = correct: gz reads opposite to the turn dir; +1 ran away). live-tune via 'yawfb'
 volatile float gPosVelLP   = 0.8f;  // low-pass on the velocity feeding the D term (0=off..→1 heavy); kills D-noise shimmy
 volatile float gPosTarget  = 0.0f;  // position setpoint (m, wheel_x frame); anchored at enable, moved via 'ptgt'
+volatile float gDriveVel   = 0.0f;  // velocity-drive command (m/s) from the stick; 0 = release. While !=0 the
+                                    // position target is IGNORED, home tracks current pos (no windup), and the
+                                    // gPosHoldKd loop tracks this speed. On release the home latches at the spot
+                                    // you let go (-> stop quick + hold). 'ptgt' position moves still honored when 0.
 static const float POL_DEG2RAD     = 0.017453292f;
 static const float POL_WHEEL_R     = 0.03f;      // wheel radius (m) -> x_vel = wheel_omega*r
 static const float POL_VELMAX_RADS = 30.0f;      // action=1 -> 30 rad/s (sim vel_max)
@@ -108,12 +123,25 @@ volatile float tRoll=0;                  // lateral tilt (deg), accel-only reado
 volatile float tVbat=0;                  // smoothed pack voltage (V), read from GPIO33 divider
 volatile float tYaw=0;                    // integrated heading (deg), gyro-Z only -> drifts slowly
 volatile float tTgtEff=0, tVdes=0;        // slewed pos target + profile velocity (driving diagnostics)
+volatile float tPoseX=0, tPoseY=0;        // world-frame dead-reckoned pose (m): fwd distance projected through heading (tYaw)
+volatile bool  gOdoReset=true;            // 'odoreset' + each gyro-cal -> loop zeros pose & resyncs prev wheel_x (init true: clean first-loop sync)
+// --- drive-capture: high-rate commanded-vs-actual wheel velocity + pitch, WHILE balancing/driving ---
+// (the sim can't model the real servo under load; this catches commanded(u) vs actual(encoder v) divergence)
+#define DCAP_N 256
+volatile bool gDcArm=false;               // true = capturing; set by 'drivecap', cleared when buffer full
+volatile bool gDcReady=false;             // full -> loop() dumps it (non-blocking; control task keeps balancing)
+static uint32_t dcT[DCAP_N]; static int16_t dcCmd[DCAP_N]; static int16_t dcV[DCAP_N];
+static uint8_t  dcWid[DCAP_N]; static int16_t dcP[DCAP_N]; static int dcIdx=0;
 volatile float gYawBias=0.0f;             // gyro-Z zero-rate bias (deg/s), from calibrateGyro
 volatile float gVbatK=3.0f;              // GPIO33 divider ratio: pack = pin*K. Schematic R8=20K(top)/R7=10K(bot) => x3.0
 // 2S pack (net VCC8.4V): 8.4V full, 6.0V empty -> linear % for display.
 static const float VBAT_FULL=8.4f, VBAT_EMPTY=6.0f;
 volatile float tLoopHz=0, tReadFail=0;   // measured control-loop rate & read-fail %
 volatile float tDtMaxMs=0;               // worst-case cycle period (ms) since last report (ground-truth stall detector)
+volatile float tReadMaxMs=0, tWorkMaxMs=0; // INSTRUMENT: worst wheel-read time + total cycle work (ms) per report window
+volatile float tPostMaxMs=0;             // INSTRUMENT: post-read work (control/policy + output) ms per window
+volatile float tInferMaxMs=0;            // INSTRUMENT: policyInfer() time ms per window
+volatile int   tRetDL=-1, tRetDR=-1;     // INSTRUMENT: wheel return-delay reg 0x07 (raw), read once at boot
 volatile bool  gDumpRead=false;     // 'rd' -> task dumps next raw read frame
 volatile int   gTestTor=0;          // 'wt <v>' -> direct wheel torque when DISABLED (stand test)
 volatile int   gPollLock=0;         // 'lock <id>' -> poll only that wheel (0 = alternate)
@@ -279,6 +307,7 @@ static void calibrateGyro(){
   gGyroBias = sum / N;
   gYawBias  = sumz / N;
   tYaw = 0.0f;                            // zero heading at each (re)calibration
+  gOdoReset = true;                       // pose origin follows the heading origin
 }
 
 // ---------------- wheel odometry state ----------------
@@ -329,15 +358,34 @@ static void odomUpdate(uint8_t id, int pos, int vel){
 // ---- neural-policy inference: 14-dim obs -> action in [-1,1] (deterministic).
 //      z = clip((obs-mean)/sqrt(var+eps)); a = clip(W2 tanh(W1 tanh(W0 z+b0)+b1)+b2).
 //      Validated against SB3 to 1.9e-7 in sim/export_policy.py. ~5k MACs, microseconds. ----
+// policy weights copied to internal RAM at boot. The tables are read-only so the toolchain
+// keeps them in flash (.rodata); the matmul then pays flash-access latency 5000x/cycle.
+// Copying to .bss SRAM (written by memcpy, so the compiler can't fold it back to flash)
+// makes the matmul read single-cycle SRAM. policyToRam() is called once in setup().
+static float rW0[64][POL_OBS], rW1[64][64], rW2[1][64], rB0[64], rB1[64], rMEAN[POL_OBS], rVAR[POL_OBS];
+static void policyToRam(){
+  memcpy(rW0,POL_W0,sizeof rW0); memcpy(rW1,POL_W1,sizeof rW1); memcpy(rW2,POL_W2,sizeof rW2);
+  memcpy(rB0,POL_B0,sizeof rB0); memcpy(rB1,POL_B1,sizeof rB1);
+  memcpy(rMEAN,POL_MEAN,sizeof rMEAN); memcpy(rVAR,POL_VAR,sizeof rVAR);
+}
+// fast tanh: Pade[7/8] rational (~1e-7 vs libm tanhf; validated to 5e-5 on the policy action).
+// libm tanhf measured ~20us/call x 128 = ~2.5ms/cycle on this ESP32 -- the control loop's #1 cost.
+static inline float ftanh(float x){
+  if(x > 4.97f) return 1.0f; else if(x < -4.97f) return -1.0f;
+  float x2=x*x;
+  float a=x*(135135.0f+x2*(17325.0f+x2*(378.0f+x2)));
+  float b=135135.0f+x2*(62370.0f+x2*(3150.0f+x2*28.0f));
+  return a/b;
+}
 static float policyInfer(const float* obs){
   float z[POL_OBS], h0[64], h1[64];
   for(int i=0;i<POL_OBS;i++){
-    float v=(obs[i]-POL_MEAN[i])/sqrtf(POL_VAR[i]+POL_EPS);
+    float v=(obs[i]-rMEAN[i])/sqrtf(rVAR[i]+POL_EPS);
     z[i]= v>POL_CLIP?POL_CLIP:(v<-POL_CLIP?-POL_CLIP:v);
   }
-  for(int j=0;j<64;j++){ float s=POL_B0[j]; for(int i=0;i<POL_OBS;i++) s+=POL_W0[j][i]*z[i];  h0[j]=tanhf(s); }
-  for(int j=0;j<64;j++){ float s=POL_B1[j]; for(int i=0;i<64;i++)     s+=POL_W1[j][i]*h0[i]; h1[j]=tanhf(s); }
-  float a=POL_B2[0]; for(int i=0;i<64;i++) a+=POL_W2[0][i]*h1[i];
+  for(int j=0;j<64;j++){ float s=rB0[j]; for(int i=0;i<POL_OBS;i++) s+=rW0[j][i]*z[i];  h0[j]=ftanh(s); }
+  for(int j=0;j<64;j++){ float s=rB1[j]; for(int i=0;i<64;i++)     s+=rW1[j][i]*h0[i]; h1[j]=ftanh(s); }
+  float a=POL_B2[0]; for(int i=0;i<64;i++) a+=rW2[0][i]*h1[i];
   return a>1.0f?1.0f:(a<-1.0f?-1.0f:a);
 }
 
@@ -347,10 +395,10 @@ static void balanceTask(void*){
   calibrateGyro();                  // boot cal (robot should be held still); redo live with 'gcal'
   float theta=0, dqf=0; bool primed=false;
   float pitchF=0, rateF=0; bool fpInit=false;   // factory control-input filter state
-  uint8_t pollId = LEFT_W;            // alternate which wheel we read each cycle
   uint32_t lastUs = micros(); uint32_t n=0;
   uint32_t hzN=0, hzFail=0, hzT=millis();   // loop-rate / read-fail measurement
   float dtMaxAcc=0;                          // worst-case raw cycle period this report window
+  float rdMaxAcc=0, workMaxAcc=0, postMaxAcc=0, inferMaxAcc=0; // INSTRUMENT: read + work + post-read + inference time this window
   for(;;){
     // --- on-demand gyro recal (only while disabled + still) ---
     if(gDoGcal && !gEnabled){ wheelTorque(0,0); calibrateGyro(); gDoGcal=false; primed=false; fpInit=false; }
@@ -398,7 +446,7 @@ static void balanceTask(void*){
     if(dt > dtMaxAcc) dtMaxAcc = dt;            // capture RAW period BEFORE the safety clamp below
     if(dt <= 0 || dt > 0.05f) dt = 0.006f;
     hzN++;
-    if(millis()-hzT >= 250){ uint32_t el=millis()-hzT; tLoopHz=hzN*1000.0f/el; tReadFail=hzFail*100.0f/hzN; tDtMaxMs=dtMaxAcc*1000.0f; dtMaxAcc=0; hzN=0; hzFail=0; hzT=millis(); }
+    if(millis()-hzT >= 250){ uint32_t el=millis()-hzT; tLoopHz=hzN*1000.0f/el; tReadFail=hzFail*100.0f/hzN; tDtMaxMs=dtMaxAcc*1000.0f; tReadMaxMs=rdMaxAcc; tWorkMaxMs=workMaxAcc; tPostMaxMs=postMaxAcc; tInferMaxMs=inferMaxAcc; dtMaxAcc=0; rdMaxAcc=0; workMaxAcc=0; postMaxAcc=0; inferMaxAcc=0; hzN=0; hzFail=0; hzT=millis(); }
 
     // --- IMU -> tilt + rate ---
     int16_t ax,ay,az,gx,gy,gz; imuData(&ax,&ay,&az,&gx,&gy,&gz);
@@ -435,12 +483,26 @@ static void balanceTask(void*){
       theta = pit_freq*pit_acc + (1.0f-pit_freq)*(theta + pit_gyro*dt);
     float rate = pit_gyro;
 
-    // --- read ONE wheel this cycle, update odometry ---
+    // --- read wheels + update odometry. Poll BOTH every cycle (was alternating, which
+    //     half-staled the fused wheel_x and forced a heavy velocity LP -> ~tens of ms of
+    //     phase lag in the balance loop = the shimmy). gPollLock still narrows to one
+    //     wheel for bench diagnostics (stepcap). ---
     static int failL=0, failR=0;            // consecutive per-wheel read failures
-    int p=0,v=0;
-    bool ok = wheelRead(pollId,&p,&v);
-    if(ok){ odomUpdate(pollId,p,v); if(pollId==LEFT_W) failL=0; else failR=0; }
-    else { hzFail++; if(pollId==LEFT_W) failL++; else failR++; }
+    int p=0,v=0; uint8_t rdWid=LEFT_W; bool ok=false;
+    bool pollBoth = (gPollLock==0);
+    uint32_t trd0=micros();                 // INSTRUMENT: time the wheel-read block (both reads)
+    if(pollBoth || gPollLock==LEFT_W){
+      int pL=0,vL=0; bool okL=wheelRead(LEFT_W,&pL,&vL);
+      if(okL){ odomUpdate(LEFT_W,pL,vL); failL=0; } else { hzFail++; failL++; }
+      rdWid=LEFT_W; p=pL; v=vL; ok=okL;     // drivecap / dumpread sample = left wheel
+    }
+    if(pollBoth || gPollLock==RIGHT_W){
+      int pR=0,vR=0; bool okR=wheelRead(RIGHT_W,&pR,&vR);
+      if(okR){ odomUpdate(RIGHT_W,pR,vR); failR=0; } else { hzFail++; failR++; }
+      if(gPollLock==RIGHT_W){ rdWid=RIGHT_W; p=pR; v=vR; ok=okR; }
+    }
+    { float rdms=(micros()-trd0)*1e-3f; if(rdms>rdMaxAcc) rdMaxAcc=rdms; }   // INSTRUMENT: read-block ms
+    uint32_t tpost0=micros();               // INSTRUMENT: time post-read work (control/policy + output)
     // --- wheel-dropout guard: a wheel that stops answering (e.g. ID21 falling off
     //     the bus) leaves the robot on one wheel -> pivots and falls. Auto-disable
     //     + flag the offending ID instead of running away on contaminated data. ---
@@ -450,11 +512,10 @@ static void balanceTask(void*){
       emit(wb,wk);
     }
     if(gDumpRead){
-      char b[200]; int k=snprintf(b,sizeof(b),"# rd id=%d ok=%d n=%d p=%d v=%d raw=",pollId,ok,gRawN,p,v);
+      char b[200]; int k=snprintf(b,sizeof(b),"# rd id=%d ok=%d n=%d p=%d v=%d raw=",rdWid,ok,gRawN,p,v);
       for(int i=0;i<gRawN && k<(int)sizeof(b)-4;i++) k+=snprintf(b+k,sizeof(b)-k,"%02X ",gRaw[i]);
       k+=snprintf(b+k,sizeof(b)-k,"\n"); emit(b,k); gDumpRead=false;
     }
-    pollId = gPollLock ? (uint8_t)gPollLock : ((pollId==LEFT_W) ? RIGHT_W : LEFT_W);
 
     // while disabled, keep home = current position so 'enable' locks here
     if(!gEnabled) stable_pos = wheel_x;
@@ -471,6 +532,7 @@ static void balanceTask(void*){
     float qErr  = pitch - gImuZero;                  // for fall/telemetry (lean error from base)
     static bool  polInit=false;          // neural-policy episode state (reset on disable)
     static float polIpitch=0,polPrevX=0,polPrevFrame[7]={0},posErrInt=0,xvelF=0,xvelP=0,uF=0,gPosTargetEff=0,vdesS=0;
+    static bool  wasVelDrive=false;     // edge-detect velocity-drive -> release, to latch the home cleanly
     // position-runaway cutout: in policy mode measure from the SLEWED target gPosTargetEff
     // (what the wheels actually track) -- a joystick that jumps gPosTarget far ahead slews
     // in gradually at posvmax, so driving never trips the guard; only a genuine track loss
@@ -497,34 +559,54 @@ static void balanceTask(void*){
         // filters: xvelF for the position-D term, xvelP for the policy's velocity obs.
         xvelF = gPosVelLP*xvelF + (1.0f-gPosVelLP)*xvel;
         xvelP = gPolVelLP*xvelP + (1.0f-gPolVelLP)*xvel;
-        // TRAPEZOIDAL MOTION PROFILE on the effective target: accel-limited (gPosAmax) ramp
-        // toward a velocity capped by BOTH gPosVmax and the braking-distance limit
-        // sqrt(2*a*dist) -- so it decelerates in time to STOP exactly on gPosTarget instead of
-        // coasting past and ringing. vdes (=vdesS) is the feedforward wheel velocity.
-        float dist = gPosTarget - gPosTargetEff;
-        float vstop = sqrtf(2.0f * gPosAmax * fabsf(dist));   // fastest speed we can still brake to rest by target
-        float vcap = fminf(gPosVmax, vstop);
-        float vcmd = (dist >= 0.0f) ? vcap : -vcap;
         float damax = gPosAmax * sdt;
-        if(vcmd > vdesS + damax) vdesS += damax; else if(vcmd < vdesS - damax) vdesS -= damax; else vdesS = vcmd;
-        gPosTargetEff += vdesS * sdt;
-        if((dist >= 0.0f && gPosTargetEff > gPosTarget) ||    // never coast past the goal
-           (dist <  0.0f && gPosTargetEff < gPosTarget)){ gPosTargetEff = gPosTarget; vdesS = 0.0f; }
-        vdes = vdesS;                                          // profile feedforward velocity (m/s)
+        if(fabsf(gDriveVel) > 0.001f){
+          // ---- VELOCITY DRIVE (stick held) ----------------------------------------
+          // Position target is IRRELEVANT here: the home continuously tracks the current
+          // position (so nothing winds up), and vdes ramps (accel-limited) to the stick's
+          // commanded speed. Drive is then the gPosHoldKd velocity loop on (xvelF - vdes),
+          // posErr being ~0. The instant the stick releases, gPosTarget is left sitting at
+          // the current spot = the new hold home.
+          if(gDriveVel > vdesS + damax) vdesS += damax; else if(gDriveVel < vdesS - damax) vdesS -= damax; else vdesS = gDriveVel;
+          gPosTarget = wheel_x; gPosTargetEff = wheel_x; posErrInt = 0.0f;
+          wasVelDrive = true;
+        } else {
+          // ---- POSITION HOLD / COMMANDED MOVE (stick released, or 'ptgt' distance) -----
+          // Trapezoidal profile to gPosTarget (= latched release point, OR a commanded
+          // ptgt move -- specific-distance moves are honored here). On the release edge,
+          // zero the feedforward so we brake from rest at the latched home (no overshoot).
+          if(wasVelDrive){ vdesS = 0.0f; wasVelDrive = false; }
+          float dist = gPosTarget - gPosTargetEff;
+          float vstop = sqrtf(2.0f * gPosAmax * fabsf(dist));  // brake-distance speed cap -> stop ON target
+          float vcap = fminf(gPosVmax, vstop);
+          float vcmd = (dist >= 0.0f) ? vcap : -vcap;
+          if(vcmd > vdesS + damax) vdesS += damax; else if(vcmd < vdesS - damax) vdesS -= damax; else vdesS = vcmd;
+          gPosTargetEff += vdesS * sdt;
+          if((dist >= 0.0f && gPosTargetEff > gPosTarget) ||   // never coast past the goal
+             (dist <  0.0f && gPosTargetEff < gPosTarget)){ gPosTargetEff = gPosTarget; vdesS = 0.0f; }
+        }
+        vdes = vdesS;                                          // feedforward velocity (m/s)
         tTgtEff = gPosTargetEff; tVdes = vdes;                 // telemetry (driving diagnostics)
       }
       float posErr = wheel_x - gPosTargetEff;                // track the SLEWED target
-      // integrate only once the slew has SETTLED at the final target and we're near it ->
-      // trims the steady-state offset at rest, never winds up during a move.
-      if(polInit && gPosTargetEff == gPosTarget && fabsf(posErr) < gPosIntBand){
+      bool moving = (fabsf(gDriveVel) > 0.001f) || (gPosTargetEff != gPosTarget);
+      // DEAD-BAND: when SETTLED (not moving) and within gPosDeadband of target, stop chasing
+      // the exact center. A loop that always hunts dead-center limit-cycles against wheel
+      // stiction (-> the ~3cm back-and-forth); dropping P inside the band lets it sit STILL.
+      bool inBand = (!moving && gPosDeadband > 0.0f && fabsf(posErr) < gPosDeadband);
+      // integrate only once the slew has SETTLED at the final target and we're near it -- but
+      // NOT inside the dead-band, so the integral trim holds steady instead of slowly creeping.
+      if(polInit && gPosTargetEff == gPosTarget && fabsf(posErr) < gPosIntBand && !inBand){
         float kiLim = (gPosHoldKi>0.01f) ? (gPosHoldMax/gPosHoldKi) : 1e6f;
         posErrInt = clampf(posErrInt + posErr*dt, -kiLim, kiLim);
       }
-      // DAMPED PI+D position loop. Sign VERIFIED on robot: +gPosHoldK drives back
-      // TOWARD gPosTarget (opposite sign ran away). I-term kills the steady-state
-      // offset (a P-only loop parks short of target against a constant bias); D (on the
-      // LOW-PASSED velocity) damps the approach without the encoder-noise shimmy.
-      float biasDeg = clampf(gPosHoldK*posErr + gPosHoldKi*posErrInt + gPosHoldKd*(xvelF - vdes),
+      // DAMPED PI+D position loop. Sign VERIFIED on robot: +gPosHoldK drives back TOWARD
+      // gPosTarget. REGIME-SCHEDULED D gain: MOVING (stick drive / ptgt slew) uses the gentle
+      // gDriveKd (velocity-tracking loop -- high rings); CLOSE-IN HOLD uses the high gPosHoldKd.
+      // Inside the dead-band P is dropped (pErr=0) so it stops hunting; velocity-D stays (anti-drift).
+      float kd = moving ? gDriveKd : gPosHoldKd;
+      float pErr = inBand ? 0.0f : posErr;
+      float biasDeg = clampf(gPosHoldK*pErr + gPosHoldKi*posErrInt + kd*(xvelF - vdes),
                              -gPosHoldMax, gPosHoldMax);
       float pr_pitch = (biasDeg - pitch) * POL_DEG2RAD;   // = -(theta-(setpoint+bias)) in rad
       float pr_rate  = -dqf * POL_DEG2RAD;                // pitch rate (rad/s), sim frame
@@ -538,7 +620,9 @@ static void balanceTask(void*){
       float obs[POL_OBS];                            // frame_stack=2: [prev_frame, curr_frame]
       for(int k=0;k<7;k++){ obs[k]=polPrevFrame[k]; obs[7+k]=frame[k]; }
       for(int k=0;k<7;k++) polPrevFrame[k]=frame[k];
+      uint32_t ti0=micros();                         // INSTRUMENT: time policyInfer()
       float uraw = gPolSign * policyInfer(obs) * POL_VELMAX_RADS * POL_RAW_PER_RADS; // raw wheel velocity cmd
+      { float ims=(micros()-ti0)*1e-3f; if(ims>inferMaxAcc) inferMaxAcc=ims; }   // INSTRUMENT
       uF = gPolULP*uF + (1.0f-gPolULP)*uraw;   // low-pass the policy command -> kills the cycle-to-cycle shimmy
       u = clampf(uF, -(float)gUMax, (float)gUMax);
     } else if(gEnabled && !fallen){
@@ -585,7 +669,14 @@ static void balanceTask(void*){
         wheelTorque((int16_t)(torqAcc + tn), (int16_t)(-torqAcc + tn)); // + yaw differential
       } else {
         float tn = clampf(gTurn, -gTurnMax, gTurnMax);
-        wheelTorque((int16_t)(uout + tn), (int16_t)(-uout + tn));   // mirrored L:+u/R:-u + yaw differential
+        float L = uout + tn, R = -uout + tn;                        // mirrored L:+u/R:-u + yaw differential
+        // during a commanded turn, keep neither wheel in the stiction band -> both wheels
+        // share the turn (no one-sided pivot). Gated on the turn so the tuned HOLD is untouched.
+        if(fabsf(gYawRateCmd) > 0.001f && gWheelDZ > 0.0f){
+          if(L > 0.0f && L < gWheelDZ) L = gWheelDZ; else if(L < 0.0f && L > -gWheelDZ) L = -gWheelDZ;
+          if(R > 0.0f && R < gWheelDZ) R = gWheelDZ; else if(R < 0.0f && R > -gWheelDZ) R = -gWheelDZ;
+        }
+        wheelTorque((int16_t)L, (int16_t)R);
       }
     } else if(wasDriving){
       // Falling edge (disable / fall / Ctrl-C): the servos latch the last velocity
@@ -596,14 +687,32 @@ static void balanceTask(void*){
     }
     wasDriving = driving;
 
+    // dead-reckoned pose: project the change in fused forward distance through the
+    // current heading (tYaw). gyro gives rotation, wheels give translation -- the right
+    // split for a balancer (wheels slip during balance, but net forward travel is sound).
+    static float odoPrevWx=0;
+    if(gOdoReset){ tPoseX=0; tPoseY=0; odoPrevWx=wheel_x; gOdoReset=false; }
+    float dWx=wheel_x-odoPrevWx; odoPrevWx=wheel_x;
+    float yawRad=tYaw*POL_DEG2RAD;
+    tPoseX+=dWx*cosf(yawRad); tPoseY+=dWx*sinf(yawRad);
+
     tTheta=theta; tRate=dqf; tU=u; tWheelX=wheel_x; tWheelVx=wheel_vx;
+
+    // drive-capture sample (commanded u vs actual encoder v, per wheel, + pitch) at loop rate
+    if(gDcArm && dcIdx<DCAP_N){
+      dcT[dcIdx]=micros(); dcCmd[dcIdx]=(int16_t)u; dcV[dcIdx]=(int16_t)v;
+      dcWid[dcIdx]=rdWid; dcP[dcIdx]=(int16_t)(theta*100.0f); dcIdx++;
+      if(dcIdx>=DCAP_N){ gDcArm=false; gDcReady=true; }
+    }
 
     n++;
     // NOTE: legs are untorqued ONCE at startup (setup); we no longer write to them
     // mid-control. Repeated writes to the dead-encoder right leg (ID22) were a prime
     // suspect for knocking its bus-neighbor right wheel (ID21) offline under load.
     // pace the loop to the factory period so per-sample constants match in time
+    { float pms=(micros()-tpost0)*1e-3f; if(pms>postMaxAcc) postMaxAcc=pms; }   // INSTRUMENT: post-read work ms
     uint32_t spent = micros() - now;                 // 'now' = cycle start (dt block)
+    { float wkms=spent*1e-3f; if(wkms>workMaxAcc) workMaxAcc=wkms; }   // INSTRUMENT: total cycle work ms
     if(spent < (uint32_t)gLoopUs){
       uint32_t rem = (uint32_t)gLoopUs - spent;
       vTaskDelay(rem/1000 + 1);                       // tick = 1ms; +1 to cover remainder
@@ -622,11 +731,15 @@ void setup(){
   imuWrite(REG_PWR_MGMT0, 0x0F);    // accel+gyro low-noise
   delay(100);
 
-  Serial.printf("\n=== Rider balance FW (LQR) ===  IMU WHO_AM_I=0x%02X\n", imuRead(REG_WHO_AM_I));
+  { uint8_t rb[2];                                   // INSTRUMENT: wheel return-delay reg 0x07
+    tRetDL = servoReadN(LEFT_W,0x07,1,rb)  ? rb[0] : -1;
+    tRetDR = servoReadN(RIGHT_W,0x07,1,rb) ? rb[0] : -1; }
+  Serial.printf("\n=== Rider balance FW (LQR) ===  IMU WHO_AM_I=0x%02X  retDelay L=%d R=%d\n", imuRead(REG_WHO_AM_I), tRetDL, tRetDR);
   Serial.println("CASCADE PID: pos->vel->pitch + rate damp (factory R-1.1.3). Legs torque-OFF. DISABLED.");
   Serial.println("Cmds: en 1|0 | kppos kpvel kivel kppit kdpit izero <v> | kp(=kppit) kd(=kdpit) |");
   Serial.println("      umax dqmax iclamp ff ffband fall <v> | set cap vx psign pol home gcal | d get");
 
+  policyToRam();                                    // copy NN weights flash -> SRAM (fast matmul)
   xTaskCreatePinnedToCore(balanceTask, "balance", 4096, NULL, 12, NULL, 1);
 }
 
@@ -644,7 +757,7 @@ static void applyCmd(char* s){
   char* sp=s; while(*sp && *sp!=' ') sp++;
   float v=0;
   if(*sp){ *sp=0; v=atof(sp+1); }
-  if      (!strcmp(s,"en"))  { gEnabled=(v!=0.0f); gTurn=0.0f; gYawRateCmd=0.0f; if(gEnabled){ gWheelFault=0; gPosTarget=tWheelX; } }  // enable: clear fault + HOME position target to current spot (else a stale ptgt trips the pos fall-guard -> u=0); zero any turn
+  if      (!strcmp(s,"en"))  { gEnabled=(v!=0.0f); gTurn=0.0f; gYawRateCmd=0.0f; gDriveVel=0.0f; if(gEnabled){ gWheelFault=0; wheel1_x=0; wheel2_x=0; wheel_x=0; gPosTarget=0.0f; gOdoReset=true; } }  // enable: clear fault + ZERO the position frame (wheel odometer + target + dead-reckoned pose) so current pos and target both start at 0; zero any turn
   else if (!strcmp(s,"d"))     gEnabled=false;
   else if (!strcmp(s,"kppos")) gKpPos=v;               // cascade gains
   else if (!strcmp(s,"kpvel")) gKpVel=v;
@@ -684,15 +797,18 @@ static void applyCmd(char* s){
   }
   else if (!strcmp(s,"gcal")){ gDoGcal=true; return; } // recalibrate gyro bias (hold still)
   else if (!strcmp(s,"stepcap")){ if(v!=0.0f) gStepCmd=(int)v; gStepCap=true; return; } // wheel step-response capture
+  else if (!strcmp(s,"drivecap")){ dcIdx=0; gDcReady=false; gDcArm=true; return; }       // arm high-rate cmd-vs-actual capture (run WHILE balancing/driving)
   else if (!strcmp(s,"polrun")) gPolMode=(v!=0.0f);   // neural-policy control on/off (additive; PID is default; 'pol' is gPolarity!)
   else if (!strcmp(s,"polsign")) gPolSign=(v<0.0f?-1.0f:1.0f);  // flip action->wheel sign (verify on robot)
   else if (!strcmp(s,"polulp"))  gPolULP=clampf(v,0.0f,0.95f);  // policy-output low-pass (0=off..0.95 heavy)
   else if (!strcmp(s,"polvlp"))  gPolVelLP=clampf(v,0.0f,0.97f);// policy velocity-OBS low-pass (kills quantization shimmy)
   else if (!strcmp(s,"poshold")) gPosHoldK=v;          // code position-hold P gain (deg/m); 0 = pure balance
   else if (!strcmp(s,"poshi"))   gPosHoldKi=v;         // code position-hold I gain (deg per m*s); kills offset
-  else if (!strcmp(s,"poshd"))   gPosHoldKd=v;         // code position-hold D gain (deg per m/s)
+  else if (!strcmp(s,"poshd"))   gPosHoldKd=v;         // HOLD/close-in D gain (deg per m/s) -- high = crisp hold
+  else if (!strcmp(s,"drivekd")) gDriveKd=v;           // DRIVE/moving D gain (deg per m/s) -- low = smooth drive
   else if (!strcmp(s,"posmax"))  gPosHoldMax=v;        // max setpoint bias (deg)
   else if (!strcmp(s,"posiband")) gPosIntBand=v;       // integrate only within this dist of target (m)
+  else if (!strcmp(s,"posdb"))    gPosDeadband=v;      // hold dead-band (m): stop position-chasing within this -> no hunt
   else if (!strcmp(s,"posvmax"))  gPosVmax=v;          // move speed cap (m/s) for the target slew
   else if (!strcmp(s,"posamax"))  gPosAmax=v;          // accel cap (m/s^2) on the drive-velocity ramp
   else if (!strcmp(s,"turnrate")) gYawRateCmd=v;       // commanded yaw rate (rad/s); 0=straight
@@ -701,8 +817,11 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"turnlp"))   gTurnLP=clampf(v,0.0f,0.95f); // low-pass on turn output
   else if (!strcmp(s,"yawfb"))    gYawFb=(v<0?-1.0f:1.0f);  // yaw-rate feedback sign (-1/+1)
   else if (!strcmp(s,"turnmax"))  gTurnMax=v;          // clamp on |turn differential| (raw)
+  else if (!strcmp(s,"wheeldz"))  gWheelDZ=v;          // per-wheel anti-stiction floor during turns (raw)
   else if (!strcmp(s,"posvlp"))  gPosVelLP=clampf(v,0.0f,0.99f); // D-term velocity low-pass (0=off..0.99 heavy)
-  else if (!strcmp(s,"ptgt"))    gPosTarget=v;         // position SETPOINT (m, wheel_x frame)
+  else if (!strcmp(s,"ptgt"))    { gPosTarget=v; gDriveVel=0.0f; }   // position MOVE to v (m); cancels velocity drive
+  else if (!strcmp(s,"dv"))      gDriveVel=v;          // velocity-drive command (m/s); 0 = release -> latch home + hold
+  else if (!strcmp(s,"odoreset")) gOdoReset=true;      // zero dead-reckoned pose (px,py); heading zero is via gyro-cal
   else if (!strcmp(s,"ff"))    gFF=v;                  // friction feed-forward magnitude
   else if (!strcmp(s,"ffband")) gFFband=v;             // friction FF deadband
   else if (!strcmp(s,"cfa"))   gCfAlpha=clampf(v,0.9f,0.9999f); // compl-filter gyro weight
@@ -735,11 +854,22 @@ void loop(){
     if(!vbInit){ vbatF=vb; vbInit=true; }
     vbatF = 0.95f*vbatF + 0.05f*vb; tVbat=vbatF;              // heavy LP (battery is slow)
     int bpct = (int)clampf((tVbat-VBAT_EMPTY)/(VBAT_FULL-VBAT_EMPTY)*100.0f, 0.0f, 100.0f);
-    char b[320];
+    char b[384];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f rate=%.1f wx=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f polrun=%d poshold=%.1f\n",
-      tTheta, tRoll, tYaw, tRate, tWheelX, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gKpPit, gKdPit, gKpPos, gKpVel, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, gPolMode, gPosHoldK);
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f polrun=%d poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d\n",
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gKpPit, gKdPit, gKpPos, gKpVel, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, gPolMode, gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR);
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     emit(b,k);
+  }
+  // drive-capture dump: buffer filled by the control task -> emit here (loop() task), so the
+  // control task keeps balancing while we stream ~256 lines. Yield periodically (WDT + control).
+  if(gDcReady){
+    for(int i=0;i<DCAP_N;i++){
+      char b[64]; int k=snprintf(b,sizeof(b),"# dcap %d %lu %d %d %d %d\n",
+                                 i,(unsigned long)dcT[i],(int)dcCmd[i],(int)dcWid[i],(int)dcV[i],(int)dcP[i]);
+      emit(b,k);
+      if((i & 15)==0) delay(1);
+    }
+    emit("# dcap done\n",12); gDcReady=false; dcIdx=0;
   }
 }
