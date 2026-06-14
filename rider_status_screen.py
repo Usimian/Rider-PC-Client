@@ -49,6 +49,7 @@ ser = serial.Serial(PORT, 115200, timeout=0.1)
 #   lower-right = GPIO24 (A)  -> (free)
 BTN_BALANCE = 17                # upper-left  (C)
 BTN_POWER   = 23                # lower-left  (B) -> poweroff on ~1.5s hold
+PWR_HOLD_S  = 1.5               # hold time before poweroff fires (also drives the LCD overlay)
 try:
     _chip = lgpio.gpiochip_open(0)
     lgpio.gpio_claim_input(_chip, BTN_BALANCE, lgpio.SET_PULL_UP)
@@ -272,6 +273,14 @@ def render():
     tcol = (255, 90, 90) if temp >= 70 else (170, 195, 235)
     d.text((10, 214), "CPU %d%%" % cpu, fill=(170, 195, 235), font=f_m)
     d.text((170, 214), "%.0f°C" % temp, fill=tcol, font=f_m)
+    # power-button hold overlay: warn + show progress over the hold; release cancels
+    if pwr_down_t > 0.0:
+        held = min(time.time() - pwr_down_t, PWR_HOLD_S)
+        d.rectangle((0, 0, 320, 240), fill=(140, 0, 0))
+        d.text((44, 60), "POWERING OFF", fill=(255, 255, 255), font=f_l)
+        d.text((66, 102), "release to cancel", fill=(255, 210, 210), font=f_m)
+        d.rectangle((40, 150, 280, 178), outline=(255, 255, 255), width=2)
+        d.rectangle((43, 153, 43 + int(234 * held / PWR_HOLD_S), 175), fill=(255, 255, 255))
     lcd.ShowImage(img)
 
 
@@ -318,7 +327,7 @@ while True:
         if lgpio.gpio_read(_chip, BTN_POWER) == 0:
             if pwr_down_t == 0.0:
                 pwr_down_t = tnow
-            elif not pwr_fired and tnow - pwr_down_t >= 1.5:
+            elif not pwr_fired and tnow - pwr_down_t >= PWR_HOLD_S:
                 pwr_fired = True
                 do_poweroff()
         else:
