@@ -15,8 +15,10 @@ Run:  /home/pi/xgovenv/bin/python rider_status_screen.py
 """
 import time
 import re
+import glob
 import json
 import queue
+import subprocess
 import serial
 import psutil
 import lgpio
@@ -66,6 +68,25 @@ def cpu_temp_c():
         return float(open("/sys/class/thermal/thermal_zone0/temp").read()) / 1000.0
     except Exception:
         return float("nan")
+
+
+_ctrl = {"t": 0.0, "on": False}
+
+
+def controller_connected():
+    """DS4-over-BT presence via BlueZ link state. 'bluetoothctl devices Connected'
+    flips to disconnected as soon as the BT stack sees the drop -- ahead of the
+    /dev/input/js* node teardown, which lagged. Cached at ~2 Hz (subprocess)."""
+    now = time.time()
+    if now - _ctrl["t"] >= 0.5:
+        _ctrl["t"] = now
+        try:
+            out = subprocess.run(["bluetoothctl", "devices", "Connected"],
+                                 capture_output=True, text=True, timeout=1.0).stdout
+            _ctrl["on"] = "Controller" in out          # DS4 advertises as "Wireless Controller"
+        except Exception:
+            _ctrl["on"] = bool(glob.glob("/dev/input/js*"))   # fallback if bluetoothctl unavailable
+    return _ctrl["on"]
 
 
 # ---------------- MQTT (republish + relay) ----------------
@@ -130,9 +151,12 @@ def publish():
         "mode": "policy" if pol else "pid",
         "position": tel.get("wx", 0.0),
         "target": tel.get("ptgt", 0.0),
-        # NOTE: roll/pitch/yaw are published ONLY on rider/status/imu, not here.
-        # Duplicating them into rider/status makes the GUI's update_status() write
-        # them first, which starves update_imu()'s change-gate -> IMU panel never fires.
+        "pose_x": round(tel.get("px", 0.0), 3),
+        "pose_y": round(tel.get("py", 0.0), 3),
+        # NOTE: roll/pitch/yaw (incl. heading) are published ONLY on rider/status/imu
+        # and the odom topic, not here. Duplicating them into rider/status makes the
+        # GUI's update_status() write them first, which starves update_imu()'s
+        # change-gate -> IMU panel never fires.
     }
     try:
         mqc.publish("rider/status", json.dumps(status))
@@ -140,11 +164,54 @@ def publish():
                     json.dumps({"roll": roll, "pitch": th, "yaw": yaw}))
         mqc.publish("rider/status/battery",
                     json.dumps({"level": batt, "voltage": vbat}))
+        # dead-reckoned pose: world-frame (x,y) + heading. Foundation for waypoints /
+        # return-to-start. (px,py) integrate fused wheel distance through gyro heading.
+        mqc.publish("rider/status/odom",
+                    json.dumps({"x": round(tel.get("px", 0.0), 3),
+                                "y": round(tel.get("py", 0.0), 3),
+                                "heading": round(yaw, 1)}))
     except Exception:
         pass
 
 
 # ---------------- LCD render ----------------
+def _text_w(d, s, font):
+    """text width, compatible across Pillow versions."""
+    try:
+        b = d.textbbox((0, 0), s, font=font); return b[2] - b[0]
+    except AttributeError:
+        return d.textsize(s, font=font)[0]
+
+
+def draw_battery(d, x, y, pct, font, w=50, h=26):
+    """iPhone-style battery: rounded body + terminal nub, fill bar proportional to
+    pct, percentage centered inside. Color goes green->amber->red as it drains."""
+    pct = max(0, min(100, int(pct)))
+    col = (0, 255, 140) if pct > 40 else (255, 200, 70) if pct > 15 else (255, 90, 90)
+    bx0, by0, bx1, by1 = x, y, x + w, y + h
+    rr = getattr(d, "rounded_rectangle", None)   # Pillow >= 8.2; fall back to square corners
+    if rr:
+        rr((bx0, by0, bx1, by1), radius=5, outline=col, width=2)
+    else:
+        d.rectangle((bx0, by0, bx1, by1), outline=col, width=2)
+    d.rectangle((bx1 + 2, y + 7, bx1 + 5, by1 - 7), fill=col)   # terminal nub
+    pad = 3                                                     # inset from the body wall
+    ix0, iy0, ix1, iy1 = bx0 + pad, by0 + pad, bx1 - pad, by1 - pad
+    grey = (120, 120, 120)                                     # empty space = grey
+    if rr:
+        rr((ix0, iy0, ix1, iy1), radius=2, fill=grey)
+    else:
+        d.rectangle((ix0, iy0, ix1, iy1), fill=grey)
+    fillw = int((ix1 - ix0) * pct / 100.0)                     # colored bar over the left portion
+    if fillw > 0:
+        if rr:
+            rr((ix0, iy0, ix0 + fillw, iy1), radius=2, fill=col)
+        else:
+            d.rectangle((ix0, iy0, ix0 + fillw, iy1), fill=col)
+    s = "%d%%" % pct                                           # % centered inside, black
+    d.text((bx0 + (w - _text_w(d, s, font)) // 2, by0 + 4), s, fill=(0, 0, 0), font=font)
+
+
 def render():
     img = Image.new("RGB", (320, 240), BG)
     d = ImageDraw.Draw(img)
@@ -152,14 +219,14 @@ def render():
     pol = int(tel.get("polrun", 0))
     mq_ok = mqc is not None and mqc.is_connected()
 
-    d.text((10, 6), "RIDER", fill=(255, 255, 255), font=f_l)
+    # title turns blue when a controller (DS4) is connected, white otherwise
+    d.text((10, 6), "RIDER",
+           fill=(80, 160, 255) if controller_connected() else (255, 255, 255), font=f_l)
     # MQTT link dot
     d.ellipse((92, 18, 104, 30), fill=(0, 200, 120) if mq_ok else (110, 110, 110))
-    # battery (header, between title and badge)
-    batt = int(tel.get("batt", 0)); vbat = tel.get("vbat", 0.0)
-    bcol = (0, 255, 140) if batt > 40 else (255, 200, 70) if batt > 15 else (255, 90, 90)
-    d.text((112, 8), "%d%%" % batt, fill=bcol, font=f_m)
-    d.text((112, 28), "%.1fV" % vbat, fill=(150, 165, 205), font=f_s)
+    # battery (header, between title and badge): iPhone-style icon, % inside, no voltage
+    batt = int(tel.get("batt", 0))
+    draw_battery(d, 112, 11, batt, f_s)
     state = "BALANCING" if en else "IDLE"
     col = (0, 255, 140) if en else (150, 150, 150)
     d.rectangle((176, 10, 312, 44), outline=col, width=2)
@@ -199,6 +266,14 @@ while True:
         if mqc is not None:
             try:
                 mqc.publish("rider/debug/telem", line)
+            except Exception:
+                pass
+    elif line.startswith("# dcap"):
+        # forward the firmware's drive-capture dump (commanded-vs-actual wheel vel)
+        # so it's reachable over MQTT while the robot drives untethered (USB-C unplugged).
+        if mqc is not None:
+            try:
+                mqc.publish("rider/debug/dcap", line)
             except Exception:
                 pass
     # relay any queued commands to the ESP32

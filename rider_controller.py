@@ -37,7 +37,7 @@ BTN_BALANCE = 0      # Cross (X)
 BTN_ESTOP = 1        # Circle (O)
 DEADZONE = 0.12
 MAX_SPEED = 0.35     # m/s of position-target travel at full stick (match firmware posvmax; 0.6 overshot/fell)
-MAX_YAW_RATE = 1.5   # rad/s commanded at full right-stick (firmware closes the loop on the gyro)
+MAX_YAW_RATE = 1.0   # rad/s commanded at full right-stick (firmware closes the loop on the gyro)
 TURN_SIGN = 1        # flip if right-stick-right turns the wrong way
 SEND_HZ = 20
 LOOP_HZ = 50
@@ -66,9 +66,14 @@ def main():
 
     mqc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="rider_controller")
     mqc.on_message = on_message
+    # subscribe in on_connect so the balance-state sync (-> drive gate) survives the
+    # initial CONNACK race AND any reconnect. A subscribe before loop_start/CONNACK is
+    # dropped by the broker -> state["en"] stuck 0 -> drive/turn silently suppressed.
+    def _on_connect(c, u, flags, rc, properties=None):
+        c.subscribe(TOPIC_STATUS)
+    mqc.on_connect = _on_connect
     mqc.reconnect_delay_set(min_delay=1, max_delay=10)
     mqc.connect(BROKER, PORT, keepalive=30)
-    mqc.subscribe(TOPIC_STATUS)
     mqc.loop_start()
 
     def send(line):
@@ -87,7 +92,7 @@ def main():
         js = None
         return False
 
-    target = None
+    last_vel = None
     prev_btn = {}
     last_send = 0.0
     last_turn = None
@@ -133,22 +138,25 @@ def main():
             if state["en"]:
                 send("en 0")
             else:
-                target = state["pos"]
-                send("ptgt %.3f" % target); send("polrun 1"); send("en 1")
+                send("polrun 1"); send("en 1")     # firmware homes the target on enable
         if edge(BTN_ESTOP):
             send("en 0")
         prev_btn = {i: buttons[i] for i in range(len(buttons))}
 
         # drive (left stick Y) + turn (right stick X) only while balancing
         if state["en"]:
+            # VELOCITY drive: the stick commands a SPEED (m/s), not an accumulating position.
+            # Firmware drives at this speed while non-zero and latches the current position as
+            # the hold-home the instant it returns to 0 (-> drives smooth, stops where you let
+            # go, no windup/overshoot). 'ptgt' position moves are still honored separately.
             d = dz(-axes[AXIS_DRIVE]) if AXIS_DRIVE < len(axes) else 0.0   # stick up = forward
-            if target is None:
-                target = state["pos"]
-            if d != 0.0:
-                target += d * MAX_SPEED * period
-                if now - last_send >= send_period:
-                    last_send = now
-                    send("ptgt %.3f" % target)
+            vel = d * MAX_SPEED
+            # send on meaningful change (incl. return to 0) OR as a periodic heartbeat
+            if ((last_vel is None or abs(vel - last_vel) > 0.01) or
+                    (now - last_send >= 0.5)) and now - last_send >= send_period:
+                last_send = now
+                last_vel = vel
+                send("dv %.3f" % vel)
             # turn: right stick X -> commanded yaw rate (rad/s); send on change incl. return to 0
             tn = dz(axes[AXIS_TURN]) if AXIS_TURN < len(axes) else 0.0
             yaw_cmd = TURN_SIGN * tn * MAX_YAW_RATE
@@ -157,7 +165,7 @@ def main():
                 last_turn = yaw_cmd
                 send("turnrate %.2f" % yaw_cmd)
         else:
-            target = None
+            last_vel = None
             last_turn = None
 
         time.sleep(period)
