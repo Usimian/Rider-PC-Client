@@ -96,6 +96,13 @@ volatile int   gWheelFault = 0;     // 0=ok; else ID of a wheel that dropped off
 
 // telemetry (written by task, read by loop)
 volatile float tTheta=0, tRate=0, tU=0, tWheelX=0, tWheelVx=0;
+volatile float tRoll=0;                  // lateral tilt (deg), accel-only readout for leg leveling
+volatile float tVbat=0;                  // smoothed pack voltage (V), read from GPIO33 divider
+volatile float tYaw=0;                    // integrated heading (deg), gyro-Z only -> drifts slowly
+volatile float gYawBias=0.0f;             // gyro-Z zero-rate bias (deg/s), from calibrateGyro
+volatile float gVbatK=3.0f;              // GPIO33 divider ratio: pack = pin*K. Schematic R8=20K(top)/R7=10K(bot) => x3.0
+// 2S pack (net VCC8.4V): 8.4V full, 6.0V empty -> linear % for display.
+static const float VBAT_FULL=8.4f, VBAT_EMPTY=6.0f;
 volatile float tLoopHz=0, tReadFail=0;   // measured control-loop rate & read-fail %
 volatile float tDtMaxMs=0;               // worst-case cycle period (ms) since last report (ground-truth stall detector)
 volatile bool  gDumpRead=false;     // 'rd' -> task dumps next raw read frame
@@ -250,15 +257,19 @@ static bool servoReadN(uint8_t id, uint8_t reg, uint8_t len, uint8_t* out){
   return false;
 }
 
-// Average the gyro (balance axis) while the robot is held still -> zero-rate bias.
+// Average the gyro while the robot is held still -> zero-rate bias.
+// gx = balance/pitch axis; gz = yaw/heading axis (both biased for drift-free integration).
 static void calibrateGyro(){
-  const int N=200; float sum=0;
+  const int N=200; float sum=0, sumz=0;
   for(int i=0;i<N;i++){
     int16_t ax,ay,az,gx,gy,gz; imuData(&ax,&ay,&az,&gx,&gy,&gz);
-    sum += (float)gx / GYRO_LSB_PER_DPS;
+    sum  += (float)gx / GYRO_LSB_PER_DPS;
+    sumz += (float)gz / GYRO_LSB_PER_DPS;
     vTaskDelay(pdMS_TO_TICKS(5));
   }
   gGyroBias = sum / N;
+  gYawBias  = sumz / N;
+  tYaw = 0.0f;                            // zero heading at each (re)calibration
 }
 
 // ---------------- wheel odometry state ----------------
@@ -334,9 +345,10 @@ static void balanceTask(void*){
   for(;;){
     // --- on-demand gyro recal (only while disabled + still) ---
     if(gDoGcal && !gEnabled){ wheelTorque(0,0); calibrateGyro(); gDoGcal=false; primed=false; fpInit=false; }
-    // --- config dump (read-only): regs 0x00-0x2F in 8-byte chunks ---
+    // --- config dump (read-only): regs 0x00-0x7F in 8-byte chunks ---
+    // (extended past 0x2F to hunt the wheel-servo present-voltage register for battery telemetry)
     if(gCfgDumpId){ uint8_t id=gCfgDumpId; gCfgDumpId=0;
-      for(uint8_t reg=0; reg<0x30; reg+=8){
+      for(uint8_t reg=0; reg<0x80; reg+=8){
         uint8_t d[8]={0}; bool ok=servoReadN(id,reg,8,d);
         char b[80]; int k=snprintf(b,sizeof(b),"# cfg id=%d r0x%02X:",id,reg);
         if(ok) for(int j=0;j<8;j++) k+=snprintf(b+k,sizeof(b)-k," %02X",d[j]);
@@ -383,6 +395,19 @@ static void balanceTask(void*){
     int16_t ax,ay,az,gx,gy,gz; imuData(&ax,&ay,&az,&gx,&gy,&gz);
     // ----- factory IMU pitch fusion (RIG-Omni imu.cc:240-246, verbatim) -----
     float pit_acc  = atan2f((float)ay,(float)az)*57.2958f;       // forward/vertical -> deg
+    // roll readout (side-to-side tilt, orthogonal axis). Accel-only + gentle LP --
+    // not controlled, just a display value for when the servo legs level the body.
+    float roll_acc = atan2f((float)ax,(float)az)*57.2958f;
+    static float rollF=0; static bool rollInit=false;
+    if(!rollInit){ rollF=roll_acc; rollInit=true; }
+    rollF = 0.9f*rollF + 0.1f*roll_acc; tRoll = rollF;
+    // yaw heading: integrate bias-corrected gyro-Z (drifts slowly; no magnetometer on ICM-42670)
+    float yaw_rate = (float)gz / GYRO_LSB_PER_DPS - gYawBias;
+    if(fabsf(yaw_rate) > 0.5f){                                  // deadband suppresses idle bias creep
+      float y = tYaw + yaw_rate*dt;
+      while(y > 180.0f) y -= 360.0f; while(y < -180.0f) y += 360.0f;
+      tYaw = y;
+    }
     float pit_gyro = (float)gx / GYRO_LSB_PER_DPS - gGyroBias;   // lateral rate, deg/s
     if(!primed){ theta=pit_acc; primed=true; }
     dqf = 0.6f*dqf + 0.4f*pit_gyro;                              // dq for control rate-damping
@@ -614,7 +639,17 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"wmode")){ wheelSetReg(LEFT_W,0x11,(uint8_t)v); wheelSetReg(RIGHT_W,0x11,(uint8_t)v); } // wheel mode reg 0x11
   else if (!strcmp(s,"wten")){ wheelTorqueEnAll((uint8_t)v); }  // wheel torque enable reg 0x18 (broadcast)
   else if (!strcmp(s,"lock")){ gPollLock=(int)v; }     // poll only this wheel ID (0=alternate)
+  else if (!strcmp(s,"vbatk"))  gVbatK=v;                        // trim battery divider ratio (default 3.0 per schematic)
   else if (!strcmp(s,"cfgdump")){ gCfgDumpId=(int)v; return; }  // dump servo config regs
+  else if (!strcmp(s,"adcscan")){                               // probe ADC1 pins to find battery-sense divider
+    const int pins[]={32,33,34,35,36,39};
+    for(unsigned i=0;i<sizeof(pins)/sizeof(pins[0]);i++){
+      int raw=analogRead(pins[i]); float vp=raw/4095.0f*3.3f;
+      char b[64]; int k=snprintf(b,sizeof(b),"# adc gpio%d raw=%d vpin=%.3f\n",pins[i],raw,vp);
+      emit(b,k); delay(3);
+    }
+    return;
+  }
   else if (!strcmp(s,"gcal")){ gDoGcal=true; return; } // recalibrate gyro bias (hold still)
   else if (!strcmp(s,"stepcap")){ if(v!=0.0f) gStepCmd=(int)v; gStepCap=true; return; } // wheel step-response capture
   else if (!strcmp(s,"polrun")) gPolMode=(v!=0.0f);   // neural-policy control on/off (additive; PID is default; 'pol' is gPolarity!)
@@ -656,10 +691,15 @@ void loop(){
   pump(Serial1, b1, n1);
   if(millis()-tp >= 50){   // telemetry @ ~20 Hz
     tp=millis();
-    char b[240];
+    static float vbatF=0; static bool vbInit=false;
+    float vb = (analogReadMilliVolts(33)/1000.0f) * gVbatK;   // factory-calibrated pin mV * divider ratio
+    if(!vbInit){ vbatF=vb; vbInit=true; }
+    vbatF = 0.95f*vbatF + 0.05f*vb; tVbat=vbatF;              // heavy LP (battery is slow)
+    int bpct = (int)clampf((tVbat-VBAT_EMPTY)/(VBAT_FULL-VBAT_EMPTY)*100.0f, 0.0f, 100.0f);
+    char b[288];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f rate=%.1f wx=%.3f ptgt=%.3f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f polrun=%d poshold=%.1f\n",
-      tTheta, tRate, tWheelX, gPosTarget, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, gKpPit, gKdPit, gKpPos, gKpVel, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, gPolMode, gPosHoldK);
+      "th=%.2f roll=%.2f yaw=%.1f rate=%.1f wx=%.3f ptgt=%.3f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f polrun=%d poshold=%.1f\n",
+      tTheta, tRoll, tYaw, tRate, tWheelX, gPosTarget, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gKpPit, gKdPit, gKpPos, gKpVel, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, gPolMode, gPosHoldK);
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     emit(b,k);
   }

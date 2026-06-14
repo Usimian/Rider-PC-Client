@@ -1,0 +1,18 @@
+[Unit]
+Description=XGO Rider Bridge (LCD status + MQTT republish + command relay)
+After=network.target mosquitto.service
+Wants=mosquitto.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi
+ExecStart=/home/pi/xgovenv/bin/python /home/pi/rider_status_screen.py
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
