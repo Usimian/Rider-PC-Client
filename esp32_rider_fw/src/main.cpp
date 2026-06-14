@@ -70,7 +70,15 @@ volatile float gPosHoldKi  = 2.5f;  // setpoint-bias I gain (deg per m*s); kills
 volatile float gPosHoldKd  = 28.0f; // setpoint-bias D gain (deg per m/s); damps the approach (auto-tuned)
 volatile float gPosHoldMax = 5.0f;  // max setpoint bias / braking authority (deg) (auto-tuned)
 volatile float gPosIntBand = 0.15f; // only integrate within this dist of target (m) -> no windup during moves
-volatile float gPosVmax    = 0.30f; // move speed cap (m/s): rate the effective target slews to the commanded one
+volatile float gPosVmax    = 0.35f; // move speed cap (m/s): full-stick drive speed. 0.35 = tuned clean-stop ceiling (0.6 overshot/toppled). live-tune via 'posvmax'
+volatile float gPosAmax    = 0.8f;  // accel cap (m/s^2) on the drive-velocity ramp: gentle accel kills the lurch/oscillation. live-tune via 'posamax'
+volatile float gTurn       = 0.0f;  // wheel differential (raw) ADDED to both wheel cmds -> yaw. Computed by the yaw-rate controller each loop.
+volatile float gTurnMax    = 250.0f;// clamp on |gTurn| (raw)
+volatile float gYawRateCmd = 0.0f;  // commanded yaw rate (rad/s) from the stick; full stick = +/-2 rad/s. set via 'turnrate'
+volatile float gYawKp      = 40.0f; // wheel-differential (raw) per rad/s of yaw-rate error (FB trim; 120 oscillated)
+volatile float gYawFF      = 75.0f; // FEEDFORWARD differential (raw) per rad/s commanded -> firm turn open-loop, low FB gain stays stable
+volatile float gTurnLP     = 0.5f;  // low-pass on the turn output (0=off..0.95) -> smooths residual jitter
+volatile float gYawFb      = -1.0f; // yaw-rate FEEDBACK sign (-1 = correct: gz reads opposite to the turn dir; +1 ran away). live-tune via 'yawfb'
 volatile float gPosVelLP   = 0.8f;  // low-pass on the velocity feeding the D term (0=off..→1 heavy); kills D-noise shimmy
 volatile float gPosTarget  = 0.0f;  // position setpoint (m, wheel_x frame); anchored at enable, moved via 'ptgt'
 static const float POL_DEG2RAD     = 0.017453292f;
@@ -99,6 +107,7 @@ volatile float tTheta=0, tRate=0, tU=0, tWheelX=0, tWheelVx=0;
 volatile float tRoll=0;                  // lateral tilt (deg), accel-only readout for leg leveling
 volatile float tVbat=0;                  // smoothed pack voltage (V), read from GPIO33 divider
 volatile float tYaw=0;                    // integrated heading (deg), gyro-Z only -> drifts slowly
+volatile float tTgtEff=0, tVdes=0;        // slewed pos target + profile velocity (driving diagnostics)
 volatile float gYawBias=0.0f;             // gyro-Z zero-rate bias (deg/s), from calibrateGyro
 volatile float gVbatK=3.0f;              // GPIO33 divider ratio: pack = pin*K. Schematic R8=20K(top)/R7=10K(bot) => x3.0
 // 2S pack (net VCC8.4V): 8.4V full, 6.0V empty -> linear % for display.
@@ -408,6 +417,16 @@ static void balanceTask(void*){
       while(y > 180.0f) y -= 360.0f; while(y < -180.0f) y += 360.0f;
       tYaw = y;
     }
+    // yaw-RATE control: drive the wheel differential (gTurn) to track the commanded rate
+    // gYawRateCmd (rad/s). Closed loop on the gyro => a hard rate cap (full stick = +/-2 rad/s)
+    // instead of an open-loop torque that spins ever faster. Zeroed when disabled.
+    static float gTurnF = 0.0f;
+    if(gEnabled){
+      float yawErr = gYawRateCmd - gYawFb * yaw_rate * POL_DEG2RAD;  // rad/s error (gYawFb fixes gz sign)
+      float rawTurn = clampf(gYawFF*gYawRateCmd + gYawKp*yawErr, -gTurnMax, gTurnMax); // FF (firm) + FB (trim)
+      gTurnF = gTurnLP*gTurnF + (1.0f-gTurnLP)*rawTurn;             // light low-pass smooths residual jitter
+      gTurn = gTurnF;
+    } else { gTurn = 0.0f; gTurnF = 0.0f; }
     float pit_gyro = (float)gx / GYRO_LSB_PER_DPS - gGyroBias;   // lateral rate, deg/s
     if(!primed){ theta=pit_acc; primed=true; }
     dqf = 0.6f*dqf + 0.4f*pit_gyro;                              // dq for control rate-damping
@@ -450,12 +469,15 @@ static void balanceTask(void*){
     else pitchF += (pn > pitchF ? gSlewDeg : -gSlewDeg);
     rateF = gCtrlLP*rateF + (1.0f-gCtrlLP)*dqf;              // same LP on rate
     float qErr  = pitch - gImuZero;                  // for fall/telemetry (lean error from base)
-    // position-runaway cutout: in policy mode measure from the COMMANDED target
-    // (the robot legitimately drives to targets), else from the enable home.
-    float posRef = gPolMode ? gPosTarget : stable_pos;
-    bool fallen = (fabsf(qErr) > gFallDeg) || (fabsf(wheel_x - posRef) > gMaxPosErr);
     static bool  polInit=false;          // neural-policy episode state (reset on disable)
-    static float polIpitch=0,polPrevX=0,polPrevFrame[7]={0},posErrInt=0,xvelF=0,xvelP=0,uF=0,gPosTargetEff=0;
+    static float polIpitch=0,polPrevX=0,polPrevFrame[7]={0},posErrInt=0,xvelF=0,xvelP=0,uF=0,gPosTargetEff=0,vdesS=0;
+    // position-runaway cutout: in policy mode measure from the SLEWED target gPosTargetEff
+    // (what the wheels actually track) -- a joystick that jumps gPosTarget far ahead slews
+    // in gradually at posvmax, so driving never trips the guard; only a genuine track loss
+    // (wheel_x lags the slewed target by >gMaxPosErr) does. Before policy init (fresh enable)
+    // reference current position so the in-branch homing isn't locked out. Non-policy: enable home.
+    float posRef = gPolMode ? (polInit ? gPosTargetEff : wheel_x) : stable_pos;
+    bool fallen = (fabsf(qErr) > gFallDeg) || (fabsf(wheel_x - posRef) > gMaxPosErr);
     float u = 0.0f;
     if(gEnabled && !fallen && gPolMode){
       // ---- neural-policy control: PURE balancer + code-based position hold ----
@@ -465,7 +487,7 @@ static void balanceTask(void*){
       // (x_err, x_int) are zeroed so it doesn't fight. Velocity obs kept for damping.
       float xvel=0.0f, wvel=0.0f, vdes=0.0f;
       if(!polInit){ polIpitch=0; polPrevX=wheel_x; gPosTarget=wheel_x; gPosTargetEff=wheel_x;
-                    posErrInt=0; xvelF=0; xvelP=0; uF=0; }
+                    posErrInt=0; xvelF=0; xvelP=0; uF=0; vdesS=0; }
       else {
         float sdt = (dt>1e-4f?dt:0.004f);
         xvel = (wheel_x - polPrevX) / sdt;                   // m/s from position (exact units)
@@ -475,13 +497,21 @@ static void balanceTask(void*){
         // filters: xvelF for the position-D term, xvelP for the policy's velocity obs.
         xvelF = gPosVelLP*xvelF + (1.0f-gPosVelLP)*xvel;
         xvelP = gPolVelLP*xvelP + (1.0f-gPolVelLP)*xvel;
-        // VELOCITY-LIMITED TRAJECTORY: slew the effective target toward the commanded
-        // target at gPosVmax (m/s). vdes = the slew speed = the desired wheel velocity.
-        float prevEff = gPosTargetEff;
-        float dmax = gPosVmax * sdt;
-        float terr = gPosTarget - gPosTargetEff;
-        if(terr > dmax) gPosTargetEff += dmax; else if(terr < -dmax) gPosTargetEff -= dmax; else gPosTargetEff = gPosTarget;
-        vdes = (gPosTargetEff - prevEff) / sdt;               // trajectory feedforward velocity (m/s)
+        // TRAPEZOIDAL MOTION PROFILE on the effective target: accel-limited (gPosAmax) ramp
+        // toward a velocity capped by BOTH gPosVmax and the braking-distance limit
+        // sqrt(2*a*dist) -- so it decelerates in time to STOP exactly on gPosTarget instead of
+        // coasting past and ringing. vdes (=vdesS) is the feedforward wheel velocity.
+        float dist = gPosTarget - gPosTargetEff;
+        float vstop = sqrtf(2.0f * gPosAmax * fabsf(dist));   // fastest speed we can still brake to rest by target
+        float vcap = fminf(gPosVmax, vstop);
+        float vcmd = (dist >= 0.0f) ? vcap : -vcap;
+        float damax = gPosAmax * sdt;
+        if(vcmd > vdesS + damax) vdesS += damax; else if(vcmd < vdesS - damax) vdesS -= damax; else vdesS = vcmd;
+        gPosTargetEff += vdesS * sdt;
+        if((dist >= 0.0f && gPosTargetEff > gPosTarget) ||    // never coast past the goal
+           (dist <  0.0f && gPosTargetEff < gPosTarget)){ gPosTargetEff = gPosTarget; vdesS = 0.0f; }
+        vdes = vdesS;                                          // profile feedforward velocity (m/s)
+        tTgtEff = gPosTargetEff; tVdes = vdes;                 // telemetry (driving diagnostics)
       }
       float posErr = wheel_x - gPosTargetEff;                // track the SLEWED target
       // integrate only once the slew has SETTLED at the final target and we're near it ->
@@ -551,9 +581,11 @@ static void balanceTask(void*){
         if(d>gPosClamp) d=gPosClamp; else if(d<-gPosClamp) d=-gPosClamp;        // +/-120/cycle ramp limit
         torqAcc += d;
         if(torqAcc>gTorLim) torqAcc=gTorLim; else if(torqAcc<-gTorLim) torqAcc=-gTorLim;
-        wheelTorque((int16_t)torqAcc, (int16_t)(-torqAcc));      // pos=0; torque=accumulated, mirrored
+        float tn = clampf(gTurn, -gTurnMax, gTurnMax);
+        wheelTorque((int16_t)(torqAcc + tn), (int16_t)(-torqAcc + tn)); // + yaw differential
       } else {
-        wheelTorque((int16_t)uout, (int16_t)(-uout));   // mirrored: L:+u, R:-u
+        float tn = clampf(gTurn, -gTurnMax, gTurnMax);
+        wheelTorque((int16_t)(uout + tn), (int16_t)(-uout + tn));   // mirrored L:+u/R:-u + yaw differential
       }
     } else if(wasDriving){
       // Falling edge (disable / fall / Ctrl-C): the servos latch the last velocity
@@ -612,7 +644,7 @@ static void applyCmd(char* s){
   char* sp=s; while(*sp && *sp!=' ') sp++;
   float v=0;
   if(*sp){ *sp=0; v=atof(sp+1); }
-  if      (!strcmp(s,"en"))  { gEnabled=(v!=0.0f); if(gEnabled) gWheelFault=0; }  // clear fault on fresh enable
+  if      (!strcmp(s,"en"))  { gEnabled=(v!=0.0f); gTurn=0.0f; gYawRateCmd=0.0f; if(gEnabled){ gWheelFault=0; gPosTarget=tWheelX; } }  // enable: clear fault + HOME position target to current spot (else a stale ptgt trips the pos fall-guard -> u=0); zero any turn
   else if (!strcmp(s,"d"))     gEnabled=false;
   else if (!strcmp(s,"kppos")) gKpPos=v;               // cascade gains
   else if (!strcmp(s,"kpvel")) gKpVel=v;
@@ -662,6 +694,13 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"posmax"))  gPosHoldMax=v;        // max setpoint bias (deg)
   else if (!strcmp(s,"posiband")) gPosIntBand=v;       // integrate only within this dist of target (m)
   else if (!strcmp(s,"posvmax"))  gPosVmax=v;          // move speed cap (m/s) for the target slew
+  else if (!strcmp(s,"posamax"))  gPosAmax=v;          // accel cap (m/s^2) on the drive-velocity ramp
+  else if (!strcmp(s,"turnrate")) gYawRateCmd=v;       // commanded yaw rate (rad/s); 0=straight
+  else if (!strcmp(s,"yawkp"))    gYawKp=v;            // yaw-rate FB trim gain (raw per rad/s)
+  else if (!strcmp(s,"yawff"))    gYawFF=v;            // yaw-rate FEEDFORWARD (raw per rad/s cmd) -> turn firmness
+  else if (!strcmp(s,"turnlp"))   gTurnLP=clampf(v,0.0f,0.95f); // low-pass on turn output
+  else if (!strcmp(s,"yawfb"))    gYawFb=(v<0?-1.0f:1.0f);  // yaw-rate feedback sign (-1/+1)
+  else if (!strcmp(s,"turnmax"))  gTurnMax=v;          // clamp on |turn differential| (raw)
   else if (!strcmp(s,"posvlp"))  gPosVelLP=clampf(v,0.0f,0.99f); // D-term velocity low-pass (0=off..0.99 heavy)
   else if (!strcmp(s,"ptgt"))    gPosTarget=v;         // position SETPOINT (m, wheel_x frame)
   else if (!strcmp(s,"ff"))    gFF=v;                  // friction feed-forward magnitude
@@ -696,10 +735,10 @@ void loop(){
     if(!vbInit){ vbatF=vb; vbInit=true; }
     vbatF = 0.95f*vbatF + 0.05f*vb; tVbat=vbatF;              // heavy LP (battery is slow)
     int bpct = (int)clampf((tVbat-VBAT_EMPTY)/(VBAT_FULL-VBAT_EMPTY)*100.0f, 0.0f, 100.0f);
-    char b[288];
+    char b[320];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f rate=%.1f wx=%.3f ptgt=%.3f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f polrun=%d poshold=%.1f\n",
-      tTheta, tRoll, tYaw, tRate, tWheelX, gPosTarget, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gKpPit, gKdPit, gKpPos, gKpVel, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, gPolMode, gPosHoldK);
+      "th=%.2f roll=%.2f yaw=%.1f rate=%.1f wx=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f polrun=%d poshold=%.1f\n",
+      tTheta, tRoll, tYaw, tRate, tWheelX, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gKpPit, gKdPit, gKpPos, gKpVel, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, gPolMode, gPosHoldK);
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     emit(b,k);
   }

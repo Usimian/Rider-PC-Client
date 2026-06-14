@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Deploy the Rider Pi bridge + DS4 controller from the workstation to the robot's Pi.
+# Idempotent + recreate-from-scratch: installs deps, the bridge + controller programs,
+# their systemd autostart units, retires the old rider-controller autostart, and starts them.
+#
+# Usage:  ./deploy_bridge.sh [pi@host]      (default: pi@10.0.0.95)
+#
+# Prerequisites (provided by the stock XGO Rider Pi image): the xgovenv venv,
+# the xgoscreen LCD lib, the font /home/pi/model/msyh.ttc, /dev/ttyAMA0 free
+# (serial console disabled), the pi user in the gpio+dialout groups, and a
+# running mosquitto broker. Firmware is flashed separately (see BRIDGE_SETUP.md).
+set -euo pipefail
+PI="${1:-pi@10.0.0.95}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+
+echo "==> copying bridge + controller + units to $PI"
+scp "$HERE/rider_status_screen.py" "$PI:/home/pi/rider_status_screen.py"
+scp "$HERE/rider_controller.py"    "$PI:/home/pi/rider_controller.py"
+scp "$HERE/rider-bridge.service"   "$PI:/tmp/rider-bridge.service"
+scp "$HERE/rider-joystick.service" "$PI:/tmp/rider-joystick.service"
+
+echo "==> installing on $PI"
+ssh "$PI" 'bash -s' <<'REMOTE'
+set -euo pipefail
+# 1. runtime deps in the XGO venv (no-op if already satisfied)
+/home/pi/xgovenv/bin/pip install -q paho-mqtt lgpio pyserial psutil pillow
+# 2. ensure the broker is up
+sudo systemctl enable --now mosquitto >/dev/null 2>&1 || true
+# 3. install the systemd units
+sudo install -m 644 /tmp/rider-bridge.service   /etc/systemd/system/rider-bridge.service
+sudo install -m 644 /tmp/rider-joystick.service /etc/systemd/system/rider-joystick.service
+rm -f /tmp/rider-bridge.service /tmp/rider-joystick.service
+sudo systemctl daemon-reload
+# 4. retire the old (xgolib) controller autostart if present
+if systemctl list-unit-files 2>/dev/null | grep -q '^rider-controller.service'; then
+  sudo systemctl disable --now rider-controller.service || true
+fi
+# 5. enable on boot + (re)start now
+sudo systemctl enable rider-bridge.service rider-joystick.service >/dev/null
+sudo systemctl restart rider-bridge.service rider-joystick.service
+sleep 2
+echo "  bridge  : $(systemctl is-active rider-bridge.service)/$(systemctl is-enabled rider-bridge.service)"
+echo "  joystick: $(systemctl is-active rider-joystick.service)/$(systemctl is-enabled rider-joystick.service)"
+echo "  old     : rider-controller = $(systemctl is-enabled rider-controller.service 2>&1)"
+REMOTE
+echo "==> done"

@@ -195,6 +195,12 @@ while True:
     line = ser.readline().decode(errors="replace").strip()
     if line.startswith("th="):
         parse(line)
+        # high-rate raw-telemetry republish for untethered diagnostics (~ESP32 rate)
+        if mqc is not None:
+            try:
+                mqc.publish("rider/debug/telem", line)
+            except Exception:
+                pass
     # relay any queued commands to the ESP32
     while not cmd_q.empty():
         try:
