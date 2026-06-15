@@ -34,6 +34,7 @@ BROKER_PORT = 1883
 
 f_s = ImageFont.truetype(FONT, 15)
 f_m = ImageFont.truetype(FONT, 20)
+f_xl = ImageFont.truetype(FONT, 25)
 f_l = ImageFont.truetype(FONT, 30)
 
 lcd = LCD_2inch.LCD_2inch()
@@ -46,14 +47,16 @@ ser = serial.Serial(PORT, 115200, timeout=0.1)
 #   upper-left  = GPIO17 (C)  -> balance start/stop toggle (next to the RIDER text)
 #   upper-right = GPIO22 (D)  -> (free)
 #   lower-left  = GPIO23 (B)  -> hold ~1.5s = sudo poweroff
-#   lower-right = GPIO24 (A)  -> (free)
+#   lower-right = GPIO24 (A)  -> tap = redo gyro-bias calibration ('gcal'; robot still + idle)
 BTN_BALANCE = 17                # upper-left  (C)
 BTN_POWER   = 23                # lower-left  (B) -> poweroff on ~1.5s hold
+BTN_GCAL    = 24                # lower-right (A) -> tap = gyro recal ('gcal')
 PWR_HOLD_S  = 1.5               # hold time before poweroff fires (also drives the LCD overlay)
 try:
     _chip = lgpio.gpiochip_open(0)
     lgpio.gpio_claim_input(_chip, BTN_BALANCE, lgpio.SET_PULL_UP)
     lgpio.gpio_claim_input(_chip, BTN_POWER,   lgpio.SET_PULL_UP)
+    lgpio.gpio_claim_input(_chip, BTN_GCAL,    lgpio.SET_PULL_UP)
     btn_ok = True
 except Exception as e:
     print("button GPIO unavailable: %s" % e, flush=True)
@@ -62,6 +65,8 @@ btn_prev = 1                    # 1 = released (pulled up)
 btn_last = 0.0                  # last-press time (debounce)
 pwr_down_t = 0.0                # power-button press-start time (0 = released)
 pwr_fired = False               # poweroff already triggered this hold
+gcal_prev = 1                   # gyro-cal button (lower-right) prev level
+gcal_last = 0.0                 # gyro-cal last-press time (debounce)
 
 tel = {}
 cmd_q = queue.Queue()           # inbound MQTT -> ESP32 line commands
@@ -207,6 +212,8 @@ def publish():
         "mode": "policy" if pol else "pid",
         "position": tel.get("wx", 0.0),
         "target": tel.get("ptgt", 0.0),
+        "wheel_l": tel.get("wp1", 0.0),
+        "wheel_r": tel.get("wp2", 0.0),
         "pose_x": round(tel.get("px", 0.0), 3),
         "pose_y": round(tel.get("py", 0.0), 3),
         # NOTE: roll/pitch/yaw (incl. heading) are published ONLY on rider/status/imu
@@ -293,16 +300,12 @@ def render():
         d.text((x, 52), lbl, fill=(150, 165, 205), font=f_s)
         d.text((x, 70), "%+.1f°" % val, fill=(255, 255, 255), font=f_m)
 
-    wx = tel.get("wx", 0.0); tg = tel.get("ptgt", 0.0); err = (wx - tg) * 1000.0
-    d.text((10, 116), "position  /  target  (m)", fill=(150, 165, 205), font=f_s)
-    d.text((10, 134), "%+.3f  →  %+.3f" % (wx, tg), fill=(255, 255, 255), font=f_m)
-    ecol = (255, 200, 70) if abs(err) > 30 else (0, 255, 140)
-    d.text((10, 160), "err %+.0f mm" % err, fill=ecol, font=f_m)
-
-    rf = int(tel.get("rfail", 0)); flt = int(tel.get("fault", 0))
-    hz = int(tel.get("lhz", 0)); mode = "POLICY" if pol else "PID"
-    hcol = (255, 90, 90) if (rf > 5 or flt) else (150, 165, 205)
-    d.text((10, 192), "rfail %d%%   fault %d   %dHz   %s" % (rf, flt, hz, mode), fill=hcol, font=f_s)
+    wp1 = tel.get("wp1", 0.0); wp2 = tel.get("wp2", 0.0)
+    wx = tel.get("wx", 0.0); tg = tel.get("ptgt", 0.0); err = wx - tg
+    ecol = (255, 200, 70) if abs(err) > 0.030 else (0, 255, 140)
+    # R = robot's right wheel (wp1), L = wp2  -- swapped so R sits on the right
+    d.text((10, 112), "L %+.3fm    R %+.3fm" % (wp2, wp1), fill=(255, 255, 255), font=f_xl)
+    d.text((10, 148), "Tgt %+.3fm    Err %+.3fm" % (tg, err), fill=ecol, font=f_xl)
 
     cpu = psutil.cpu_percent(); temp = cpu_temp_c(); pw = cm5_power_w()
     tcol = (255, 90, 90) if temp >= 80 else (255, 215, 60) if temp >= 70 else (170, 195, 235)
@@ -369,6 +372,14 @@ while True:
         else:
             pwr_down_t = 0.0
             pwr_fired = False
+        # gyro-cal button (lower-right, GPIO24): tap -> 'gcal' (recompute gyro bias).
+        # Firmware only acts on it while DISABLED + still, so a stray tap is harmless.
+        glvl = lgpio.gpio_read(_chip, BTN_GCAL)
+        if gcal_prev == 1 and glvl == 0 and tnow - gcal_last > 0.4:   # falling edge + debounce
+            gcal_last = tnow
+            ser.write(b"gcal\n")
+            print("GYRO CAL requested (gcal)", flush=True)
+        gcal_prev = glvl
     now = time.time()
     if now - last_render >= 0.2:        # LCD ~5 Hz
         last_render = now

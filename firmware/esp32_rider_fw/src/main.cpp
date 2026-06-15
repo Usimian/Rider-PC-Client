@@ -27,6 +27,11 @@
 // status LEDs: 4x WS2812B daisy-chained on ESP32 IO27 (5V) -- see Rider-Pi_SCH.pdf / xgo-cm4-pinout.md
 #define LED_PIN 27
 #define LED_N   4
+// discrete single-color status LEDs (schematic: 3.3V -> R -> LED -> GPIO, i.e. active-low)
+#define LED_RED  22   // D7 single red  -- on while fault / fallen
+#define LED_BLUE 23   // D6 single blue -- on while balancing (enabled)
+#define LED_ON   LOW  // active-low; flip these two if the bench shows it inverted
+#define LED_OFF  HIGH
 static Adafruit_NeoPixel gLeds(LED_N, LED_PIN, NEO_GRB + NEO_KHZ800);
 volatile bool gFallen = false;     // set by balanceTask: robot tipped past the fall angle
 volatile int      gLedOvr   = -1;  // LED test override: -1=auto; 1=blue 2=green 3=amber 4=red 5=white ('led <n>')
@@ -99,6 +104,14 @@ volatile float gYawKp      = 40.0f; // wheel-differential (raw) per rad/s of yaw
 volatile float gYawFF      = 75.0f; // FEEDFORWARD differential (raw) per rad/s commanded -> firm turn open-loop, low FB gain stays stable
 volatile float gTurnLP     = 0.5f;  // low-pass on the turn output (0=off..0.95) -> smooths residual jitter
 volatile float gYawFb      = -1.0f; // yaw-rate FEEDBACK sign (-1 = correct: gz reads opposite to the turn dir; +1 ran away). live-tune via 'yawfb'
+// --- encoder heading-lock: while NOT turning, hold (wheel1_x - wheel2_x) at a target so the
+// robot keeps its heading (a bump that rotates it moves the wheels off their individual targets
+// -> corrected). Pure encoder-based -> no gyro yaw-bias dependence. 'hdghold 0' falls back to the
+// old yaw-rate anti-spin. Gains need on-robot tuning (start conservative). ---
+volatile bool  gHdgHold = true;     // heading-lock on/off ('hdghold'). ON: verified on-robot 2026-06-15 (holds heading; sign correct). gains gHdgKp/Kd may want tuning if it oscillates.
+volatile float gHdgKp   = 1.0f;     // P: raw wheel-differential per count of (w1-w2) error ('hdgkp')
+volatile float gHdgKd   = 2.0f;     // D: raw per (vel1-vel2) differential velocity ('hdgkd')
+volatile float gHdgSign = 1.0f;     // correction sign -- flip if heading diverges ('hdgsign')
 volatile float gPosVelLP   = 0.8f;  // low-pass on the velocity feeding the D term (0=off..→1 heavy); kills D-noise shimmy
 volatile float gPosTarget  = 0.0f;  // position setpoint (m, wheel_x frame); anchored at enable, moved via 'ptgt'
 volatile float gDriveVel   = 0.0f;  // velocity-drive command (m/s) from the stick; 0 = release. While !=0 the
@@ -134,6 +147,7 @@ volatile float tYaw=0;                    // integrated heading (deg), gyro-Z on
 volatile float tTgtEff=0, tVdes=0;        // slewed pos target + profile velocity (driving diagnostics)
 volatile float tPoseX=0, tPoseY=0;        // world-frame dead-reckoned pose (m): fwd distance projected through heading (tYaw)
 volatile bool  gOdoReset=true;            // 'odoreset' + each gyro-cal -> loop zeros pose & resyncs prev wheel_x (init true: clean first-loop sync)
+volatile bool  gPosZeroReq=false;         // 'poszero' (controller button) -> loop re-zeros the distance frame WITHOUT dropping balance
 // --- drive-capture: high-rate commanded-vs-actual wheel velocity + pitch, WHILE balancing/driving ---
 // (the sim can't model the real servo under load; this catches commanded(u) vs actual(encoder v) divergence)
 #define DCAP_N 256
@@ -155,7 +169,7 @@ volatile bool  gDumpRead=false;     // 'rd' -> task dumps next raw read frame
 volatile int   gTestTor=0;          // 'wt <v>' -> direct wheel torque when DISABLED (stand test)
 volatile int   gPollLock=0;         // 'lock <id>' -> poll only that wheel (0 = alternate)
 volatile int   gCfgDumpId=0;        // 'cfgdump <id>' -> dump servo config regs 0x00-0x2F
-volatile float gGyroBias=0.0f;      // measured gyro zero-rate offset (deg/s), subtracted from rate
+volatile float gGyroBias=-1.19f;    // pitch gyro zero-rate bias (deg/s) -- BAKED CONSTANT (avg of measured boots -1.15/-1.16/-1.27). NOT re-measured at boot (boot cal sometimes sampled a moving robot -> bad bias -> wouldn't balance). 'gcal' still re-measures.
 volatile float gCfAlpha=0.996f;     // compl-filter gyro weight PER SAMPLE @~333Hz (~1s accel trim).
 // --- factory control-input filter (R-1.1.3 FUN_400d529c, Ghidra-confirmed) ---
 // Between IMU fusion and the PID, the factory heavily low-passes pitch & rate
@@ -328,6 +342,7 @@ static float wheel1_x=0, wheel2_x=0;       // accumulated counts (L, R-mirrored)
 static float wheel1_vel=0, wheel2_vel=0;   // filtered scaled velocity
 static int   last11=-1, last21=-1;
 static float wheel_x=0, wheel_vx=0;        // fused: meters, scaled vel
+static float gHdgTarget=0;                 // heading-lock target = (wheel1_x - wheel2_x) to hold
 static float stable_pos=0;                 // home position (m), captured on enable
 // Faithful copy of factory CalIWeakenPID (RIG-Omni xgo.cc:715) + struct (xgo.h).
 struct PID { float Des,FB,Kp,Ki,Kd,E,PreE,SumE,U,UMax,EMax,EMin,Up,PMax,Ui,IMax,Ud,DMax; };
@@ -405,7 +420,9 @@ static float policyInfer(const float* obs){
 // ---------------- balance task (core 1) ----------------
 static void balanceTask(void*){
   for(int i=0;i<3;i++){ legTorqueOff(LEFT_LEG); legTorqueOff(RIGHT_LEG); wheelTorque(0,0); vTaskDelay(2); }
-  calibrateGyro();                  // boot cal (robot should be held still); redo live with 'gcal'
+  calibrateGyro();                  // boot cal -> sets yaw bias + zeroes heading/pose (robot should be still)
+  gGyroBias = -1.19f;               // ...but FORCE the pitch (balance) bias to the baked constant, so a
+                                    // boot measurement on a moving robot can never break balance startup. 'gcal' re-measures both.
   float theta=0, dqf=0; bool primed=false;
   float pitchF=0, rateF=0; bool fpInit=false;   // factory control-input filter state
   uint32_t lastUs = micros(); uint32_t n=0;
@@ -483,11 +500,25 @@ static void balanceTask(void*){
     // instead of an open-loop torque that spins ever faster. Zeroed when disabled.
     static float gTurnF = 0.0f;
     if(gEnabled){
-      float yawErr = gYawRateCmd - gYawFb * yaw_rate * POL_DEG2RAD;  // rad/s error (gYawFb fixes gz sign)
-      float rawTurn = clampf(gYawFF*gYawRateCmd + gYawKp*yawErr, -gTurnMax, gTurnMax); // FF (firm) + FB (trim)
-      gTurnF = gTurnLP*gTurnF + (1.0f-gTurnLP)*rawTurn;             // light low-pass smooths residual jitter
+      float rawTurn;
+      bool turning = (fabsf(gYawRateCmd) > 0.001f);
+      if(turning || !gHdgHold){
+        // active turn (stick) OR heading-lock off: yaw-RATE control (FF + gyro FB).
+        float yawErr = gYawRateCmd - gYawFb * yaw_rate * POL_DEG2RAD; // rad/s error (gYawFb fixes gz sign)
+        rawTurn = gYawFF*gYawRateCmd + gYawKp*yawErr;                 // FF (firm) + FB (trim)
+        gHdgTarget = wheel1_x - wheel2_x;     // track heading while turning -> latches the NEW heading on release
+      } else {
+        // HEADING LOCK: PD on the wheel-encoder differential (w1-w2) -> hold heading. Pure
+        // encoder-based (no gyro-bias dependence). A rotation moves the wheels off their
+        // individual targets -> differential error -> corrected back.
+        float d     = wheel1_x   - wheel2_x;
+        float dRate = wheel1_vel - wheel2_vel;
+        rawTurn = gHdgSign * (gHdgKp*(gHdgTarget - d) - gHdgKd*dRate);
+      }
+      rawTurn = clampf(rawTurn, -gTurnMax, gTurnMax);
+      gTurnF = gTurnLP*gTurnF + (1.0f-gTurnLP)*rawTurn;              // light low-pass smooths residual jitter
       gTurn = gTurnF;
-    } else { gTurn = 0.0f; gTurnF = 0.0f; }
+    } else { gTurn = 0.0f; gTurnF = 0.0f; gHdgTarget = wheel1_x - wheel2_x; }  // disabled: keep target = current heading
     float pit_gyro = (float)gx / GYRO_LSB_PER_DPS - gGyroBias;   // lateral rate, deg/s
     if(!primed){ theta=pit_acc; primed=true; }
     dqf = 0.6f*dqf + 0.4f*pit_gyro;                              // dq for control rate-damping
@@ -546,6 +577,7 @@ static void balanceTask(void*){
     static bool  polInit=false;          // neural-policy episode state (reset on disable)
     static float polIpitch=0,polPrevX=0,polPrevFrame[7]={0},posErrInt=0,xvelF=0,xvelP=0,uF=0,gPosTargetEff=0,vdesS=0;
     static bool  wasVelDrive=false;     // edge-detect velocity-drive -> release, to latch the home cleanly
+    static bool  wasTurning=false;      // edge-detect turn start -> re-anchor fore/aft home to the spin center
     // position-runaway cutout: in policy mode measure from the SLEWED target gPosTargetEff
     // (what the wheels actually track) -- a joystick that jumps gPosTarget far ahead slews
     // in gradually at posvmax, so driving never trips the guard; only a genuine track loss
@@ -554,6 +586,13 @@ static void balanceTask(void*){
     float posRef = gPolMode ? (polInit ? gPosTargetEff : wheel_x) : stable_pos;
     bool fallen = (fabsf(qErr) > gFallDeg) || (fabsf(wheel_x - posRef) > gMaxPosErr);
     gFallen = fallen;                          // expose to the LED status (loop() reads it)
+    if(gPosZeroReq){                           // re-zero the distance frame mid-balance: odometer + target + slew
+      wheel1_x = 0; wheel2_x = 0; wheel_x = 0; //   are zeroed TOGETHER so posErr stays 0 -> no jolt, balance holds
+      stable_pos = 0; gHdgTarget = 0;
+      gPosTarget = 0; gPosTargetEff = 0; posErrInt = 0; vdesS = 0; polPrevX = 0;
+      gOdoReset = true;                        // dead-reckoned pose origin too
+      gPosZeroReq = false;
+    }
     float u = 0.0f;
     if(gEnabled && !fallen && gPolMode){
       // ---- neural-policy control: PURE balancer + code-based position hold ----
@@ -574,6 +613,15 @@ static void balanceTask(void*){
         xvelF = gPosVelLP*xvelF + (1.0f-gPosVelLP)*xvel;
         xvelP = gPolVelLP*xvelP + (1.0f-gPolVelLP)*xvel;
         float damax = gPosAmax * sdt;
+        // TURN-START re-anchor: when a turn BEGINS, set the fore/aft home to the current
+        // position (the spin center). The position loop stays ACTIVE through the turn (below),
+        // so it holds that center -> bounds wheel path length -> robot spins ~in place (drift
+        // canceled, the textbook nested balance+yaw+position architecture). And because the
+        // target is the spin center (not a stale far point), there's no wrong-way homing after
+        // the turn -- which was the 2.5-turn "homes opposite" bug.
+        bool turning = (fabsf(gYawRateCmd) > 0.001f);
+        if(turning && !wasTurning){ gPosTarget = wheel_x; gPosTargetEff = wheel_x; posErrInt = 0.0f; }
+        wasTurning = turning;
         if(fabsf(gDriveVel) > 0.001f){
           // ---- VELOCITY DRIVE (stick held) ----------------------------------------
           // Position target is IRRELEVANT here: the home continuously tracks the current
@@ -754,6 +802,8 @@ void setup(){
   Serial.println("      umax dqmax iclamp ff ffband fall <v> | set cap vx psign pol home gcal | d get");
 
   gLeds.begin(); gLeds.clear(); gLeds.show();       // status LEDs (IO27): off until first state update
+  pinMode(LED_RED, OUTPUT);  digitalWrite(LED_RED,  LED_OFF);   // discrete red (fault) -- off
+  pinMode(LED_BLUE, OUTPUT); digitalWrite(LED_BLUE, LED_OFF);   // discrete blue (heartbeat) -- off
   policyToRam();                                    // copy NN weights flash -> SRAM (fast matmul)
   xTaskCreatePinnedToCore(balanceTask, "balance", 4096, NULL, 12, NULL, 1);
 }
@@ -772,7 +822,7 @@ static void applyCmd(char* s){
   char* sp=s; while(*sp && *sp!=' ') sp++;
   float v=0;
   if(*sp){ *sp=0; v=atof(sp+1); }
-  if      (!strcmp(s,"en"))  { gEnabled=(v!=0.0f); gTurn=0.0f; gYawRateCmd=0.0f; gDriveVel=0.0f; if(gEnabled){ gWheelFault=0; wheel1_x=0; wheel2_x=0; wheel_x=0; stable_pos=0.0f; gPosTarget=0.0f; gOdoReset=true; } }  // enable: clear fault + ZERO the position frame (wheel odometer + PID home + target + dead-reckoned pose) so current pos and target both start at 0; stable_pos MUST zero with wheel_x or PID-mode posErr = -(old home) trips the runaway cutout on re-enable; zero any turn
+  if      (!strcmp(s,"en"))  { gEnabled=(v!=0.0f); gTurn=0.0f; gYawRateCmd=0.0f; gDriveVel=0.0f; if(gEnabled){ gWheelFault=0; wheel1_x=0; wheel2_x=0; wheel_x=0; stable_pos=0.0f; gPosTarget=0.0f; gHdgTarget=0.0f; gOdoReset=true; } }  // enable: clear fault + ZERO the position frame (wheel odometer + PID home + target + dead-reckoned pose) so current pos and target both start at 0; stable_pos MUST zero with wheel_x or PID-mode posErr = -(old home) trips the runaway cutout on re-enable; zero any turn
   else if (!strcmp(s,"d"))     gEnabled=false;
   else if (!strcmp(s,"kppos")) gKpPos=v;               // cascade gains
   else if (!strcmp(s,"kpvel")) gKpVel=v;
@@ -833,12 +883,17 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"yawfb"))    gYawFb=(v<0?-1.0f:1.0f);  // yaw-rate feedback sign (-1/+1)
   else if (!strcmp(s,"turnmax"))  gTurnMax=v;          // clamp on |turn differential| (raw)
   else if (!strcmp(s,"wheeldz"))  gWheelDZ=v;          // per-wheel anti-stiction floor during turns (raw)
+  else if (!strcmp(s,"hdghold"))  gHdgHold=(v!=0.0f);  // encoder heading-lock on/off
+  else if (!strcmp(s,"hdgkp"))    gHdgKp=v;            // heading-lock P (raw per count of w1-w2 error)
+  else if (!strcmp(s,"hdgkd"))    gHdgKd=v;            // heading-lock D (raw per vel1-vel2)
+  else if (!strcmp(s,"hdgsign"))  gHdgSign=(v<0?-1.0f:1.0f);  // heading-lock correction sign
   else if (!strcmp(s,"led"))     { gLedOvr=(v<0.5f)?-1:(int)v; gLedOvrMs=millis(); }  // LED: 0=auto 1=blu 2=grn 3=amb 4=red 5=wht 6=OFF
   else if (!strcmp(s,"ledbright")) gLedBright=(int)clampf(v,0.0f,255.0f);  // global LED brightness 0..255 (scales the status colors)
   else if (!strcmp(s,"posvlp"))  gPosVelLP=clampf(v,0.0f,0.99f); // D-term velocity low-pass (0=off..0.99 heavy)
   else if (!strcmp(s,"ptgt"))    { gPosTarget=v; gDriveVel=0.0f; }   // position MOVE to v (m); cancels velocity drive
   else if (!strcmp(s,"dv"))      gDriveVel=v;          // velocity-drive command (m/s); 0 = release -> latch home + hold
   else if (!strcmp(s,"odoreset")) gOdoReset=true;      // zero dead-reckoned pose (px,py); heading zero is via gyro-cal
+  else if (!strcmp(s,"poszero"))  gPosZeroReq=true;    // re-zero the distance frame (odometer+target) mid-balance, no drop
   else if (!strcmp(s,"ff"))    gFF=v;                  // friction feed-forward magnitude
   else if (!strcmp(s,"ffband")) gFFband=v;             // friction FF deadband
   else if (!strcmp(s,"cfa"))   gCfAlpha=clampf(v,0.9f,0.9999f); // compl-filter gyro weight
@@ -871,16 +926,19 @@ static void updateLEDs(int bpct){
   else if(gLedOvr == 3)             c = gLeds.Color(60, 28, 0);   // test: amber
   else if(gLedOvr == 4)             c = gLeds.Color(60, 0, 0);    // test: red
   else if(gLedOvr == 5)             c = gLeds.Color(40, 40, 40);  // test: white
-  else if(gWheelFault != 0 || gFallen) c = gLeds.Color(60, 0, 0);   // RED:   fault / tipped over
-  else if(bpct > 0 && bpct < 15)     { c = gLeds.Color(60, 28, 0); bright = 255; }  // AMBER: low battery -> FULL brightness (clear warning even when dimmed)
-  else if(gEnabled)                    c = gLeds.Color(0, 60, 0);   // GREEN: balancing
-  else                                 c = gLeds.Color(0, 0, 40);   // BLUE:  idle / ready
+  else if(gWheelFault != 0 || gFallen) { c = gLeds.Color(60, 0, 0); bright = 255; }   // RED:   tilt error / fault -> FULL brightness
+  else if(bpct > 0 && bpct < 15)       { c = gLeds.Color(60, 28, 0); bright = 255; }  // AMBER: low battery      -> FULL brightness
+  else                                   c = 0;                                        // otherwise OFF -- alerts only (no run-flag / idle color)
   static int lastBright = -1;
   if(c != last || bright != lastBright){          // re-show on color OR brightness change
     gLeds.setBrightness(bright);                  // global scale; low-battery branch forces full
     for(int i=0;i<LED_N;i++) gLeds.setPixelColor(i, c);
     gLeds.show(); last = c; lastBright = bright;
   }
+  // discrete single-color status LEDs:
+  //   blue = on while balancing (enabled) ; red = on while fault / fallen
+  digitalWrite(LED_BLUE, gEnabled ? LED_ON : LED_OFF);
+  digitalWrite(LED_RED,  (gWheelFault != 0 || gFallen) ? LED_ON : LED_OFF);
 }
 
 void loop(){
@@ -897,10 +955,10 @@ void loop(){
     vbatF = 0.95f*vbatF + 0.05f*vb; tVbat=vbatF;              // heavy LP (battery is slow)
     int bpct = (int)clampf((tVbat-VBAT_EMPTY)/(VBAT_FULL-VBAT_EMPTY)*100.0f, 0.0f, 100.0f);
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
-    char b[384];
+    char b[448];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f polrun=%d poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d\n",
-      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gKpPit, gKdPit, gKpPos, gKpVel, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, gPolMode, gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR);
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f polrun=%d poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d\n",
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gKpPit, gKdPit, gKpPos, gKpVel, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, gPolMode, gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR);
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     emit(b,k);
   }

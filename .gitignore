@@ -15,6 +15,8 @@ __pycache__/
 # Diagnostic captures + plots (transient, regenerable from the robot)
 *.csv
 *.png
+# Training run logs (transient)
+*.log
 # PlatformIO build output
 .pio/
 

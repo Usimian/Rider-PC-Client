@@ -10,6 +10,7 @@ Mapping (balancer w/ position-hold; turning not available yet):
   Left stick up/down -> drive the position target (push = move, release = hold)
   Cross (X)          -> toggle balance (polrun 1 + en 1  /  en 0)
   Circle (O)         -> emergency stop (en 0)
+  Square (#)         -> zero the distance frame (poszero) without dropping balance
 
 Run normally:  /home/pi/xgovenv/bin/python rider_controller.py
 Verify mapping: /home/pi/xgovenv/bin/python rider_controller.py --test
@@ -35,6 +36,7 @@ AXIS_DRIVE = 1       # left stick Y (stick up = negative)
 AXIS_TURN = 3        # right stick X (verify with --test)
 BTN_BALANCE = 0      # Cross (X)
 BTN_ESTOP = 1        # Circle (O)
+BTN_DISTZERO = 2     # Square (#) -- verify with --test; sends 'poszero'
 DEADZONE = 0.12
 MAX_SPEED = 0.35     # m/s of position-target travel at full stick (match firmware posvmax; 0.6 overshot/fell)
 MAX_YAW_RATE = 1.0   # rad/s commanded at full right-stick (firmware closes the loop on the gyro)
@@ -141,6 +143,8 @@ def main():
                 send("polrun 1"); send("en 1")     # firmware homes the target on enable
         if edge(BTN_ESTOP):
             send("en 0")
+        if edge(BTN_DISTZERO):
+            send("poszero")                    # re-zero distance, balance stays on
         prev_btn = {i: buttons[i] for i in range(len(buttons))}
 
         # drive (left stick Y) + turn (right stick X) only while balancing
