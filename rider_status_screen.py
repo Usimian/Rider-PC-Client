@@ -108,6 +108,16 @@ def do_poweroff():
         print("poweroff failed: %s" % e, flush=True)
 
 
+def do_reboot():
+    """Reboot the Pi (pi has NOPASSWD sudo). Triggered by the GUI's
+    rider/control/system 'reboot_pi' command (mirrors do_poweroff)."""
+    print("REBOOT requested -> sudo reboot", flush=True)
+    try:
+        subprocess.Popen(["sudo", "reboot"])
+    except Exception as e:
+        print("reboot failed: %s" % e, flush=True)
+
+
 # ---------------- MQTT (republish + relay) ----------------
 def on_connect(client, userdata, flags, reason_code, properties=None):
     for t in ("rider/control/line", "rider/control/system",
@@ -133,6 +143,8 @@ def on_message(client, userdata, msg):
             cmd_q.put("en 1")
         elif c in ("poweroff_pi", "poweroff", "shutdown"):   # GUI "POWER OFF PI" button
             do_poweroff()
+        elif c in ("reboot_pi", "reboot", "restart"):        # GUI "REBOOT PI" button
+            do_reboot()
     # movement/settings: logged only for now (full mapping is the GUI-reconcile step)
     else:
         print("relay: unmapped %s %s" % (t, p), flush=True)
@@ -159,7 +171,7 @@ def publish():
     th = tel.get("th", 0.0); roll = tel.get("roll", 0.0); yaw = tel.get("yaw", 0.0)
     batt = int(tel.get("batt", 0)); vbat = round(tel.get("vbat", 0.0), 2)
     status = {
-        "controller_connected": True,
+        "controller_connected": controller_connected(),   # real DS4-over-BT state (was hardcoded True)
         "connection_status": "connected",
         "roll_balance_enabled": bool(en),
         "battery_level": batt,
@@ -270,7 +282,7 @@ def render():
     d.text((10, 192), "rfail %d%%   fault %d   %dHz   %s" % (rf, flt, hz, mode), fill=hcol, font=f_s)
 
     cpu = psutil.cpu_percent(); temp = cpu_temp_c()
-    tcol = (255, 90, 90) if temp >= 70 else (170, 195, 235)
+    tcol = (255, 90, 90) if temp >= 80 else (255, 215, 60) if temp >= 70 else (170, 195, 235)
     d.text((10, 214), "CPU %d%%" % cpu, fill=(170, 195, 235), font=f_m)
     d.text((170, 214), "%.0f°C" % temp, fill=tcol, font=f_m)
     # power-button hold overlay: warn + show progress over the hold; release cancels

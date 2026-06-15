@@ -13,11 +13,13 @@ set -euo pipefail
 PI="${1:-pi@10.0.0.95}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-echo "==> copying bridge + controller + units to $PI"
+echo "==> copying bridge + controller + camera + units to $PI"
 scp "$HERE/rider_status_screen.py" "$PI:/home/pi/rider_status_screen.py"
 scp "$HERE/rider_controller.py"    "$PI:/home/pi/rider_controller.py"
+scp "$HERE/rider_camera.py"        "$PI:/home/pi/rider_camera.py"
 scp "$HERE/rider-bridge.service"   "$PI:/tmp/rider-bridge.service"
 scp "$HERE/rider-joystick.service" "$PI:/tmp/rider-joystick.service"
+scp "$HERE/rider-camera.service"   "$PI:/tmp/rider-camera.service"
 
 echo "==> installing on $PI"
 ssh "$PI" 'bash -s' <<'REMOTE'
@@ -36,18 +38,20 @@ sudo systemctl mask NetworkManager-wait-online.service
 # 3. install the systemd units
 sudo install -m 644 /tmp/rider-bridge.service   /etc/systemd/system/rider-bridge.service
 sudo install -m 644 /tmp/rider-joystick.service /etc/systemd/system/rider-joystick.service
-rm -f /tmp/rider-bridge.service /tmp/rider-joystick.service
+sudo install -m 644 /tmp/rider-camera.service   /etc/systemd/system/rider-camera.service
+rm -f /tmp/rider-bridge.service /tmp/rider-joystick.service /tmp/rider-camera.service
 sudo systemctl daemon-reload
 # 4. retire the old (xgolib) controller autostart if present
 if systemctl list-unit-files 2>/dev/null | grep -q '^rider-controller.service'; then
   sudo systemctl disable --now rider-controller.service || true
 fi
 # 5. enable on boot + (re)start now
-sudo systemctl enable rider-bridge.service rider-joystick.service >/dev/null
-sudo systemctl restart rider-bridge.service rider-joystick.service
+sudo systemctl enable rider-bridge.service rider-joystick.service rider-camera.service >/dev/null
+sudo systemctl restart rider-bridge.service rider-joystick.service rider-camera.service
 sleep 2
 echo "  bridge  : $(systemctl is-active rider-bridge.service)/$(systemctl is-enabled rider-bridge.service)"
 echo "  joystick: $(systemctl is-active rider-joystick.service)/$(systemctl is-enabled rider-joystick.service)"
+echo "  camera  : $(systemctl is-active rider-camera.service)/$(systemctl is-enabled rider-camera.service)"
 echo "  old     : rider-controller = $(systemctl is-enabled rider-controller.service 2>&1)"
 REMOTE
 echo "==> done"
