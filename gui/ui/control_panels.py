@@ -1,0 +1,642 @@
+#!/usr/bin/env python3
+# coding=utf-8
+
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from typing import Callable, Optional, Dict, Any
+import base64
+import io
+from PIL import Image, ImageTk
+import time
+
+class IMUPanel:
+    def __init__(self, parent):
+        self.parent = parent
+        self.setup_panel()
+    
+    def setup_panel(self):
+        """Setup IMU data panel"""
+        self.panel = tk.LabelFrame(self.parent, text="📊 IMU / ORIENTATION DATA", 
+                                  font=('Arial', 12, 'bold'), bg='#3c3c3c', fg='#87ceeb',
+                                  relief='solid', bd=1, height=200)
+        
+        # Prevent the LabelFrame from shrinking below its set height
+        self.panel.pack_propagate(False)
+        
+        grid = tk.Frame(self.panel, bg='#3c3c3c')
+        grid.pack(padx=20, pady=15, fill='both', expand=False)
+        
+        # IMU values in a grid
+        self.labels = {}
+        for i, (label, attr) in enumerate([("Roll", "roll"), ("Pitch", "pitch"), ("Yaw", "yaw")]):
+            row = tk.Frame(grid, bg='#3c3c3c')
+            row.pack(fill='x', pady=8)
+            
+            tk.Label(row, text=f"{label}:", font=('Arial', 14, 'bold'), 
+                    bg='#3c3c3c', fg='#ffd700', width=6, anchor='w').pack(side='left')
+            
+            value_label = tk.Label(row, text="+0.0°", font=('Arial', 14, 'bold'), 
+                                 bg='#3c3c3c', fg='white')
+            value_label.pack(side='left', padx=(10, 0))
+            self.labels[attr] = value_label
+    
+    def update_imu_data(self, data: Dict[str, float]):
+        """Update IMU data display"""
+        try:
+            roll = data.get('roll', 0.0)
+            pitch = data.get('pitch', 0.0)
+            yaw = data.get('yaw', 0.0)
+            
+            # Update labels with proper formatting
+            self.labels['roll'].config(text=f"{roll:+.1f}°")
+            self.labels['pitch'].config(text=f"{pitch:+.1f}°") 
+            self.labels['yaw'].config(text=f"{yaw:+.1f}°")
+        except:
+            pass  # GUI might be destroyed
+    
+    def get_widget(self):
+        """Get the main widget"""
+        return self.panel
+
+class FeaturesPanel:
+    def __init__(self, parent, callbacks: Dict[str, Callable]):
+        self.parent = parent
+        self.callbacks = callbacks
+        self._volume_after_id = None
+        self._led_after_id = None
+        self.setup_panel()
+
+    def setup_panel(self):
+        """Setup robot features panel"""
+        self.panel = tk.LabelFrame(self.parent, text="🤖 ROBOT FEATURES",
+                                  font=('Arial', 12, 'bold'), bg='#3c3c3c', fg='#87ceeb',
+                                  relief='solid', bd=1, height=200)
+
+        # Prevent the LabelFrame from shrinking below its set height
+        self.panel.pack_propagate(False)
+
+        grid = tk.Frame(self.panel, bg='#3c3c3c')
+        grid.pack(padx=20, pady=15, fill='both', expand=False)
+
+        # Feature status indicators. (Performance Mode + Camera toggle removed.)
+        # (name, attr, callback_key, enabled)
+        features = [
+            ("Roll Balance", "roll_balance", "toggle_roll_balance", True),
+        ]
+
+        self.status_labels = {}
+        for name, attr, callback_key, enabled in features:
+            feature_row = tk.Frame(grid, bg='#3c3c3c')
+            feature_row.pack(fill='x', pady=8)
+
+            tk.Label(feature_row, text=f"{name}:", font=('Arial', 12, 'bold'),
+                    bg='#3c3c3c', fg='white', width=15, anchor='w').pack(side='left')
+
+            status_label = tk.Label(feature_row, text="OFF", font=('Arial', 12, 'bold'),
+                                   bg='#3c3c3c', fg='red', width=6)
+            status_label.pack(side='left', padx=(5, 10))
+            self.status_labels[attr] = status_label
+
+            callback = self.callbacks.get(callback_key, lambda: None)
+            tk.Button(feature_row, text="Toggle", command=callback,
+                     font=('Arial', 9), bg='#555555', fg='white',
+                     activebackground='#666666', width=8,
+                     state=('normal' if enabled else 'disabled')).pack(side='right')
+
+        # Volume control row
+        vol_row = tk.Frame(grid, bg='#3c3c3c')
+        vol_row.pack(fill='x', pady=8)
+
+        tk.Label(vol_row, text="Volume:", font=('Arial', 12, 'bold'),
+                bg='#3c3c3c', fg='white', width=15, anchor='w').pack(side='left')
+
+        self._volume_val_label = tk.Label(vol_row, text="80%", font=('Arial', 12, 'bold'),
+                                          bg='#3c3c3c', fg='#87ceeb', width=5)
+        self._volume_val_label.pack(side='right')
+
+        self._volume_var = tk.IntVar(value=80)
+        self._volume_slider = tk.Scale(
+            vol_row, from_=0, to=100, orient='horizontal',
+            variable=self._volume_var, showvalue=False,
+            bg='#3c3c3c', fg='white', troughcolor='#555555',
+            highlightthickness=0, bd=0, sliderlength=16,
+            command=self._on_volume_change,
+            state='disabled'          # no audio backend on the balance firmware
+        )
+        self._volume_slider.pack(side='left', fill='x', expand=True, padx=(5, 5))
+
+        # LED brightness row (live -> ESP32 firmware 'ledbright 0..255' via rider/control/line)
+        led_row = tk.Frame(grid, bg='#3c3c3c')
+        led_row.pack(fill='x', pady=8)
+
+        tk.Label(led_row, text="LED Bright:", font=('Arial', 12, 'bold'),
+                bg='#3c3c3c', fg='white', width=15, anchor='w').pack(side='left')
+
+        self._led_val_label = tk.Label(led_row, text="20", font=('Arial', 12, 'bold'),
+                                       bg='#3c3c3c', fg='#87ceeb', width=5)
+        self._led_val_label.pack(side='right')
+
+        self._led_var = tk.IntVar(value=20)
+        self._led_slider = tk.Scale(
+            led_row, from_=0, to=255, orient='horizontal',
+            variable=self._led_var, showvalue=False,
+            bg='#3c3c3c', fg='white', troughcolor='#555555',
+            highlightthickness=0, bd=0, sliderlength=16,
+            command=self._on_led_change
+        )
+        self._led_slider.pack(side='left', fill='x', expand=True, padx=(5, 5))
+    
+    def _on_volume_change(self, value):
+        """Called as slider moves — debounce then send to robot."""
+        val = int(value)
+        self._volume_val_label.config(text=f"{val}%")
+        if self._volume_after_id:
+            self.panel.after_cancel(self._volume_after_id)
+        self._volume_after_id = self.panel.after(
+            150, lambda: self.callbacks.get('set_volume', lambda v: None)(val)
+        )
+
+    def _on_led_change(self, value):
+        """LED brightness slider — debounce then send 'ledbright <n>' to the ESP32."""
+        val = int(value)
+        self._led_val_label.config(text=f"{val}")
+        if self._led_after_id:
+            self.panel.after_cancel(self._led_after_id)
+        self._led_after_id = self.panel.after(
+            120, lambda: self.callbacks.get('set_led_brightness', lambda v: None)(val)
+        )
+
+    def update_feature_status(self, feature: str, enabled: bool):
+        """Update individual feature status"""
+        if feature in self.status_labels:
+            try:
+                if enabled:
+                    self.status_labels[feature].config(text="ON", fg='green')
+                else:
+                    self.status_labels[feature].config(text="OFF", fg='red')
+            except:
+                pass  # GUI might be destroyed
+    
+    def update_all_features(self, data: Dict[str, Any]):
+        """Update all feature statuses"""
+        feature_map = {
+            'roll_balance_enabled': 'roll_balance',
+        }
+        
+        for data_key, feature_key in feature_map.items():
+            if data_key in data:
+                self.update_feature_status(feature_key, data[data_key])
+    
+    def get_widget(self):
+        """Get the main widget"""
+        return self.panel
+
+class MovementPanel:
+    def __init__(self, parent, callbacks: Dict[str, Callable]):
+        self.parent = parent
+        self.callbacks = callbacks
+        self.current_height = 85  # Default robot height (60-120mm)
+        self.current_tilt = 0     # Default left/right tilt (-15 to +15)
+        self.joystick_dragging = False
+        self.last_height_send = 0  # Throttling timestamp
+        self.last_tilt_send = 0    # Throttling timestamp
+        self.send_interval = 0.1   # Send commands at most every 100ms
+        self.setup_panel()
+    
+    def setup_panel(self):
+        """Setup movement control panel"""
+        self.panel = tk.LabelFrame(self.parent, text="🎮 ROBOT CONTROL", 
+                                  font=('Arial', 12, 'bold'), bg='#3c3c3c', fg='#87ceeb',
+                                  relief='solid', bd=1)
+        
+        content = tk.Frame(self.panel, bg='#3c3c3c')
+        content.pack(padx=20, pady=15)
+        
+        # System controls (Top section)
+        system_frame = tk.Frame(content, bg='#3c3c3c')
+        system_frame.pack(pady=(0, 20))
+        
+        tk.Label(system_frame, text="System Controls", font=('Arial', 11, 'bold'), 
+                bg='#3c3c3c', fg='white').pack(pady=(0, 10))
+        
+        emergency_callback = self.callbacks.get('emergency_stop', lambda: None)
+        tk.Button(system_frame, text="🚨 EMERGENCY STOP", command=emergency_callback,
+                 font=('Arial', 12, 'bold'), bg='#d32f2f', fg='white', 
+                 activebackground='#b71c1c', width=18, pady=10).pack(pady=(0, 10))
+        
+        # Robot reset button (disabled -- no 'reset' behavior on the balance firmware)
+        reset_callback = self.callbacks.get('reset_robot', lambda: None)
+        tk.Button(system_frame, text="🔄 RESET ROBOT", command=reset_callback,
+                 font=('Arial', 10, 'bold'), bg='#555555', fg='#999999',
+                 activebackground='#666666', width=18, pady=8,
+                 state='disabled').pack(pady=(0, 5))
+        
+        # Pi reboot button
+        reboot_callback = self.callbacks.get('reboot_pi', lambda: None)
+        tk.Button(system_frame, text="🔃 REBOOT PI", command=reboot_callback,
+                 font=('Arial', 10, 'bold'), bg='#2196f3', fg='white', 
+                 activebackground='#1976d2', width=18, pady=8).pack(pady=(0, 5))
+        
+        # Pi power off button
+        poweroff_callback = self.callbacks.get('poweroff_pi', lambda: None)
+        tk.Button(system_frame, text="⚡ POWER OFF PI", command=poweroff_callback,
+                 font=('Arial', 10, 'bold'), bg='#9c27b0', fg='white', 
+                 activebackground='#7b1fa2', width=18, pady=8).pack()
+        
+        # Movement controls removed -- the robot drives from the DS4 controller
+        # (rider_controller.py -> dv / turnrate), not from the GUI.
+
+        # Height & Tilt Joystick Control (below movement buttons)
+        height_frame = tk.Frame(content, bg='#3c3c3c')
+        height_frame.pack(pady=(20, 0))
+
+        tk.Label(height_frame, text="Height & Tilt (disabled)", font=('Arial', 11, 'bold'),
+                bg='#3c3c3c', fg='#999999').pack(pady=(0, 5))
+
+        # Value displays
+        values_frame = tk.Frame(height_frame, bg='#3c3c3c')
+        values_frame.pack(pady=(0, 5))
+
+        tk.Label(values_frame, text="Height:", font=('Arial', 9),
+                bg='#3c3c3c', fg='white').grid(row=0, column=0, padx=(0, 5))
+        self.height_value_label = tk.Label(values_frame, text=f"{self.current_height}mm",
+                                          font=('Arial', 10, 'bold'), bg='#3c3c3c',
+                                          fg='#ffd700', width=6)
+        self.height_value_label.grid(row=0, column=1, padx=(0, 15))
+
+        tk.Label(values_frame, text="Tilt:", font=('Arial', 9),
+                bg='#3c3c3c', fg='white').grid(row=0, column=2, padx=(0, 5))
+        self.tilt_value_label = tk.Label(values_frame, text=f"{self.current_tilt}°",
+                                        font=('Arial', 10, 'bold'), bg='#3c3c3c',
+                                        fg='#87ceeb', width=6)
+        self.tilt_value_label.grid(row=0, column=3)
+
+        # 2D Joystick Canvas
+        self.joystick_size = 150
+        self.joystick_center = self.joystick_size // 2
+        self.joystick_radius = 60  # Movement radius
+
+        self.joystick_canvas = tk.Canvas(height_frame, width=self.joystick_size,
+                                        height=self.joystick_size, bg='#2b2b2b',
+                                        highlightthickness=1, highlightbackground='#555555')
+        self.joystick_canvas.pack()
+
+        # Draw joystick background circle
+        padding = 10
+        self.joystick_canvas.create_oval(
+            padding, padding,
+            self.joystick_size - padding, self.joystick_size - padding,
+            outline='#555555', width=2, fill='#3c3c3c'
+        )
+
+        # Draw center crosshairs
+        self.joystick_canvas.create_line(
+            self.joystick_center, padding + 5,
+            self.joystick_center, self.joystick_size - padding - 5,
+            fill='#555555', dash=(2, 2)
+        )
+        self.joystick_canvas.create_line(
+            padding + 5, self.joystick_center,
+            self.joystick_size - padding - 5, self.joystick_center,
+            fill='#555555', dash=(2, 2)
+        )
+
+        # Draw axis labels
+        self.joystick_canvas.create_text(self.joystick_center, 15,
+                                        text="↑ High", fill='white', font=('Arial', 8))
+        self.joystick_canvas.create_text(self.joystick_center, self.joystick_size - 15,
+                                        text="↓ Low", fill='white', font=('Arial', 8))
+        self.joystick_canvas.create_text(15, self.joystick_center,
+                                        text="L", fill='white', font=('Arial', 8))
+        self.joystick_canvas.create_text(self.joystick_size - 15, self.joystick_center,
+                                        text="R", fill='white', font=('Arial', 8))
+
+        # Draw joystick handle (inert -- legs are torque-off on the balance firmware)
+        handle_size = 20
+        self.joystick_handle = self.joystick_canvas.create_oval(
+            self.joystick_center - handle_size, self.joystick_center - handle_size,
+            self.joystick_center + handle_size, self.joystick_center + handle_size,
+            fill='#777777', outline='#aaaaaa', width=2
+        )
+
+        # Height & Tilt is disabled (no leg backend); the joystick is shown as an
+        # inert placeholder, so no mouse-event bindings are attached.
+
+    def _on_canvas_click(self, event):
+        """Handle click on canvas (jump joystick to position)"""
+        self._update_joystick_position(event.x, event.y)
+
+    def _on_joystick_press(self, event):
+        """Start dragging joystick"""
+        self.joystick_dragging = True
+
+    def _on_joystick_drag(self, event):
+        """Handle joystick dragging"""
+        if self.joystick_dragging:
+            # Convert canvas coords to widget coords
+            canvas_x = self.joystick_canvas.canvasx(event.x)
+            canvas_y = self.joystick_canvas.canvasy(event.y)
+            self._update_joystick_position(canvas_x, canvas_y)
+
+    def _on_joystick_release(self, event):
+        """Stop dragging joystick"""
+        self.joystick_dragging = False
+
+    def _update_joystick_position(self, x, y):
+        """Update joystick position and send commands"""
+        # Calculate offset from center
+        dx = x - self.joystick_center
+        dy = y - self.joystick_center
+
+        # Limit to joystick radius
+        distance = (dx**2 + dy**2)**0.5
+        if distance > self.joystick_radius:
+            scale = self.joystick_radius / distance
+            dx *= scale
+            dy *= scale
+
+        # Calculate new position
+        new_x = self.joystick_center + dx
+        new_y = self.joystick_center + dy
+
+        # Move the joystick handle
+        coords = self.joystick_canvas.coords(self.joystick_handle)
+        handle_size = (coords[2] - coords[0]) / 2
+        self.joystick_canvas.coords(
+            self.joystick_handle,
+            new_x - handle_size, new_y - handle_size,
+            new_x + handle_size, new_y + handle_size
+        )
+
+        # Map to height and tilt values
+        # Y axis: -joystick_radius (top) = 120mm, +joystick_radius (bottom) = 60mm
+        height_percent = (self.joystick_radius - dy) / (2 * self.joystick_radius)
+        new_height = int(60 + height_percent * 60)  # 60-120mm range
+        new_height = max(60, min(120, new_height))  # Clamp
+
+        # X axis: -joystick_radius (left) = -15°, +joystick_radius (right) = +15°
+        tilt_percent = dx / self.joystick_radius
+        new_tilt = int(tilt_percent * 15)  # -15 to +15 degrees
+        new_tilt = max(-15, min(15, new_tilt))  # Clamp
+
+        # Update displays and send commands if values changed (with throttling)
+        current_time = time.time()
+
+        if new_height != self.current_height:
+            self.current_height = new_height
+            self.height_value_label.config(text=f"{new_height}mm")
+
+            # Send command only if enough time has passed (throttling)
+            if current_time - self.last_height_send >= self.send_interval:
+                height_callback = self.callbacks.get('change_height', lambda h: None)
+                height_callback(new_height)
+                self.last_height_send = current_time
+
+        if new_tilt != self.current_tilt:
+            self.current_tilt = new_tilt
+            self.tilt_value_label.config(text=f"{new_tilt}°")
+
+            # Send command only if enough time has passed (throttling)
+            if current_time - self.last_tilt_send >= self.send_interval:
+                tilt_callback = self.callbacks.get('change_body_tilt', lambda t: None)
+                tilt_callback(new_tilt)
+                self.last_tilt_send = current_time
+
+    def get_widget(self):
+        """Get the main widget"""
+        return self.panel
+
+class ImageDisplayPanel:
+    def __init__(self, parent, image_callback: Callable = None):
+        self.parent = parent
+        self.image_callback = image_callback  # Callback to request image from robot
+        self.current_image = None  # Store current PIL Image
+        self.current_image_data = None  # Store current base64 image data
+        self.setup_panel()
+    
+    def setup_panel(self):
+        """Setup image display panel"""
+        self.panel = tk.LabelFrame(self.parent, text="📷 CAMERA IMAGE", 
+                                  font=('Arial', 12, 'bold'), bg='#3c3c3c', fg='#87ceeb',
+                                  relief='solid', bd=1)
+        
+        # Status and controls frame - pack this FIRST to ensure it's always visible
+        controls_frame = tk.Frame(self.panel, bg='#3c3c3c')
+        controls_frame.pack(side='bottom', fill='x', padx=20, pady=(0, 10))
+
+        # Row 1: action buttons
+        btn_row = tk.Frame(controls_frame, bg='#3c3c3c')
+        btn_row.pack(fill='x', pady=(0, 4))
+
+        self.video_active = False
+        self.video_btn = tk.Button(btn_row, text="🎥 Video",
+                            font=('Arial', 9), bg='#4CAF50', fg='white',
+                            activebackground='#45a049', width=8,
+                            command=self._toggle_video_feed)
+        self.video_btn.pack(side='left')
+
+        tk.Button(btn_row, text="📂 Load",
+                  font=('Arial', 9), bg='#555555', fg='white',
+                  activebackground='#666666', width=6,
+                  command=self._load_image).pack(side='left', padx=(6, 0))
+
+        tk.Button(btn_row, text="💾 Save",
+                  font=('Arial', 9), bg='#555555', fg='white',
+                  activebackground='#666666', width=6,
+                  command=self._save_image).pack(side='left', padx=(6, 0))
+
+        self.status_label = tk.Label(btn_row, text="",
+                                     font=('Arial', 9), bg='#3c3c3c', fg='#ffd700')
+        self.status_label.pack(side='left', padx=(10, 0))
+
+        # Camera is fixed at 640x480 ("high") -- no resolution selector.
+
+        # Main image display area - pack this AFTER controls to fill remaining space
+        self.image_frame = tk.Frame(self.panel, bg='#2b2b2b', relief='sunken', bd=2)
+        self.image_frame.pack(side='top', padx=20, pady=15, fill='both', expand=True)
+        
+        # Image label (will hold the actual image)
+        self.image_label = tk.Label(self.image_frame, text="📷\n\nCamera feed will appear here\n\nNo image available", 
+                                   font=('Arial', 14), bg='#2b2b2b', fg='#808080',
+                                   justify='center')
+        self.image_label.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        # Bind resize event to update image scaling
+        self.image_frame.bind('<Configure>', self._on_resize)
+    
+    def _refresh_image(self):
+        """Refresh camera image by requesting new capture"""
+        self._stop_video_feed()
+        if self.image_callback:
+            self.status_label.config(text="🔄 Image capture...")
+            self.image_callback("high")          # fixed 640x480
+
+        else:
+            self.status_label.config(text="⚠️ No image capture callback available")
+    
+    def _save_image(self):
+        """Save current image to file"""
+        if not self.current_image_data:
+            messagebox.showwarning("No Image", "No image available to save")
+            return
+        
+        try:
+            # Ask user where to save
+            filename = filedialog.asksaveasfilename(
+                defaultextension=".jpg",
+                filetypes=[("JPEG files", "*.jpg"), ("All files", "*.*")],
+                title="Save Camera Image"
+            )
+            
+            if filename:
+                # Decode base64 and save
+                img_bytes = base64.b64decode(self.current_image_data)
+                with open(filename, 'wb') as f:
+                    f.write(img_bytes)
+                self.status_label.config(text=f"💾 Image saved to {filename}")
+                # Reset status after 3 seconds
+                self.panel.after(3000, lambda: self.status_label.config(text="📶 Image ready"))
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Failed to save image: {e}")
+            self.status_label.config(text="❌ Failed to save image")
+    
+    def _load_image(self):
+        """Prompt user to load a jpg image from the file system and display it"""
+        self._stop_video_feed()
+        try:
+            filename = filedialog.askopenfilename(
+                filetypes=[("JPEG files", "*.jpg;*.jpeg"), ("All files", "*.*")],
+                title="Load Image"
+            )
+            if filename:
+                pil_image = Image.open(filename)
+                # Convert to JPEG and base64 encode for consistency
+                with io.BytesIO() as output:
+                    pil_image.convert('RGB').save(output, format='JPEG')
+                    img_bytes = output.getvalue()
+                    image_data = base64.b64encode(img_bytes).decode('utf-8')
+                self.update_image(image_data, success=True)
+                self.status_label.config(text=f"📂 Loaded image: {filename}")
+                self.panel.after(3000, lambda: self.status_label.config(text="📶 Image ready"))
+        except Exception as e:
+            messagebox.showerror("Load Error", f"Failed to load image: {e}")
+            self.status_label.config(text="❌ Failed to load image")
+    
+    def _toggle_video_feed(self):
+        if not self.video_active:
+            self.video_active = True
+            self.video_btn.config(text="⏹ Stop", bg='#d32f2f', activebackground='#b71c1c')
+            self.status_label.config(text="🎥 Live (640×480)")
+            self._video_request_pending = False
+            self._start_video_loop()
+        else:
+            self._stop_video_feed()
+
+    def _start_video_loop(self):
+        if self.video_active and self.image_callback and not getattr(self, '_video_request_pending', False):
+            self._video_request_pending = True
+            self.image_callback("high")          # fixed 640x480
+
+    def _stop_video_feed(self):
+        if self.video_active:
+            self.video_active = False
+            self._video_request_pending = False
+            self.video_btn.config(text="🎥 Video", bg='#4CAF50', activebackground='#45a049')
+            self.status_label.config(text="Stopped")
+            self.panel.after(2000, lambda: self.status_label.config(text=""))
+    
+
+    
+    def _on_resize(self, event):
+        """Handle resize events to rescale image"""
+        # Only rescale if we have an image loaded and the event is for the image frame
+        if self.current_image and event.widget == self.image_frame:
+            # Re-update the image to rescale it to the new size
+            self.update_image(self.current_image_data, success=True)
+    
+    def update_image(self, image_data=None, success=True, error_message=None):
+        """Update the displayed image"""
+        if not success:
+            # Handle error case
+            error_msg = error_message or "Unknown error"
+            self.image_label.config(
+                image="",
+                text=f"❌\n\nImage capture failed\n\n{error_msg}",
+                compound='center'
+            )
+            self.status_label.config(text=f"❌ {error_msg}")
+            self.current_image = None
+            self.current_image_data = None
+            return
+        
+        if image_data is None:
+            # No image available
+            self.image_label.config(
+                image="",
+                text="📷\n\nCamera feed will appear here\n\nNo image available",
+                compound='center'
+            )
+            self.status_label.config(text="📷 Camera")
+            self.current_image = None
+            self.current_image_data = None
+        else:
+            try:
+                # Decode base64 image data
+                img_bytes = base64.b64decode(image_data)
+                
+                # Load image with PIL
+                pil_image = Image.open(io.BytesIO(img_bytes))
+                self.current_image = pil_image.copy()  # Store original
+                self.current_image_data = image_data  # Store base64 data for saving
+                
+                # Get available display size dynamically
+                self.image_frame.update_idletasks()  # Ensure frame is laid out
+                display_width = max(self.image_frame.winfo_width() - 20, 200)  # Account for padding
+                display_height = max(self.image_frame.winfo_height() - 20, 150)  # Account for padding
+                
+                # Calculate scaling to fit display area (maintain aspect ratio)
+                img_width, img_height = pil_image.size
+                width_ratio = display_width / img_width
+                height_ratio = display_height / img_height
+                scale_ratio = min(width_ratio, height_ratio)
+                
+                new_width = int(img_width * scale_ratio)
+                new_height = int(img_height * scale_ratio)
+                
+                # Resize image for display
+                display_image = pil_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                
+                # Convert to Tkinter PhotoImage
+                photo = ImageTk.PhotoImage(display_image)
+                
+                # Update the label
+                self.image_label.config(
+                    image=photo,
+                    text="",
+                    compound='center'
+                )
+                self.image_label.image = photo  # Keep a reference to prevent GC
+                
+                # Calculate image size for status
+                size_kb = len(img_bytes) / 1024
+                self.status_label.config(text=f"📷({img_width}x{img_height})")
+
+            except Exception as e:
+                self.image_label.config(
+                    image="",
+                    text=f"❌\n\nFailed to load image\n\n{str(e)}",
+                    compound='center'
+                )
+                self.status_label.config(text=f"❌ Image load error: {e}")
+                self.current_image = None
+                self.current_image_data = None
+        
+        # At the end of update_image, if video is active, schedule the next frame
+        if getattr(self, 'video_active', False) and getattr(self, '_video_request_pending', False):
+            self._video_request_pending = False
+            # Add 50ms delay between frames for ~20 fps (smoother than flooding)
+            self.panel.after(50, self._start_video_loop)
+
+    def get_widget(self):
+        """Get the main widget"""
+        return self.panel

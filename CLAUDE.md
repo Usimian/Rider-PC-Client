@@ -8,10 +8,10 @@ The XGO Rider's controller is an **ESP32** flashed via USB-C (CH340). Two firmwa
   - `read_battery()`, `read_firmware()`, `read_roll/pitch/yaw()` all work.
   - `read_motor()` returns `[]` — motor angle read is **not** exposed.
   - `unload_allmotor()` / `unload_motor()` are **silently ignored** — torque stays on.
-- **Passthrough firmware** (`esp32_passthrough/`, PlatformIO project) — bridges USB-C straight to the SCS servo bus at 1 Mbps. Required for any of the `servo_*.py` / `watch_*.py` scripts that import `scservo_sdk`. With passthrough flashed:
+- **Passthrough firmware** (`firmware/esp32_passthrough/`, PlatformIO project) — bridges USB-C straight to the SCS servo bus at 1 Mbps. Required for the `tools/servo/*.py` / cal scripts that import `scservo_sdk`. With passthrough flashed:
   - Direct register R/W on servo IDs (leg servos are **12** and **22**).
   - Torque enable at reg `0x28`, present position at reg `0x24`, encoder offset at reg `0x1F` (writes don't persist — see global memory `project_xgo_rider_cal_storage.md`; persistence goes through SPIFFS).
-  - To flash: `cd esp32_passthrough && pio run -t upload` (esptool over CH340).
+  - To flash: `cd firmware/esp32_passthrough && pio run -t upload` (esptool over CH340).
 
 **Check what's currently flashed before assuming anything works:**
 
@@ -36,26 +36,37 @@ silk-screened `XGO-CM4-V1.1`). Always reach it with **`ssh rider`** — an alias
 `~/.ssh/config` (`User pi`). **Do not hardcode the IP**; if it ever changes, update the one
 `rider` `HostName` line (it currently resolves `raspberrypi.local` too, via mDNS).
 
-It runs these systemd services (deployed by `./deploy_bridge.sh`):
+It runs these systemd services (deployed by `pi/deploy_bridge.sh`):
 - **mosquitto** — MQTT broker (also reachable from the workstation at `<pi-ip>:1883`).
-- **rider-bridge** (`rider_status_screen.py`) — UART `/dev/ttyAMA0` ↔ ESP32 bridge: LCD status,
+- **rider-bridge** (`pi/rider_status_screen.py`) — UART `/dev/ttyAMA0` ↔ ESP32 bridge: LCD status,
   telemetry → MQTT republish, command relay. It is the **single serial owner** of the Pi↔ESP32 link.
-- **rider-joystick** (`rider_controller.py`) — DS4 → MQTT drive/turn commands.
+- **rider-joystick** (`pi/rider_controller.py`) — DS4 → MQTT drive/turn commands.
+- **rider-camera** (`pi/rider_camera.py`) — CSI camera (OV5647/picamera2) → MQTT image responder, on-demand.
 
 Read-only `ssh rider …` commands are auto-allowed (`.claude/settings.json`); changes
-(`sudo`, `systemctl restart`, `scp`, `rm`, …) prompt. LCD button + LED pin map: `xgo-cm4-pinout.md`.
+(`sudo`, `systemctl restart`, `scp`, `rm`, …) prompt. LCD button + LED pin map: `docs/xgo-cm4-pinout.md`.
 
-## Script map
+## Project layout (reorganized 2026-06-15) — three codebases, each in its own home
 
-| Script | Needs passthrough? | What it does |
-|---|---|---|
-| `watch_right_leg.py` | yes | Disables torque on ID 22, prints encoder reads |
-| `watch_servos_live.py` | yes (scservo_sdk path) | Disables torque on 12 & 22, prints position + load |
-| `servo_watch.py` | yes | Full 0x00–0x7F register dump, IDs 12 & 22 |
-| `servo_status.py` | yes | One-shot pos/goal/torque/lock/offset for 12 & 22 |
-| `watch_legs_live.py` | no (uses xgolib) | Reads motor angles via xgolib — **does not work on R-1.1.3** (returns empty) |
-| `calibration_tester.py` | no | High-level movement calibration over MQTT, separate from servo work |
-| `cal_save.py`, `cal_spam.py`, `offset_test_v*.py` | yes | SPIFFS cal-offset patching tooling |
+```
+gui/       workstation GUI: pc_client_standalone.py + core/ ui/ communication/, rider_config.ini, requirements.txt
+pi/        RPi CM5 code: rider_status_screen.py, rider_controller.py, rider_camera.py, *.service, deploy_bridge.sh
+firmware/  ESP32 code: esp32_rider_fw/ (balance fw) + esp32_passthrough/ (servo-bus passthrough fw)
+tools/     servo/ wheel/ balance/ capture/ diag/   bench + diagnostic scripts (need passthrough, or run via MQTT)
+docs/      BRIDGE_SETUP, CALIBRATION_GUIDE, xgo-cm4-pinout, Rider-Pi_SCH.pdf
+sim/       MuJoCo + SB3 RL sim (separate project)
+README.md, CLAUDE.md, start_gui.sh    at root
+```
+
+Run the GUI: `./start_gui.sh` (cd's into gui/ so package imports + config resolve).
+Flash firmware: `cd firmware/esp32_rider_fw && /home/marc/.xgo-cal/bin/pio run -t upload`.
+Deploy the Pi stack: `pi/deploy_bridge.sh rider`.
+
+The root holds only README/CLAUDE/start_gui.sh + the component dirs. Bench scripts live in
+`tools/<group>/`; dead legacy-movement and failed-approach scripts were trashed 2026-06-15.
+`tools/servo/` (`servo_status.py` reader + the cal/SPIFFS tooling) is kept pending the leg-servo
+replacement — likely obsolete after, since a working encoder removes the runaway-extension
+workaround's reason to exist.
 
 ## Known firmware bug we worked around
 

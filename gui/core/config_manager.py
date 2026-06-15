@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+# coding=utf-8
+
+import configparser
+import os
+
+# rider_config.ini lives at the gui/ root (one level up from gui/core/). Resolve it
+# absolutely so the GUI finds it regardless of the working directory it's launched from.
+_DEFAULT_CONFIG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'rider_config.ini')
+
+
+class ConfigManager:
+    def __init__(self, config_file=None):
+        self.config_file = config_file or _DEFAULT_CONFIG
+        self.config = configparser.ConfigParser()
+        self.load_config()
+
+    def load_config(self):
+        """Load configuration from file or create default"""
+        if os.path.exists(self.config_file):
+            self.config.read(self.config_file)
+        else:
+            # Create default config
+            self.config['mqtt'] = {
+                'broker_host': 'localhost',  # Change in rider_config.ini
+                'broker_port': '1883'
+            }
+            self.save_config()
+
+    def save_config(self):
+        """Save current configuration to file"""
+        with open(self.config_file, 'w') as f:
+            self.config.write(f)
+
+    def get_broker_host(self):
+        """Get MQTT broker host from rider_config.ini"""
+        return self.config.get('mqtt', 'broker_host', fallback='localhost')
+
+    def get_broker_port(self):
+        """Get MQTT broker port"""
+        return self.config.getint('mqtt', 'broker_port', fallback=1883)
+
+    def set_broker_host(self, host):
+        """Set MQTT broker host and save"""
+        self.config.set('mqtt', 'broker_host', host)
+        self.save_config()
+
+    def set_broker_port(self, port):
+        """Set MQTT broker port and save"""
+        self.config.set('mqtt', 'broker_port', str(port))
+        self.save_config()

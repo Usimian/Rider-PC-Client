@@ -10,6 +10,8 @@ __pycache__/
 *.tar.gz
 # Flash / servo dumps (transient, regenerable)
 *.bin
+# ...except the known-good prebuilt firmware images, which we keep on purpose
+!firmware/prebuilt/*.bin
 # Diagnostic captures + plots (transient, regenerable from the robot)
 *.csv
 *.png
