@@ -31,6 +31,7 @@ static Adafruit_NeoPixel gLeds(LED_N, LED_PIN, NEO_GRB + NEO_KHZ800);
 volatile bool gFallen = false;     // set by balanceTask: robot tipped past the fall angle
 volatile int      gLedOvr   = -1;  // LED test override: -1=auto; 1=blue 2=green 3=amber 4=red 5=white ('led <n>')
 volatile uint32_t gLedOvrMs = 0;   // when override was set (auto-clears after 20s so it can't mask status)
+volatile int      gLedBright = 20; // global LED brightness 0..255 (scales status colors). low-battery amber overrides to full. live-tune 'ledbright'
 
 // ---------------- pins / IMU regs ----------------
 #define SDA_PIN 18
@@ -258,7 +259,7 @@ static bool wheelRead(uint8_t id, int* pos, int* vel){
   uint8_t buf[48]; int n=0; uint32_t t0=micros();
   while(micros()-t0 < 2000 && n < 48){            // enough for a good reply; fail fast on a miss
     while(Serial2.available() && n < 48) buf[n++]=Serial2.read();
-    if(n >= 15) break;                            // got a full frame, stop early
+    if(n >= 20) break;                            // 8-byte echo + 12-byte reply (incl. checksum) -> stop early
   }
   memcpy(gRaw,buf,n); gRawN=n;   // stash for debug dump
   // Skip the half-duplex echo of our 8-byte request, then parse the reply
@@ -268,6 +269,10 @@ static bool wheelRead(uint8_t id, int* pos, int* vel){
       int LEN = buf[i+3];
       if(LEN==0x04) continue;                 // this is the echoed request — skip
       if(i+LEN >= n) continue;                // frame incomplete
+      int cks = i+LEN+3;                       // checksum = last byte of frame (id..last-param then ~sum)
+      if(cks >= n) continue;                   // checksum byte not received yet
+      uint8_t sum=0; for(int j=i+2;j<cks;j++) sum+=buf[j];   // sum id+LEN+err+params
+      if((uint8_t)~sum != buf[cks]) continue;  // bad checksum -> ignore this frame (don't feed garbage to control)
       int p = buf[i+LEN-3] | (buf[i+LEN-2]<<8);
       int v = buf[i+LEN-1] | (buf[i+LEN]  <<8);
       if(v >= 0x8000) v -= 0x10000;
@@ -767,7 +772,7 @@ static void applyCmd(char* s){
   char* sp=s; while(*sp && *sp!=' ') sp++;
   float v=0;
   if(*sp){ *sp=0; v=atof(sp+1); }
-  if      (!strcmp(s,"en"))  { gEnabled=(v!=0.0f); gTurn=0.0f; gYawRateCmd=0.0f; gDriveVel=0.0f; if(gEnabled){ gWheelFault=0; wheel1_x=0; wheel2_x=0; wheel_x=0; gPosTarget=0.0f; gOdoReset=true; } }  // enable: clear fault + ZERO the position frame (wheel odometer + target + dead-reckoned pose) so current pos and target both start at 0; zero any turn
+  if      (!strcmp(s,"en"))  { gEnabled=(v!=0.0f); gTurn=0.0f; gYawRateCmd=0.0f; gDriveVel=0.0f; if(gEnabled){ gWheelFault=0; wheel1_x=0; wheel2_x=0; wheel_x=0; stable_pos=0.0f; gPosTarget=0.0f; gOdoReset=true; } }  // enable: clear fault + ZERO the position frame (wheel odometer + PID home + target + dead-reckoned pose) so current pos and target both start at 0; stable_pos MUST zero with wheel_x or PID-mode posErr = -(old home) trips the runaway cutout on re-enable; zero any turn
   else if (!strcmp(s,"d"))     gEnabled=false;
   else if (!strcmp(s,"kppos")) gKpPos=v;               // cascade gains
   else if (!strcmp(s,"kpvel")) gKpVel=v;
@@ -829,6 +834,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"turnmax"))  gTurnMax=v;          // clamp on |turn differential| (raw)
   else if (!strcmp(s,"wheeldz"))  gWheelDZ=v;          // per-wheel anti-stiction floor during turns (raw)
   else if (!strcmp(s,"led"))     { gLedOvr=(v<0.5f)?-1:(int)v; gLedOvrMs=millis(); }  // LED: 0=auto 1=blu 2=grn 3=amb 4=red 5=wht 6=OFF
+  else if (!strcmp(s,"ledbright")) gLedBright=(int)clampf(v,0.0f,255.0f);  // global LED brightness 0..255 (scales the status colors)
   else if (!strcmp(s,"posvlp"))  gPosVelLP=clampf(v,0.0f,0.99f); // D-term velocity low-pass (0=off..0.99 heavy)
   else if (!strcmp(s,"ptgt"))    { gPosTarget=v; gDriveVel=0.0f; }   // position MOVE to v (m); cancels velocity drive
   else if (!strcmp(s,"dv"))      gDriveVel=v;          // velocity-drive command (m/s); 0 = release -> latch home + hold
@@ -858,6 +864,7 @@ static void updateLEDs(int bpct){
   static uint32_t last = 0xFF000000;                 // sentinel so the first call always shows
   if(gLedOvr >= 1 && gLedOvr <= 5 && millis() - gLedOvrMs > 20000) gLedOvr = -1;  // test colors time out -> auto
   uint32_t c;
+  int bright = gLedBright;          // user-set global brightness; the low-battery branch forces full
   if(gLedOvr == 6)                  c = 0;                        // OFF (persistent)
   else if(gLedOvr == 1)             c = gLeds.Color(0, 0, 40);    // test: blue
   else if(gLedOvr == 2)             c = gLeds.Color(0, 60, 0);    // test: green
@@ -865,10 +872,15 @@ static void updateLEDs(int bpct){
   else if(gLedOvr == 4)             c = gLeds.Color(60, 0, 0);    // test: red
   else if(gLedOvr == 5)             c = gLeds.Color(40, 40, 40);  // test: white
   else if(gWheelFault != 0 || gFallen) c = gLeds.Color(60, 0, 0);   // RED:   fault / tipped over
-  else if(bpct > 0 && bpct < 15)       c = gLeds.Color(60, 28, 0);  // AMBER: low battery
+  else if(bpct > 0 && bpct < 15)     { c = gLeds.Color(60, 28, 0); bright = 255; }  // AMBER: low battery -> FULL brightness (clear warning even when dimmed)
   else if(gEnabled)                    c = gLeds.Color(0, 60, 0);   // GREEN: balancing
   else                                 c = gLeds.Color(0, 0, 40);   // BLUE:  idle / ready
-  if(c != last){ for(int i=0;i<LED_N;i++) gLeds.setPixelColor(i, c); gLeds.show(); last = c; }
+  static int lastBright = -1;
+  if(c != last || bright != lastBright){          // re-show on color OR brightness change
+    gLeds.setBrightness(bright);                  // global scale; low-battery branch forces full
+    for(int i=0;i<LED_N;i++) gLeds.setPixelColor(i, c);
+    gLeds.show(); last = c; lastBright = bright;
+  }
 }
 
 void loop(){
