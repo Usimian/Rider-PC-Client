@@ -10,6 +10,9 @@ __pycache__/
 *.tar.gz
 # Flash / servo dumps (transient, regenerable)
 *.bin
+# Diagnostic captures + plots (transient, regenerable from the robot)
+*.csv
+*.png
 # PlatformIO build output
 .pio/
 

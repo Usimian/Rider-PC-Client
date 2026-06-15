@@ -29,6 +29,22 @@ Use the **`/home/marc/.xgo-cal/`** venv — it has both `xgolib` and `scservo_sd
 /home/marc/.xgo-cal/bin/python <script>.py
 ```
 
+## Raspberry Pi (the robot's brain) — reach it via `ssh rider`
+
+The Pi is a **Compute Module 5** (the stock CM4 was swapped out; the carrier is still
+silk-screened `XGO-CM4-V1.1`). Always reach it with **`ssh rider`** — an alias in
+`~/.ssh/config` (`User pi`). **Do not hardcode the IP**; if it ever changes, update the one
+`rider` `HostName` line (it currently resolves `raspberrypi.local` too, via mDNS).
+
+It runs these systemd services (deployed by `./deploy_bridge.sh`):
+- **mosquitto** — MQTT broker (also reachable from the workstation at `<pi-ip>:1883`).
+- **rider-bridge** (`rider_status_screen.py`) — UART `/dev/ttyAMA0` ↔ ESP32 bridge: LCD status,
+  telemetry → MQTT republish, command relay. It is the **single serial owner** of the Pi↔ESP32 link.
+- **rider-joystick** (`rider_controller.py`) — DS4 → MQTT drive/turn commands.
+
+Read-only `ssh rider …` commands are auto-allowed (`.claude/settings.json`); changes
+(`sudo`, `systemctl restart`, `scp`, `rm`, …) prompt. LCD button + LED pin map: `xgo-cm4-pinout.md`.
+
 ## Script map
 
 | Script | Needs passthrough? | What it does |
