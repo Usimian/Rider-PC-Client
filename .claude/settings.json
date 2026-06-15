@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh rider cat:*)", "Bash(ssh rider ls:*)", "Bash(ssh rider head:*)", "Bash(ssh rider tail:*)", "Bash(ssh rider grep:*)", "Bash(ssh rider stat:*)",
+      "Bash(ssh rider systemctl status:*)", "Bash(ssh rider systemctl is-active:*)", "Bash(ssh rider systemctl is-enabled:*)", "Bash(ssh rider systemctl list-units:*)", "Bash(ssh rider systemctl list-unit-files:*)", "Bash(ssh rider systemctl cat:*)", "Bash(ssh rider systemctl show:*)",
+      "Bash(ssh rider journalctl:*)", "Bash(ssh rider i2cdetect:*)", "Bash(ssh rider /usr/sbin/i2cdetect:*)",
+      "Bash(ssh rider uptime:*)", "Bash(ssh rider uname:*)", "Bash(ssh rider hostname:*)", "Bash(ssh rider df:*)", "Bash(ssh rider free:*)", "Bash(ssh rider ps:*)", "Bash(ssh rider lsusb:*)", "Bash(ssh rider lsblk:*)",
+      "Bash(ssh rider systemd-analyze:*)", "Bash(ssh rider pinctrl get:*)", "Bash(ssh rider bluetoothctl devices:*)", "Bash(ssh rider bluetoothctl info:*)", "Bash(ssh rider dpkg -l:*)", "Bash(ssh rider command -v:*)", "Bash(ssh rider which:*)"
+    ]
+  }
+}
