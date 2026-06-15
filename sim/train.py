@@ -13,7 +13,8 @@ from rider_env import RiderBalanceEnv
 
 
 def make_env(domain_rand=False, frame_stack=1):
-    return lambda: RiderBalanceEnv(add_noise=True, domain_rand=domain_rand, frame_stack=frame_stack)
+    return lambda: RiderBalanceEnv(add_noise=True, domain_rand=domain_rand,
+                                   frame_stack=frame_stack, mirror_aug=True)
 
 
 def evaluate(model, vecnorm, frame_stack=1, n=20):

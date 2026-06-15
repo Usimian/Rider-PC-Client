@@ -76,10 +76,18 @@ class RiderBalanceEnv(gym.Env):
 
     def __init__(self, params: RiderParams = None, render_mode=None,
                  max_seconds: float = 10.0, target_x: float = 0.0, add_noise: bool = True,
-                 domain_rand: bool = False, frame_stack: int = 1, pure_balance: bool = True):
+                 domain_rand: bool = False, frame_stack: int = 1, pure_balance: bool = True,
+                 mirror_aug: bool = False):
         super().__init__()
         self.p = params or DEFAULT
         self.frame_stack = frame_stack
+        # mirror_aug: the balancer is physically mirror-symmetric, so each episode we
+        # randomly run it in a sign-flipped frame (obs and action negated). This makes the
+        # training data exactly fwd/back symmetric -> VecNormalize means stay ~0 and the
+        # policy learns action(-s)=-action(s). It was the missing symmetry that let the old
+        # policies (ppo_v_pure et al.) drift onto the action rail asymmetrically.
+        self.mirror_aug = mirror_aug
+        self.mirror = 1.0
         # pure_balance: position is handled by a CODE loop on the robot (the firmware
         # feeds the policy x_err=0, x_int=0), so train the policy that way -- no position
         # objective, position obs zeroed. Removes the train/deploy mismatch + the wobble.
@@ -144,8 +152,9 @@ class RiderBalanceEnv(gym.Env):
         # FIRMWARE low-passes the velocity obs instead (polvlp) to kill the shimmy.
         xerr = 0.0 if self.pure_balance else (x - self.target_x)   # firmware zeros these (pos in code)
         xint = 0.0 if self.pure_balance else self._x_int
-        return np.array([pitch, pitch_rate, xerr, x_vel, wheel_vel,
-                         self._pitch_int, xint], np.float32)
+        o = np.array([pitch, pitch_rate, xerr, x_vel, wheel_vel,
+                      self._pitch_int, xint], np.float32)
+        return (self.mirror * o).astype(np.float32)   # all 7 obs are odd under the mirror
 
     def _obs(self):
         return np.concatenate(self._stack).astype(np.float32)
@@ -182,6 +191,7 @@ class RiderBalanceEnv(gym.Env):
         self._prev_a = 0.0
         self._pitch_int = 0.0
         self._x_int = 0.0
+        self.mirror = (1.0 if self.np_random.uniform() < 0.5 else -1.0) if self.mirror_aug else 1.0
         s = self._single_obs()
         self._stack.clear()
         for _ in range(self.frame_stack):
@@ -189,20 +199,19 @@ class RiderBalanceEnv(gym.Env):
         return self._obs(), {}
 
     def step(self, action):
-        torque = self.act(float(np.asarray(action).flat[0]))
+        a = float(np.asarray(action).flat[0])          # action in the (possibly mirrored) policy frame
+        torque = self.act(self.mirror * a)             # apply in the real frame -> symmetric training data
         self.data.ctrl[0] = torque
         for _ in range(self.decim):
             mujoco.mj_step(self.model, self.data)
         self._steps += 1
-
-        a = float(np.asarray(action).flat[0])
         pitch, pitch_rate, x, x_vel, wheel_vel = self._raw_state()
         fell = abs(pitch) > 0.40                       # ~23 deg
         upright = np.cos(pitch)                        # ~1 upright
         # pure_balance: NO position objective (code does position). Heavy command-
         # smoothness to kill the on-robot shimmy (jerky velocity cmd = jerky cart accel).
         pos_pen = 0.0 if self.pure_balance else 0.75 * (x - self.target_x) ** 2
-        act_pen = 0.01 * a ** 2
+        act_pen = 0.02 * a ** 2                        # bumped 0.01->0.02: discourage riding the action rail
         rate_pen = (0.30 if self.pure_balance else 0.05) * (a - self._prev_a) ** 2
         reward = upright - pos_pen - act_pen - rate_pen
         if fell:
