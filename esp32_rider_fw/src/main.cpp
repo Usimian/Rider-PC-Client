@@ -828,7 +828,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"yawfb"))    gYawFb=(v<0?-1.0f:1.0f);  // yaw-rate feedback sign (-1/+1)
   else if (!strcmp(s,"turnmax"))  gTurnMax=v;          // clamp on |turn differential| (raw)
   else if (!strcmp(s,"wheeldz"))  gWheelDZ=v;          // per-wheel anti-stiction floor during turns (raw)
-  else if (!strcmp(s,"led"))     { gLedOvr=(v<0.5f)?-1:(int)v; gLedOvrMs=millis(); }  // LED test: 0=auto 1=blu 2=grn 3=amb 4=red 5=wht
+  else if (!strcmp(s,"led"))     { gLedOvr=(v<0.5f)?-1:(int)v; gLedOvrMs=millis(); }  // LED: 0=auto 1=blu 2=grn 3=amb 4=red 5=wht 6=OFF
   else if (!strcmp(s,"posvlp"))  gPosVelLP=clampf(v,0.0f,0.99f); // D-term velocity low-pass (0=off..0.99 heavy)
   else if (!strcmp(s,"ptgt"))    { gPosTarget=v; gDriveVel=0.0f; }   // position MOVE to v (m); cancels velocity drive
   else if (!strcmp(s,"dv"))      gDriveVel=v;          // velocity-drive command (m/s); 0 = release -> latch home + hold
@@ -856,9 +856,10 @@ static void pump(Stream& in, char* buf, int& n){
 // Called from loop() (low priority, off the balance core); only re-shows on a color change.
 static void updateLEDs(int bpct){
   static uint32_t last = 0xFF000000;                 // sentinel so the first call always shows
-  if(gLedOvr >= 0 && millis() - gLedOvrMs > 20000) gLedOvr = -1;  // test override times out -> auto
+  if(gLedOvr >= 1 && gLedOvr <= 5 && millis() - gLedOvrMs > 20000) gLedOvr = -1;  // test colors time out -> auto
   uint32_t c;
-  if(gLedOvr == 1)                  c = gLeds.Color(0, 0, 40);    // test: blue
+  if(gLedOvr == 6)                  c = 0;                        // OFF (persistent)
+  else if(gLedOvr == 1)             c = gLeds.Color(0, 0, 40);    // test: blue
   else if(gLedOvr == 2)             c = gLeds.Color(0, 60, 0);    // test: green
   else if(gLedOvr == 3)             c = gLeds.Color(60, 28, 0);   // test: amber
   else if(gLedOvr == 4)             c = gLeds.Color(60, 0, 0);    // test: red
