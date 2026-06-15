@@ -23,6 +23,14 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include "rider_policy.h"   // auto-generated PPO policy weights (sim/export_policy.py)
+#include <Adafruit_NeoPixel.h>
+// status LEDs: 4x WS2812B daisy-chained on ESP32 IO27 (5V) -- see Rider-Pi_SCH.pdf / xgo-cm4-pinout.md
+#define LED_PIN 27
+#define LED_N   4
+static Adafruit_NeoPixel gLeds(LED_N, LED_PIN, NEO_GRB + NEO_KHZ800);
+volatile bool gFallen = false;     // set by balanceTask: robot tipped past the fall angle
+volatile int      gLedOvr   = -1;  // LED test override: -1=auto; 1=blue 2=green 3=amber 4=red 5=white ('led <n>')
+volatile uint32_t gLedOvrMs = 0;   // when override was set (auto-clears after 20s so it can't mask status)
 
 // ---------------- pins / IMU regs ----------------
 #define SDA_PIN 18
@@ -540,6 +548,7 @@ static void balanceTask(void*){
     // reference current position so the in-branch homing isn't locked out. Non-policy: enable home.
     float posRef = gPolMode ? (polInit ? gPosTargetEff : wheel_x) : stable_pos;
     bool fallen = (fabsf(qErr) > gFallDeg) || (fabsf(wheel_x - posRef) > gMaxPosErr);
+    gFallen = fallen;                          // expose to the LED status (loop() reads it)
     float u = 0.0f;
     if(gEnabled && !fallen && gPolMode){
       // ---- neural-policy control: PURE balancer + code-based position hold ----
@@ -739,6 +748,7 @@ void setup(){
   Serial.println("Cmds: en 1|0 | kppos kpvel kivel kppit kdpit izero <v> | kp(=kppit) kd(=kdpit) |");
   Serial.println("      umax dqmax iclamp ff ffband fall <v> | set cap vx psign pol home gcal | d get");
 
+  gLeds.begin(); gLeds.clear(); gLeds.show();       // status LEDs (IO27): off until first state update
   policyToRam();                                    // copy NN weights flash -> SRAM (fast matmul)
   xTaskCreatePinnedToCore(balanceTask, "balance", 4096, NULL, 12, NULL, 1);
 }
@@ -818,6 +828,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"yawfb"))    gYawFb=(v<0?-1.0f:1.0f);  // yaw-rate feedback sign (-1/+1)
   else if (!strcmp(s,"turnmax"))  gTurnMax=v;          // clamp on |turn differential| (raw)
   else if (!strcmp(s,"wheeldz"))  gWheelDZ=v;          // per-wheel anti-stiction floor during turns (raw)
+  else if (!strcmp(s,"led"))     { gLedOvr=(v<0.5f)?-1:(int)v; gLedOvrMs=millis(); }  // LED test: 0=auto 1=blu 2=grn 3=amb 4=red 5=wht
   else if (!strcmp(s,"posvlp"))  gPosVelLP=clampf(v,0.0f,0.99f); // D-term velocity low-pass (0=off..0.99 heavy)
   else if (!strcmp(s,"ptgt"))    { gPosTarget=v; gDriveVel=0.0f; }   // position MOVE to v (m); cancels velocity drive
   else if (!strcmp(s,"dv"))      gDriveVel=v;          // velocity-drive command (m/s); 0 = release -> latch home + hold
@@ -841,6 +852,24 @@ static void pump(Stream& in, char* buf, int& n){
   }
 }
 
+// status LEDs (4x WS2812B on IO27): red=fault/fallen, amber=low batt, green=balancing, blue=idle.
+// Called from loop() (low priority, off the balance core); only re-shows on a color change.
+static void updateLEDs(int bpct){
+  static uint32_t last = 0xFF000000;                 // sentinel so the first call always shows
+  if(gLedOvr >= 0 && millis() - gLedOvrMs > 20000) gLedOvr = -1;  // test override times out -> auto
+  uint32_t c;
+  if(gLedOvr == 1)                  c = gLeds.Color(0, 0, 40);    // test: blue
+  else if(gLedOvr == 2)             c = gLeds.Color(0, 60, 0);    // test: green
+  else if(gLedOvr == 3)             c = gLeds.Color(60, 28, 0);   // test: amber
+  else if(gLedOvr == 4)             c = gLeds.Color(60, 0, 0);    // test: red
+  else if(gLedOvr == 5)             c = gLeds.Color(40, 40, 40);  // test: white
+  else if(gWheelFault != 0 || gFallen) c = gLeds.Color(60, 0, 0);   // RED:   fault / tipped over
+  else if(bpct > 0 && bpct < 15)       c = gLeds.Color(60, 28, 0);  // AMBER: low battery
+  else if(gEnabled)                    c = gLeds.Color(0, 60, 0);   // GREEN: balancing
+  else                                 c = gLeds.Color(0, 0, 40);   // BLUE:  idle / ready
+  if(c != last){ for(int i=0;i<LED_N;i++) gLeds.setPixelColor(i, c); gLeds.show(); last = c; }
+}
+
 void loop(){
   static uint32_t tp=0;
   static char b0[40]; static int n0=0;
@@ -854,6 +883,7 @@ void loop(){
     if(!vbInit){ vbatF=vb; vbInit=true; }
     vbatF = 0.95f*vbatF + 0.05f*vb; tVbat=vbatF;              // heavy LP (battery is slow)
     int bpct = (int)clampf((tVbat-VBAT_EMPTY)/(VBAT_FULL-VBAT_EMPTY)*100.0f, 0.0f, 100.0f);
+    updateLEDs(bpct);                                        // status LEDs (only redraws on change)
     char b[384];
     int k=snprintf(b,sizeof(b),
       "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f polrun=%d poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d\n",
