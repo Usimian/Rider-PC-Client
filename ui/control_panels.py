@@ -63,13 +63,14 @@ class FeaturesPanel:
         self.parent = parent
         self.callbacks = callbacks
         self._volume_after_id = None
+        self._led_after_id = None
         self.setup_panel()
 
     def setup_panel(self):
         """Setup robot features panel"""
         self.panel = tk.LabelFrame(self.parent, text="🤖 ROBOT FEATURES",
                                   font=('Arial', 12, 'bold'), bg='#3c3c3c', fg='#87ceeb',
-                                  relief='solid', bd=1, height=260)
+                                  relief='solid', bd=1, height=200)
 
         # Prevent the LabelFrame from shrinking below its set height
         self.panel.pack_propagate(False)
@@ -77,15 +78,14 @@ class FeaturesPanel:
         grid = tk.Frame(self.panel, bg='#3c3c3c')
         grid.pack(padx=20, pady=15, fill='both', expand=False)
 
-        # Feature status indicators
+        # Feature status indicators. (Performance Mode + Camera toggle removed.)
+        # (name, attr, callback_key, enabled)
         features = [
-            ("Roll Balance", "roll_balance", "toggle_roll_balance"),
-            ("Performance Mode", "performance", "toggle_performance"),
-            ("Camera", "camera", "toggle_camera")
+            ("Roll Balance", "roll_balance", "toggle_roll_balance", True),
         ]
 
         self.status_labels = {}
-        for i, (name, attr, callback_key) in enumerate(features):
+        for name, attr, callback_key, enabled in features:
             feature_row = tk.Frame(grid, bg='#3c3c3c')
             feature_row.pack(fill='x', pady=8)
 
@@ -100,7 +100,8 @@ class FeaturesPanel:
             callback = self.callbacks.get(callback_key, lambda: None)
             tk.Button(feature_row, text="Toggle", command=callback,
                      font=('Arial', 9), bg='#555555', fg='white',
-                     activebackground='#666666', width=8).pack(side='right')
+                     activebackground='#666666', width=8,
+                     state=('normal' if enabled else 'disabled')).pack(side='right')
 
         # Volume control row
         vol_row = tk.Frame(grid, bg='#3c3c3c')
@@ -119,9 +120,31 @@ class FeaturesPanel:
             variable=self._volume_var, showvalue=False,
             bg='#3c3c3c', fg='white', troughcolor='#555555',
             highlightthickness=0, bd=0, sliderlength=16,
-            command=self._on_volume_change
+            command=self._on_volume_change,
+            state='disabled'          # no audio backend on the balance firmware
         )
         self._volume_slider.pack(side='left', fill='x', expand=True, padx=(5, 5))
+
+        # LED brightness row (live -> ESP32 firmware 'ledbright 0..255' via rider/control/line)
+        led_row = tk.Frame(grid, bg='#3c3c3c')
+        led_row.pack(fill='x', pady=8)
+
+        tk.Label(led_row, text="LED Bright:", font=('Arial', 12, 'bold'),
+                bg='#3c3c3c', fg='white', width=15, anchor='w').pack(side='left')
+
+        self._led_val_label = tk.Label(led_row, text="20", font=('Arial', 12, 'bold'),
+                                       bg='#3c3c3c', fg='#87ceeb', width=5)
+        self._led_val_label.pack(side='right')
+
+        self._led_var = tk.IntVar(value=20)
+        self._led_slider = tk.Scale(
+            led_row, from_=0, to=255, orient='horizontal',
+            variable=self._led_var, showvalue=False,
+            bg='#3c3c3c', fg='white', troughcolor='#555555',
+            highlightthickness=0, bd=0, sliderlength=16,
+            command=self._on_led_change
+        )
+        self._led_slider.pack(side='left', fill='x', expand=True, padx=(5, 5))
     
     def _on_volume_change(self, value):
         """Called as slider moves — debounce then send to robot."""
@@ -131,6 +154,16 @@ class FeaturesPanel:
             self.panel.after_cancel(self._volume_after_id)
         self._volume_after_id = self.panel.after(
             150, lambda: self.callbacks.get('set_volume', lambda v: None)(val)
+        )
+
+    def _on_led_change(self, value):
+        """LED brightness slider — debounce then send 'ledbright <n>' to the ESP32."""
+        val = int(value)
+        self._led_val_label.config(text=f"{val}")
+        if self._led_after_id:
+            self.panel.after_cancel(self._led_after_id)
+        self._led_after_id = self.panel.after(
+            120, lambda: self.callbacks.get('set_led_brightness', lambda v: None)(val)
         )
 
     def update_feature_status(self, feature: str, enabled: bool):
@@ -148,8 +181,6 @@ class FeaturesPanel:
         """Update all feature statuses"""
         feature_map = {
             'roll_balance_enabled': 'roll_balance',
-            'performance_mode_enabled': 'performance',
-            'camera_enabled': 'camera'
         }
         
         for data_key, feature_key in feature_map.items():
@@ -193,11 +224,12 @@ class MovementPanel:
                  font=('Arial', 12, 'bold'), bg='#d32f2f', fg='white', 
                  activebackground='#b71c1c', width=18, pady=10).pack(pady=(0, 10))
         
-        # Robot reset button
+        # Robot reset button (disabled -- no 'reset' behavior on the balance firmware)
         reset_callback = self.callbacks.get('reset_robot', lambda: None)
         tk.Button(system_frame, text="🔄 RESET ROBOT", command=reset_callback,
-                 font=('Arial', 10, 'bold'), bg='#ff9800', fg='white', 
-                 activebackground='#f57c00', width=18, pady=8).pack(pady=(0, 5))
+                 font=('Arial', 10, 'bold'), bg='#555555', fg='#999999',
+                 activebackground='#666666', width=18, pady=8,
+                 state='disabled').pack(pady=(0, 5))
         
         # Pi reboot button
         reboot_callback = self.callbacks.get('reboot_pi', lambda: None)
@@ -211,38 +243,15 @@ class MovementPanel:
                  font=('Arial', 10, 'bold'), bg='#9c27b0', fg='white', 
                  activebackground='#7b1fa2', width=18, pady=8).pack()
         
-        # Movement controls (Bottom section)
-        movement_frame = tk.Frame(content, bg='#3c3c3c')
-        movement_frame.pack()
-        
-        tk.Label(movement_frame, text="Movement Controls", font=('Arial', 11, 'bold'), 
-                bg='#3c3c3c', fg='white').pack(pady=(0, 10))
-        
-        # Arrow button grid
-        move_grid = tk.Frame(movement_frame, bg='#3c3c3c')
-        move_grid.pack()
-        
-        move_buttons = [
-            ("↑", 0, 50, 0, 1),
-            ("←", 50, 0, 1, 0), 
-            ("⏹", 0, 0, 1, 1),
-            ("→", -50, 0, 1, 2),
-            ("↓", 0, -50, 2, 1)
-        ]
-        
-        move_callback = self.callbacks.get('move', lambda x, y: None)
-        for text, x, y, row, col in move_buttons:
-            btn = tk.Button(move_grid, text=text, command=lambda x=x, y=y: move_callback(x, y),
-                           width=4, height=2, font=('Arial', 14, 'bold'),
-                           bg='#555555', fg='white', activebackground='#666666')
-            btn.grid(row=row, column=col, padx=2, pady=2)
+        # Movement controls removed -- the robot drives from the DS4 controller
+        # (rider_controller.py -> dv / turnrate), not from the GUI.
 
         # Height & Tilt Joystick Control (below movement buttons)
         height_frame = tk.Frame(content, bg='#3c3c3c')
         height_frame.pack(pady=(20, 0))
 
-        tk.Label(height_frame, text="Height & Tilt Control", font=('Arial', 11, 'bold'),
-                bg='#3c3c3c', fg='white').pack(pady=(0, 5))
+        tk.Label(height_frame, text="Height & Tilt (disabled)", font=('Arial', 11, 'bold'),
+                bg='#3c3c3c', fg='#999999').pack(pady=(0, 5))
 
         # Value displays
         values_frame = tk.Frame(height_frame, bg='#3c3c3c')
@@ -302,19 +311,16 @@ class MovementPanel:
         self.joystick_canvas.create_text(self.joystick_size - 15, self.joystick_center,
                                         text="R", fill='white', font=('Arial', 8))
 
-        # Draw joystick handle (moveable circle)
+        # Draw joystick handle (inert -- legs are torque-off on the balance firmware)
         handle_size = 20
         self.joystick_handle = self.joystick_canvas.create_oval(
             self.joystick_center - handle_size, self.joystick_center - handle_size,
             self.joystick_center + handle_size, self.joystick_center + handle_size,
-            fill='#4CAF50', outline='white', width=2
+            fill='#777777', outline='#aaaaaa', width=2
         )
 
-        # Bind mouse events for joystick dragging
-        self.joystick_canvas.tag_bind(self.joystick_handle, '<Button-1>', self._on_joystick_press)
-        self.joystick_canvas.tag_bind(self.joystick_handle, '<B1-Motion>', self._on_joystick_drag)
-        self.joystick_canvas.tag_bind(self.joystick_handle, '<ButtonRelease-1>', self._on_joystick_release)
-        self.joystick_canvas.bind('<Button-1>', self._on_canvas_click)
+        # Height & Tilt is disabled (no leg backend); the joystick is shown as an
+        # inert placeholder, so no mouse-event bindings are attached.
 
     def _on_canvas_click(self, event):
         """Handle click on canvas (jump joystick to position)"""
@@ -401,16 +407,11 @@ class MovementPanel:
         return self.panel
 
 class ImageDisplayPanel:
-    def __init__(self, parent, image_callback: Callable = None, llm_callback: Callable = None,
-                 yolo_callback: Callable = None):
+    def __init__(self, parent, image_callback: Callable = None):
         self.parent = parent
         self.image_callback = image_callback  # Callback to request image from robot
-        self.llm_callback = llm_callback  # Callback to send image to LLM
-        self.yolo_callback = yolo_callback  # Callback to trigger YOLO detection
         self.current_image = None  # Store current PIL Image
         self.current_image_data = None  # Store current base64 image data
-        self.current_detections = []  # Latest YOLO detections
-        self.show_detections = True  # Whether to draw detection overlay
         self.setup_panel()
     
     def setup_panel(self):
@@ -448,22 +449,8 @@ class ImageDisplayPanel:
                                      font=('Arial', 9), bg='#3c3c3c', fg='#ffd700')
         self.status_label.pack(side='left', padx=(10, 0))
 
-        # Row 2: continuous left, resolution right
-        opt_row = tk.Frame(controls_frame, bg='#3c3c3c')
-        opt_row.pack(fill='x')
+        # Camera is fixed at 640x480 ("high") -- no resolution selector.
 
-        self.continuous_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(opt_row, text="Continuous detection", variable=self.continuous_var,
-                       font=('Arial', 9), bg='#3c3c3c', fg='white',
-                       selectcolor='#7B68EE', activebackground='#3c3c3c',
-                       activeforeground='white').pack(side='left')
-
-        self._resolution_map = {"640×480": "high", "320×240": "low", "160×120": "tiny"}
-        self.resolution_var = tk.StringVar(value="640×480")
-        ttk.Combobox(opt_row, textvariable=self.resolution_var,
-                     values=list(self._resolution_map.keys()),
-                     state="readonly", width=8).pack(side='right')
-        
         # Main image display area - pack this AFTER controls to fill remaining space
         self.image_frame = tk.Frame(self.panel, bg='#2b2b2b', relief='sunken', bd=2)
         self.image_frame.pack(side='top', padx=20, pady=15, fill='both', expand=True)
@@ -482,8 +469,8 @@ class ImageDisplayPanel:
         self._stop_video_feed()
         if self.image_callback:
             self.status_label.config(text="🔄 Image capture...")
-            resolution = self._resolution_map.get(self.resolution_var.get(), "high")
-            self.image_callback(resolution)
+            self.image_callback("high")          # fixed 640x480
+
         else:
             self.status_label.config(text="⚠️ No image capture callback available")
     
@@ -539,7 +526,7 @@ class ImageDisplayPanel:
         if not self.video_active:
             self.video_active = True
             self.video_btn.config(text="⏹ Stop", bg='#d32f2f', activebackground='#b71c1c')
-            self.status_label.config(text="🎥 Live (low res)")
+            self.status_label.config(text="🎥 Live (640×480)")
             self._video_request_pending = False
             self._start_video_loop()
         else:
@@ -548,8 +535,7 @@ class ImageDisplayPanel:
     def _start_video_loop(self):
         if self.video_active and self.image_callback and not getattr(self, '_video_request_pending', False):
             self._video_request_pending = True
-            # Use low resolution for video (better quality than tiny, still fast)
-            self.image_callback("low")
+            self.image_callback("high")          # fixed 640x480
 
     def _stop_video_feed(self):
         if self.video_active:
@@ -634,24 +620,7 @@ class ImageDisplayPanel:
                 # Calculate image size for status
                 size_kb = len(img_bytes) / 1024
                 self.status_label.config(text=f"📷({img_width}x{img_height})")
-                
-                # Re-apply last detections immediately to avoid flicker between frames
-                if self.current_detections:
-                    self._redraw_with_detections()
 
-                # AUTOMATICALLY send image to LLM system when captured
-                if self.llm_callback and image_data:
-                    try:
-                        self.llm_callback(image_data)
-                        if hasattr(self, 'debug_mode') and self.debug_mode:
-                            print("🤖 Image automatically sent to LLM system")
-                    except Exception as llm_error:
-                        print(f"⚠️ Failed to send image to LLM: {llm_error}")
-
-                # Continuous YOLO detection
-                if getattr(self, 'continuous_var', None) and self.continuous_var.get():
-                    self._run_yolo()
-                
             except Exception as e:
                 self.image_label.config(
                     image="",
@@ -667,57 +636,6 @@ class ImageDisplayPanel:
             self._video_request_pending = False
             # Add 50ms delay between frames for ~20 fps (smoother than flooding)
             self.panel.after(50, self._start_video_loop)
-
-    def _run_yolo(self):
-        """Trigger YOLO detection on current image"""
-        if self.current_image_data and self.yolo_callback:
-            self.yolo_callback()
-
-    def update_detections(self, detections: list):
-        """Update YOLO detection overlay on current image"""
-        self.current_detections = detections
-        if self.current_image and detections is not None:
-            self._redraw_with_detections()
-
-    def _redraw_with_detections(self):
-        """Redraw the displayed image with YOLO bounding boxes"""
-        from PIL import ImageDraw
-
-        img = self.current_image.copy()
-        draw = ImageDraw.Draw(img)
-
-        colors = ['#FF4444', '#44FF44', '#4444FF', '#FFFF44', '#FF44FF',
-                  '#44FFFF', '#FF8844', '#88FF44', '#4488FF', '#FF4488']
-        class_colors = {}
-
-        for det in self.current_detections:
-            label = det['label']
-            conf = det['confidence']
-            x1, y1, x2, y2 = det['bbox']
-
-            if label not in class_colors:
-                class_colors[label] = colors[len(class_colors) % len(colors)]
-            color = class_colors[label]
-
-            draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
-
-            text = f"{label} {conf:.2f}"
-            text_y = max(y1 - 16, 0)
-            text_w = len(text) * 7 + 4
-            draw.rectangle([x1, text_y, x1 + text_w, text_y + 16], fill=color)
-            draw.text((x1 + 2, text_y + 1), text, fill='black')
-
-        self.image_frame.update_idletasks()
-        display_width = max(self.image_frame.winfo_width() - 20, 200)
-        display_height = max(self.image_frame.winfo_height() - 20, 150)
-
-        iw, ih = img.size
-        scale = min(display_width / iw, display_height / ih)
-        display_img = img.resize((int(iw * scale), int(ih * scale)), Image.Resampling.LANCZOS)
-
-        photo = ImageTk.PhotoImage(display_img)
-        self.image_label.config(image=photo, text="", compound='center')
-        self.image_label.image = photo
 
     def get_widget(self):
         """Get the main widget"""

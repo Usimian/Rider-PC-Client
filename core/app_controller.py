@@ -10,8 +10,6 @@ from tkinter import messagebox
 
 from .config_manager import ConfigManager
 from .robot_state import RobotState
-from .llm_manager import LLMManager
-from .yolo_manager import YOLOManager
 from communication.mqtt_client import MQTTClient
 from communication.message_handlers import MessageHandlers
 from ui.gui_manager import GUIManager
@@ -21,48 +19,11 @@ class ApplicationController:
         self.debug_mode = debug
         self.cleanup_done = False  # Flag to prevent multiple cleanup calls
         self._shutting_down = False  # Flag to prevent multiple signal handling
-        self.voice_enabled = True  # Voice commands enabled by default
-        self._pending_voice_text = None  # Voice text waiting for image capture
-        
+
         # Initialize core components
         self.config_manager = ConfigManager()
         self.robot_state = RobotState()
-        
-        # Initialize YOLO (if enabled)
-        self.yolo_manager = None
-        if self.config_manager.is_yolo_enabled():
-            try:
-                self.yolo_manager = YOLOManager(
-                    model_name=self.config_manager.get_yolo_model(),
-                    confidence=self.config_manager.get_yolo_confidence(),
-                    debug=debug
-                )
-                self.yolo_manager.set_detection_callback(self._handle_yolo_detections)
-                if debug:
-                    print("✅ YOLO Manager initialized")
-            except Exception as e:
-                if debug:
-                    print(f"⚠️ YOLO Manager initialization failed: {e}")
-                self.yolo_manager = None
 
-        # Initialize LLM (if enabled)
-        self.llm_manager = None
-        if self.config_manager.is_llm_enabled():
-            try:
-                self.llm_manager = LLMManager(
-                    self.config_manager.get_ollama_url(),
-                    debug
-                )
-                # Set up LLM callbacks
-                self.llm_manager.set_response_callback(self._handle_llm_response_chunk)
-                self.llm_manager.set_status_callback(self._handle_llm_status)
-                if debug:
-                    print("✅ LLM Manager initialized successfully")
-            except Exception as e:
-                if debug:
-                    print(f"⚠️ LLM Manager initialization failed: {e}")
-                self.llm_manager = None
-        
         # Initialize communication
         self.mqtt_client = MQTTClient(
             self.config_manager.get_broker_host(),
@@ -70,7 +31,7 @@ class ApplicationController:
             debug
         )
         self.message_handlers = MessageHandlers(self.robot_state, debug)
-        
+
         # Initialize GUI
         self.gui_manager = GUIManager(
             self.config_manager.get_broker_host(),
@@ -78,19 +39,19 @@ class ApplicationController:
             self._get_gui_callbacks(),
             debug
         )
-        
+
         # Setup MQTT callbacks
         self._setup_mqtt_callbacks()
-        
+
         # Setup image capture callback
         self.message_handlers.set_image_capture_callback(self._handle_image_capture_response)
-        
+
         # Setup signal handlers for graceful shutdown
         self._setup_signal_handlers()
-        
+
         if debug:
             print("🔧 Application controller initialized")
-    
+
     def _get_gui_callbacks(self) -> Dict[str, Any]:
         """Get callbacks for GUI interactions"""
         callbacks = {
@@ -98,13 +59,9 @@ class ApplicationController:
             'change_height': self._change_height,
             'change_body_tilt': self._change_body_tilt,
             'toggle_roll_balance': self._toggle_roll_balance,
-            'toggle_performance': self._toggle_performance,
             'toggle_camera': self._toggle_camera,
-            'toggle_voice': self._toggle_voice,
             'set_volume': self._set_volume,
-            'send_movement': self._send_movement,
-            'robot_move': self._robot_move_distance,
-            'robot_turn': self._robot_turn,
+            'set_led_brightness': self._set_led_brightness,
             'emergency_stop': self._emergency_stop,
             'reset_robot': self._reset_robot,
             'reboot_pi': self._reboot_pi,
@@ -115,31 +72,8 @@ class ApplicationController:
             'is_mqtt_connected': self._is_mqtt_connected,
             'request_image_capture': self._request_image_capture
         }
-        
-        callbacks['speak'] = self._speak_text
-        callbacks['stop_speaking'] = self._stop_speaking
-
-        # Add YOLO callbacks if available
-        if self.yolo_manager:
-            callbacks['yolo_run_detection'] = self._run_yolo_on_current_image
-            callbacks['yolo_set_auto'] = self.config_manager.set_yolo_auto_detect
-
-        # Add LLM callbacks if available
-        if self.llm_manager:
-            callbacks.update({
-                'llm_send_image': self._llm_send_image,
-                'llm_generate_response': self._llm_generate_response,
-                'llm_set_model': self._llm_set_model,
-                'llm_clear_conversation': self._llm_clear_conversation,
-                'llm_get_models': self._llm_get_models,
-                'llm_get_status': self._llm_get_status,
-                'llm_test_connection': self._llm_test_connection,
-                'llm_apply_settings': self._llm_apply_settings,
-                'llm_save_settings': self._llm_save_settings
-            })
-        
         return callbacks
-    
+
     def _setup_mqtt_callbacks(self):
         """Setup MQTT message callbacks"""
         # Get topics from MQTT client
@@ -151,24 +85,10 @@ class ApplicationController:
             if handler:
                 self.mqtt_client.add_message_callback(topic, handler)
 
-        # Register voice callbacks
-        self.mqtt_client.add_message_callback(
-            topics['voice_recognized'],
-            self._handle_voice_recognition
-        )
-        self.mqtt_client.add_message_callback(
-            topics['voice_status'],
-            self._handle_voice_status
-        )
-        self.mqtt_client.add_message_callback(
-            topics['voice_partial'],
-            self._handle_voice_partial
-        )
-
         # Register connection callbacks
         self.mqtt_client.add_connection_callback('connect', self._on_mqtt_connect)
         self.mqtt_client.add_connection_callback('disconnect', self._on_mqtt_disconnect)
-    
+
     def _setup_signal_handlers(self):
         """Set up signal handlers for graceful shutdown"""
         def signal_handler(signum, frame):
@@ -176,29 +96,29 @@ class ApplicationController:
             if hasattr(self, '_shutting_down') and self._shutting_down:
                 print("🔄 Already shutting down, ignoring signal...")
                 return
-            
+
             self._shutting_down = True
             signal_name = signal.Signals(signum).name
             print(f"\n🚨 Received {signal_name} signal - initiating immediate shutdown...")
             self._force_shutdown()
-        
+
         # Handle common termination signals
         signal.signal(signal.SIGINT, signal_handler)   # Ctrl-C
         signal.signal(signal.SIGTERM, signal_handler)  # Termination request
-    
+
     def _force_shutdown(self):
         """Force immediate shutdown"""
         try:
             print("✅ Force shutdown initiated")
-            
+
             # Stop GUI first - this will exit the tkinter mainloop
             if hasattr(self, 'gui_manager'):
                 self.gui_manager.stop()
-            
+
             # Stop MQTT with timeout
             if hasattr(self, 'mqtt_client'):
                 self.mqtt_client.disconnect()  # Use fast disconnect instead of graceful
-            
+
             print("✅ Force shutdown complete")
         except Exception as e:
             print(f"⚠️ Shutdown error (ignored): {e}")
@@ -206,21 +126,19 @@ class ApplicationController:
             # Import os for force exit
             import os
             os._exit(0)  # Force exit without cleanup
-    
+
     # MQTT Event Handlers
     def _on_mqtt_connect(self, success: bool):
         """Handle MQTT connection events"""
         if success:
             self.gui_manager.update_connection_status(True)
-            # Tell the robot the current voice state so its MIC indicator is correct
-            self.mqtt_client.send_voice_control(self.voice_enabled)
         else:
             self.gui_manager.update_connection_status(False, "Connection failed")
-    
+
     def _on_mqtt_disconnect(self):
         """Handle MQTT disconnection events"""
         self.gui_manager.update_connection_status(False)
-    
+
     # GUI Callback Methods
     def _change_speed(self, value: float):
         """Change speed setting"""
@@ -250,25 +168,22 @@ class ApplicationController:
             print(f"[APP] Body tilt changed to: {value}°")
 
     def _toggle_roll_balance(self):
-        """Toggle roll balance setting"""
+        """Toggle balance via raw firmware line commands -- the same path the DS4
+        controller and LCD button use. Reads current state to decide direction:
+        enable -> 'polrun 1' + 'en 1' (arm policy + enable); disable -> 'en 0'."""
         if not self.mqtt_client.is_connected():
             messagebox.showwarning("Not Connected", "Not connected to robot")
             return
-        
-        self.mqtt_client.send_settings_command('toggle_roll_balance')
+
+        currently_on = bool(self.robot_state.data.get('roll_balance_enabled', False))
+        if currently_on:
+            self.mqtt_client.send_line("en 0")
+        else:
+            self.mqtt_client.send_line("polrun 1")
+            self.mqtt_client.send_line("en 1")
         if self.debug_mode:
-            print("[APP] Roll balance toggled")
-    
-    def _toggle_performance(self):
-        """Toggle performance mode"""
-        if not self.mqtt_client.is_connected():
-            messagebox.showwarning("Not Connected", "Not connected to robot")
-            return
-        
-        self.mqtt_client.send_settings_command('toggle_performance')
-        if self.debug_mode:
-            print("[APP] Performance mode toggled")
-    
+            print(f"[APP] Roll balance toggle -> {'OFF' if currently_on else 'ON'}")
+
     def _toggle_camera(self):
         """Toggle camera"""
         if not self.mqtt_client.is_connected():
@@ -284,34 +199,30 @@ class ApplicationController:
         if self.mqtt_client.is_connected():
             self.mqtt_client.send_settings_command('set_volume', int(value))
 
-    def _toggle_voice(self, enabled: bool):
-        """Set voice commands on/off — also pauses STT on the robot"""
-        self.voice_enabled = enabled
-        state = "enabled" if enabled else "disabled"
-        print(f"🎤 Voice commands {state}")
+    def _set_led_brightness(self, value: int):
+        """Set ESP32 status-LED brightness (0-255) via the firmware 'ledbright' line command."""
         if self.mqtt_client.is_connected():
-            self.mqtt_client.send_voice_control(enabled)
-    
+            self.mqtt_client.send_line("ledbright %d" % int(value))
+
     def _request_image_capture(self, resolution: str = "high"):
         """Request image capture from robot"""
         if not self.mqtt_client.is_connected():
             messagebox.showwarning("Not Connected", "Not connected to robot")
             return
-        
+
         request_id = self.mqtt_client.send_image_capture_request(resolution)
         if request_id:
-            # Store the request ID for tracking if needed
             if self.debug_mode:
                 print(f"[APP] Image capture requested: {request_id} ({resolution})")
         else:
             messagebox.showerror("Image Capture Error", "Failed to send image capture request")
-    
+
     def _handle_image_capture_response(self, data: Dict[str, Any]):
         """Handle image capture response from robot"""
         try:
             success = data.get('success', False)
             request_id = data.get('request_id', 'unknown')
-            
+
             if success:
                 image_data = data.get('image_data')
                 if image_data:
@@ -321,17 +232,6 @@ class ApplicationController:
                         image_size = data.get('image_size', 'unknown size')
                         resolution = data.get('resolution', 'unknown')
                         print(f"[APP] Image received: {request_id} ({image_size}, {resolution})")
-
-                    # Run YOLO detection if auto-detect enabled
-                    if self.yolo_manager and self.config_manager.is_yolo_auto_detect():
-                        self.yolo_manager.run_detection(image_data)
-
-                    # Process any voice command that was waiting for an image
-                    if self._pending_voice_text:
-                        pending = self._pending_voice_text
-                        self._pending_voice_text = None
-                        if hasattr(self, 'gui_manager') and self.gui_manager:
-                            self.gui_manager.handle_voice_input(pending)
                 else:
                     # Success but no image data
                     error_msg = "No image data received"
@@ -344,187 +244,126 @@ class ApplicationController:
                 self.gui_manager.update_image_display(None, success=False, error_message=error_msg)
                 if self.debug_mode:
                     print(f"[APP] Image capture failed: {request_id} - {error_msg}")
-                    
+
         except Exception as e:
             error_msg = f"Error processing image response: {e}"
             self.gui_manager.update_image_display(None, success=False, error_message=error_msg)
             if self.debug_mode:
                 print(f"[APP] Image response processing error: {e}")
-    
-    def _send_movement(self, x: float, y: float):
-        """Send movement command (legacy format for joystick control)"""
-        if not self.mqtt_client.is_connected():
-            messagebox.showwarning("Not Connected", "Not connected to robot")
-            return
-
-        self.mqtt_client.send_movement_command(x, y)
-        if self.debug_mode:
-            print(f"[APP] Movement command: x={x}, y={y}")
-
-    def _robot_move_distance(self, distance: int, unused=None):
-        """Send move command with distance in mm (AI command format)"""
-        if not self.mqtt_client.is_connected():
-            if self.debug_mode:
-                print("⚠️ Cannot send move command - not connected to robot")
-            return
-
-        if distance >= 0:
-            scale = self.config_manager.get_move_forward_scale()
-            direction = "forward"
-        else:
-            scale = self.config_manager.get_move_backward_scale()
-            direction = "backward"
-        scaled_distance = int(distance / scale)
-
-        distance_cm = abs(distance) / 10
-        if distance_cm >= 100:
-            speech_text = f"Moving {direction} {distance_cm / 100:.1f} meters"
-        elif distance_cm >= 10:
-            speech_text = f"Moving {direction} {int(distance_cm)} centimeters"
-        else:
-            speech_text = f"Moving {direction} {abs(distance)} millimeters"
-
-        self.mqtt_client.send_speak_command(speech_text)
-        self.mqtt_client.send_move_distance_command(scaled_distance)
-
-        if self.debug_mode:
-            print(f"[APP] Move {direction} {abs(distance)}mm ÷ {scale} = {scaled_distance}mm sent")
-
-    def _robot_turn(self, angle: int):
-        """Send turn command with angle in degrees (AI command format)"""
-        if not self.mqtt_client.is_connected():
-            if self.debug_mode:
-                print("⚠️ Cannot send turn command - not connected to robot")
-            return
-
-        if angle >= 0:
-            scale = self.config_manager.get_turn_left_scale()
-            direction = "left"
-        else:
-            scale = self.config_manager.get_turn_right_scale()
-            direction = "right"
-        scaled_angle = int(angle / scale)
-
-        speech_text = f"Turning {direction} {abs(angle)} degrees"
-        self.mqtt_client.send_speak_command(speech_text)
-        self.mqtt_client.send_turn_command(scaled_angle)
-
-        if self.debug_mode:
-            print(f"[APP] Turn {direction} {abs(angle)}° ÷ {scale} = {scaled_angle}° sent")
 
     def _emergency_stop(self):
         """Emergency stop - immediate, no confirmation"""
         if not self.mqtt_client.is_connected():
             print("⚠️ Emergency stop attempted but not connected to robot")
             return
-        
+
         print("🚨 EMERGENCY STOP ACTIVATED")
         self.mqtt_client.send_system_command('emergency_stop')
-    
+
     def _reset_robot(self):
         """Reset the robot - requires confirmation"""
         if not self.mqtt_client.is_connected():
             messagebox.showwarning("Not Connected", "Not connected to robot")
             return
-        
+
         # Confirmation dialog
         result = messagebox.askyesno(
-            "Reset Robot", 
+            "Reset Robot",
             "Are you sure you want to reset the robot?\n\nThis will restart the robot software.",
             icon='warning'
         )
-        
+
         if result:
             print("🔄 ROBOT RESET INITIATED")
             self.mqtt_client.send_system_command('reset_robot')
             if self.debug_mode:
                 print("[APP] Robot reset command sent")
-    
+
     def _reboot_pi(self):
         """Reboot the Raspberry Pi - requires confirmation"""
         if not self.mqtt_client.is_connected():
             messagebox.showwarning("Not Connected", "Not connected to robot")
             return
-        
+
         # Confirmation dialog
         result = messagebox.askyesno(
-            "Reboot Raspberry Pi", 
+            "Reboot Raspberry Pi",
             "Are you sure you want to reboot the Raspberry Pi?\n\nThis will restart the entire system and you will lose connection.",
             icon='warning'
         )
-        
+
         if result:
             print("🔃 PI REBOOT INITIATED")
             self.mqtt_client.send_system_command('reboot_pi')
             if self.debug_mode:
                 print("[APP] Pi reboot command sent")
-    
+
     def _poweroff_pi(self):
         """Power off the Raspberry Pi - requires double confirmation"""
         if not self.mqtt_client.is_connected():
             messagebox.showwarning("Not Connected", "Not connected to robot")
             return
-        
+
         # First confirmation dialog
         result1 = messagebox.askyesno(
-            "Power Off Raspberry Pi", 
+            "Power Off Raspberry Pi",
             "⚠️ WARNING: This will POWER OFF the Raspberry Pi!\n\nYou will need physical access to restart it.\n\nAre you sure you want to continue?",
             icon='warning'
         )
-        
+
         if result1:
             # Second confirmation dialog for extra safety
             result2 = messagebox.askyesno(
-                "Final Confirmation", 
+                "Final Confirmation",
                 "🚨 FINAL CONFIRMATION 🚨\n\nThis action will completely shut down the robot.\nYou will need to physically restart it.\n\nProceed with power off?",
                 icon='error'
             )
-            
+
             if result2:
                 print("⚡ PI POWER OFF INITIATED")
                 self.mqtt_client.send_system_command('poweroff_pi')
                 if self.debug_mode:
                     print("[APP] Pi power off command sent")
-    
+
     def _reconnect(self):
         """Reconnect to MQTT broker"""
         self.mqtt_client.reconnect()
         if self.debug_mode:
             print("[APP] Reconnecting to MQTT broker")
-    
+
     def _disconnect(self):
         """Disconnect from MQTT broker"""
         self.mqtt_client.graceful_disconnect()
         if self.debug_mode:
             print("[APP] Gracefully disconnected from MQTT broker")
-    
+
     def _change_robot_ip(self, new_ip: str):
         """Change robot IP address"""
         if new_ip != self.config_manager.get_broker_host():
             self.config_manager.set_broker_host(new_ip)
             self.gui_manager.update_broker_host(new_ip)
-            
+
             # Update MQTT client with new host
             self.mqtt_client.graceful_disconnect()
             self.mqtt_client.broker_host = new_ip
             self.mqtt_client.connect()
-            
+
             if self.debug_mode:
                 print(f"[APP] Robot IP changed to: {new_ip}")
-    
+
     def _is_mqtt_connected(self) -> bool:
         """Check if MQTT client is connected"""
         return self.mqtt_client.is_connected()
-    
+
     def _window_close_handler(self):
         """Handle window close event - immediate and aggressive shutdown"""
         print("🪟 Window close requested - forcing immediate termination...")
-        
+
         # Prevent multiple close events
         if hasattr(self, '_closing') and self._closing:
             return
         self._closing = True
-        
+
         # Set up backup force kill after 1 second
         import threading
         import time
@@ -538,10 +377,10 @@ class ApplicationController:
                 os.kill(os.getpid(), signal.SIGKILL)  # Force kill signal
             except:
                 os._exit(1)  # Fallback to _exit
-        
+
         backup_thread = threading.Thread(target=backup_force_kill, daemon=True)
         backup_thread.start()
-        
+
         # Start immediate shutdown in a separate thread to avoid blocking
         def immediate_shutdown():
             try:
@@ -549,66 +388,62 @@ class ApplicationController:
                 self._send_safety_shutdown_commands()
             except:
                 pass  # Don't let safety commands block shutdown
-            
+
             print("🚪 Forcing immediate process termination...")
             import os
             os._exit(0)  # Force immediate termination
-        
+
         # Start shutdown thread and return immediately
         shutdown_thread = threading.Thread(target=immediate_shutdown, daemon=True)
         shutdown_thread.start()
-        
+
         # Also try to destroy the window immediately in current thread
         try:
             self.gui_manager.main_window.root.destroy()
         except:
             pass
-    
+
     def _send_safety_shutdown_commands(self):
         """Send safety commands before shutdown - ultra-fast version"""
         if not hasattr(self, 'mqtt_client') or not self.mqtt_client.is_connected():
             return
-        
+
         try:
             print("🛡️ Sending safety shutdown commands...")
-            
+
             # Send both commands without any error handling to maximize speed
             try:
                 self.mqtt_client.send_movement_command(0, 0)
                 self.mqtt_client.send_system_command('emergency_stop')
             except:
                 pass  # Ignore all errors - speed is critical
-            
+
             print("✅ Safety shutdown commands sent")
-            
+
         except Exception:
             pass  # Ignore all errors to prevent blocking
-    
+
     def run(self):
         """Run the application"""
         try:
             print("🚀 Starting Rider Robot PC Client...")
-            
+
             # Connect to MQTT
             self.mqtt_client.connect()
 
-            # Initialize LLM GUI in background so it doesn't block mainloop startup
-            if self.llm_manager:
-                threading.Thread(target=self._initialize_llm_gui, daemon=True).start()
-
             # Setup window close handler
             self.gui_manager.set_close_callback(self._window_close_handler)
-            
+
             # Run GUI (blocking)
             self.gui_manager.run()
-            
+
         except KeyboardInterrupt:
             print("\n⌨️ Keyboard interrupt in main...")
         except Exception as e:
             print(f"❌ Application error: {e}")
         finally:
             self.cleanup()
-    
+
     def cleanup(self):
         """Cleanup resources - immediate shutdown version"""
         # Prevent multiple cleanup calls
@@ -616,358 +451,34 @@ class ApplicationController:
             if self.debug_mode:
                 print("🛑 Cleanup already done, skipping...")
             return
-        
+
         self.cleanup_done = True
         print("🛑 Shutting down application...")
-        
+
         try:
             # Send safety commands first (with minimal delay)
             try:
                 self._send_safety_shutdown_commands()
             except Exception as e:
                 print(f"⚠️ Safety shutdown commands failed: {e}")
-            
-            # Cleanup YOLO manager
-            try:
-                if hasattr(self, 'yolo_manager') and self.yolo_manager:
-                    self.yolo_manager.cleanup()
-            except Exception as e:
-                print(f"⚠️ YOLO cleanup failed: {e}")
 
-            # Cleanup LLM manager
-            try:
-                if hasattr(self, 'llm_manager') and self.llm_manager:
-                    self.llm_manager.cleanup()
-            except Exception as e:
-                print(f"⚠️ LLM cleanup failed: {e}")
-            
             # Stop GUI immediately
             try:
                 if hasattr(self, 'gui_manager'):
                     self.gui_manager.stop()
             except Exception as e:
                 print(f"⚠️ GUI stop failed: {e}")
-            
+
             # Force disconnect MQTT immediately
             try:
                 if hasattr(self, 'mqtt_client'):
                     self.mqtt_client.disconnect()  # Use force disconnect
             except Exception as e:
                 print(f"⚠️ MQTT disconnect failed: {e}")
-            
+
             print("✅ Application cleanup complete")
-            
+
         except Exception as e:
             print(f"⚠️ Cleanup error (ignored): {e}")
-        
+
         print("👋 Application terminated")
-    
-    # LLM Callback Methods
-    def _llm_send_image(self, image_data: str):
-        """Send image to LLM for analysis"""
-        if not self.llm_manager:
-            return
-        
-        self.llm_manager.set_current_image(image_data)
-        if self.debug_mode:
-            print("🖼️ Image sent to LLM manager")
-    
-    def _llm_generate_response(self, prompt: str, use_current_image: bool = True):
-        """Generate LLM response"""
-        if not self.llm_manager:
-            if hasattr(self, 'gui_manager'):
-                self.gui_manager.add_llm_error("LLM not available")
-            return {"success": False, "error": "LLM not available"}
-        
-        # Set generating status in GUI
-        if hasattr(self, 'gui_manager'):
-            self.gui_manager.set_llm_generating(True)
-        
-        # Set up response handling callback
-        accumulated_response = ""
-        def handle_response():
-            nonlocal accumulated_response
-            # Wait a bit for the response to complete, then check for results
-            import threading
-            import time
-            
-            def check_response():
-                nonlocal accumulated_response
-                max_wait_time = 30  # Wait up to 30 seconds for response
-                check_interval = 2  # Check every 2 seconds
-                
-                for i in range(max_wait_time // check_interval):
-                    time.sleep(check_interval)
-                    
-                    # Get the latest conversation history
-                    history = self.llm_manager.get_conversation_history()
-                    
-                    # Find the latest assistant response
-                    if history and len(history) >= 2:
-                        latest_response = history[-1]
-                        if latest_response.role == "assistant":
-                            accumulated_response = latest_response.content
-                            
-                            # Update GUI with complete response
-                            if hasattr(self, 'gui_manager'):
-                                self.gui_manager.add_llm_response(accumulated_response)
-                                self.gui_manager.set_llm_generating(False)
-                            
-                            if self.debug_mode:
-                                print(f"🤖 LLM response complete: {len(accumulated_response)} chars")
-                            return  # Success - exit early
-                    
-                    # Check if LLM is still generating
-                    if not self.llm_manager.is_busy():
-                        # LLM finished but no response found - error
-                        if hasattr(self, 'gui_manager'):
-                            self.gui_manager.add_llm_error("No response received")
-                            self.gui_manager.set_llm_generating(False)
-                        return
-                
-                # Timeout - no response after max wait time
-                if hasattr(self, 'gui_manager'):
-                    self.gui_manager.add_llm_error("Response generation timed out")
-                    self.gui_manager.set_llm_generating(False)
-            
-            # Start response checking in background
-            threading.Thread(target=check_response, daemon=True).start()
-        
-        # Generate response
-        result = self.llm_manager.generate_response(prompt, use_current_image, use_streaming=True)
-        
-        if result.get("success"):
-            # Start response handling
-            handle_response()
-        else:
-            # Handle immediate error
-            error_msg = result.get("error", "Unknown error")
-            if hasattr(self, 'gui_manager'):
-                self.gui_manager.add_llm_error(error_msg)
-                self.gui_manager.set_llm_generating(False)
-        
-        return result
-    
-    def _llm_set_model(self, model_name: str) -> bool:
-        """Set LLM model"""
-        if not self.llm_manager:
-            return False
-        
-        return self.llm_manager.set_model(model_name)
-    
-    def _llm_clear_conversation(self):
-        """Clear LLM conversation history"""
-        if not self.llm_manager:
-            return
-        
-        self.llm_manager.clear_conversation()
-    
-    def _llm_get_models(self) -> List[str]:
-        """Get available LLM models"""
-        if not self.llm_manager:
-            return []
-        
-        return self.llm_manager.get_available_models()
-    
-    def _llm_get_status(self) -> Dict[str, Any]:
-        """Get LLM status"""
-        if not self.llm_manager:
-            return {"available": False, "error": "LLM not initialized"}
-        
-        return {
-            "available": self.llm_manager.is_server_available(),
-            "busy": self.llm_manager.is_busy(),
-            "model": self.llm_manager.get_current_model(),
-            "settings": self.llm_manager.get_settings()
-        }
-    
-    def _handle_llm_response_chunk(self, chunk: str):
-        """Handle streaming LLM response chunk"""
-        # Forward to GUI if available
-        if hasattr(self, 'gui_manager'):
-            self.gui_manager.handle_llm_response_chunk(chunk)
-    
-    def _handle_llm_status(self, status: str):
-        """Handle LLM status updates"""
-        if self.debug_mode:
-            print(f"🤖 LLM Status: {status}")
-
-        # Forward to GUI if available
-        if hasattr(self, 'gui_manager'):
-            self.gui_manager.handle_llm_status(status)
-
-    def _handle_voice_recognition(self, payload: dict):
-        """Handle voice recognition from robot"""
-        text = payload.get('text', '').strip()
-        if not text:
-            return
-
-        print(f"🎤 Voice recognized: '{text}'")
-
-        if not self.voice_enabled:
-            return
-
-        # If LLM has no image yet, capture one first then process the voice command
-        if self.llm_manager and not self.llm_manager.current_image_data:
-            self._pending_voice_text = text
-            self._request_image_capture()
-            return
-
-        # Forward to GUI for display and LLM processing
-        if hasattr(self, 'gui_manager') and self.gui_manager:
-            self.gui_manager.handle_voice_input(text)
-
-    def _handle_voice_status(self, payload: dict):
-        """Handle voice status updates from robot"""
-        # Sync enabled/disabled state if robot sent it (e.g. button D toggled)
-        if 'enabled' in payload:
-            enabled = bool(payload['enabled'])
-            self.voice_enabled = enabled
-            if hasattr(self, 'gui_manager') and self.gui_manager:
-                self.gui_manager.set_voice_enabled(enabled)
-            return
-
-        status = payload.get('status', 'offline')
-        if self.debug_mode:
-            print(f"🎤 Voice status: {status}")
-
-        # Forward to GUI
-        if hasattr(self, 'gui_manager') and self.gui_manager:
-            self.gui_manager.update_voice_status(status)
-
-    def _handle_voice_partial(self, payload: dict):
-        """Handle partial voice recognition from robot"""
-        partial_text = payload.get('partial', '').strip()
-
-        # Forward to GUI (no debug print - too noisy)
-        if hasattr(self, 'gui_manager') and self.gui_manager:
-            self.gui_manager.update_voice_partial(partial_text)
-
-    def _speak_text(self, text: str):
-        """Send text to robot TTS"""
-        if self.mqtt_client.is_connected() and text.strip():
-            self.mqtt_client.send_speak_command(text.strip())
-
-    def _stop_speaking(self):
-        """Stop robot TTS immediately"""
-        if self.mqtt_client.is_connected():
-            self.mqtt_client.send_stop_tts()
-
-    def _handle_yolo_detections(self, detections: list):
-        """Handle YOLO detection results — publish to MQTT and update GUI overlay"""
-        # Publish to robot via MQTT
-        if self.mqtt_client.is_connected():
-            self.mqtt_client.send_yolo_detections(detections)
-
-        # Update GUI overlay
-        if hasattr(self, 'gui_manager'):
-            self.gui_manager.update_yolo_detections(detections)
-
-        if self.debug_mode:
-            labels = [f"{d['label']}({d['confidence']:.2f})" for d in detections]
-            print(f"[YOLO] {len(detections)} detections: {', '.join(labels) or 'none'}")
-
-    def _run_yolo_on_current_image(self):
-        """Manually trigger YOLO on the current image in the GUI"""
-        if not self.yolo_manager:
-            return
-        image_data = self.gui_manager.get_current_image_data()
-        if image_data:
-            self.yolo_manager.run_detection(image_data)
-
-    def _llm_test_connection(self, url: str) -> bool:
-        """Test connection to LLM server"""
-        if not self.llm_manager:
-            return False
-        
-        try:
-            # Create temporary client to test connection
-            from communication.ollama_client import OllamaClient
-            test_client = OllamaClient(url, self.debug_mode)
-            
-            result = test_client.is_server_available()
-            test_client.close()
-            
-            return result
-            
-        except Exception as e:
-            if self.debug_mode:
-                print(f"❌ Connection test error: {e}")
-            return False
-    
-    def _llm_apply_settings(self, settings: Dict[str, Any]):
-        """Apply LLM settings for current session"""
-        if not self.llm_manager:
-            return
-        
-        try:
-            # Apply settings to LLM manager
-            if 'model' in settings:
-                self.llm_manager.set_model(settings['model'])
-            
-            if 'temperature' in settings:
-                self.llm_manager.set_temperature(settings['temperature'])
-            
-            if 'max_tokens' in settings:
-                self.llm_manager.set_max_tokens(settings['max_tokens'])
-            
-            if self.debug_mode:
-                print(f"✅ LLM settings applied: {settings}")
-                
-        except Exception as e:
-            if self.debug_mode:
-                print(f"❌ Error applying LLM settings: {e}")
-    
-    def _llm_save_settings(self, settings: Dict[str, Any]) -> bool:
-        """Save LLM settings to configuration file"""
-        try:
-            # Save to config manager
-            if 'ollama_url' in settings:
-                self.config_manager.set_ollama_url(settings['ollama_url'])
-            
-            if 'model' in settings:
-                self.config_manager.set_llm_default_model(settings['model'])
-            
-            if 'temperature' in settings:
-                self.config_manager.set_llm_temperature(settings['temperature'])
-            
-            if 'max_tokens' in settings:
-                self.config_manager.set_llm_max_tokens(settings['max_tokens'])
-            
-            if 'enabled' in settings:
-                self.config_manager.set_llm_enabled(settings['enabled'])
-            
-            # Apply current session settings too
-            self._llm_apply_settings(settings)
-            
-            if self.debug_mode:
-                print(f"💾 LLM settings saved: {settings}")
-            
-            return True
-            
-        except Exception as e:
-            if self.debug_mode:
-                print(f"❌ Error saving LLM settings: {e}")
-            return False
-    
-    def _initialize_llm_gui(self):
-        """Initialize LLM GUI components after GUI manager is created"""
-        if not self.llm_manager or not hasattr(self, 'gui_manager'):
-            return
-        
-        try:
-            # Update GUI with initial LLM status
-            status = self._llm_get_status()
-            if status.get("available"):
-                models = self._llm_get_models()
-                self.gui_manager.update_llm_models(models)
-                self.gui_manager.handle_llm_status("Connected")
-            else:
-                self.gui_manager.handle_llm_status("Disconnected")
-            
-            if self.debug_mode:
-                print("✅ LLM GUI integration initialized")
-                
-        except Exception as e:
-            if self.debug_mode:
-                print(f"⚠️ LLM GUI initialization error: {e}") 
