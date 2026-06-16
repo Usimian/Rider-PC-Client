@@ -45,18 +45,20 @@ ser = serial.Serial(PORT, 115200, timeout=0.1)
 # physical buttons on the XGO 2-inch board (active-low, pull-up). Mapped BY POSITION
 # on 2026-06-14 (GPIOs from the XGO CM4 key.py; labels A/B/C/D, but position is what we use):
 #   upper-left  = GPIO17 (C)  -> balance start/stop toggle (next to the RIDER text)
-#   upper-right = GPIO22 (D)  -> (free)
+#   upper-right = GPIO22 (D)  -> tap = STOP (en 0) to the ESP32
 #   lower-left  = GPIO23 (B)  -> hold ~1.5s = sudo poweroff
-#   lower-right = GPIO24 (A)  -> tap = redo gyro-bias calibration ('gcal'; robot still + idle)
+#   lower-right = GPIO24 (A)  -> tap = reset distance frame ('poszero'; odometer + target -> 0)
 BTN_BALANCE = 17                # upper-left  (C)
 BTN_POWER   = 23                # lower-left  (B) -> poweroff on ~1.5s hold
-BTN_GCAL    = 24                # lower-right (A) -> tap = gyro recal ('gcal')
+BTN_RESET   = 24                # lower-right (A) -> tap = reset distance ('poszero')
+BTN_STOP    = 22                # upper-right (D) -> tap = STOP (en 0) to the ESP32
 PWR_HOLD_S  = 1.5               # hold time before poweroff fires (also drives the LCD overlay)
 try:
     _chip = lgpio.gpiochip_open(0)
     lgpio.gpio_claim_input(_chip, BTN_BALANCE, lgpio.SET_PULL_UP)
     lgpio.gpio_claim_input(_chip, BTN_POWER,   lgpio.SET_PULL_UP)
-    lgpio.gpio_claim_input(_chip, BTN_GCAL,    lgpio.SET_PULL_UP)
+    lgpio.gpio_claim_input(_chip, BTN_RESET,   lgpio.SET_PULL_UP)
+    lgpio.gpio_claim_input(_chip, BTN_STOP,    lgpio.SET_PULL_UP)
     btn_ok = True
 except Exception as e:
     print("button GPIO unavailable: %s" % e, flush=True)
@@ -65,8 +67,10 @@ btn_prev = 1                    # 1 = released (pulled up)
 btn_last = 0.0                  # last-press time (debounce)
 pwr_down_t = 0.0                # power-button press-start time (0 = released)
 pwr_fired = False               # poweroff already triggered this hold
-gcal_prev = 1                   # gyro-cal button (lower-right) prev level
-gcal_last = 0.0                 # gyro-cal last-press time (debounce)
+reset_prev = 1                  # reset-distance button (lower-right) prev level
+reset_last = 0.0                # reset last-press time (debounce)
+stop_prev = 1                   # stop button (upper-right) prev level
+stop_last = 0.0                 # stop last-press time (debounce)
 
 tel = {}
 cmd_q = queue.Queue()           # inbound MQTT -> ESP32 line commands
@@ -372,14 +376,21 @@ while True:
         else:
             pwr_down_t = 0.0
             pwr_fired = False
-        # gyro-cal button (lower-right, GPIO24): tap -> 'gcal' (recompute gyro bias).
-        # Firmware only acts on it while DISABLED + still, so a stray tap is harmless.
-        glvl = lgpio.gpio_read(_chip, BTN_GCAL)
-        if gcal_prev == 1 and glvl == 0 and tnow - gcal_last > 0.4:   # falling edge + debounce
-            gcal_last = tnow
-            ser.write(b"gcal\n")
-            print("GYRO CAL requested (gcal)", flush=True)
-        gcal_prev = glvl
+        # reset-distance button (lower-right, GPIO24): tap -> 'poszero' (zero odometer + target,
+        # WITHOUT dropping balance). gcal moved off the buttons -- robot no longer recals per session.
+        glvl = lgpio.gpio_read(_chip, BTN_RESET)
+        if reset_prev == 1 and glvl == 0 and tnow - reset_last > 0.4:   # falling edge + debounce
+            reset_last = tnow
+            ser.write(b"poszero\n")
+            print("DIST RESET requested (poszero)", flush=True)
+        reset_prev = glvl
+        # STOP button (upper-right, GPIO22): tap -> immediate 'en 0' to the ESP32 (estop)
+        slvl = lgpio.gpio_read(_chip, BTN_STOP)
+        if stop_prev == 1 and slvl == 0 and tnow - stop_last > 0.4:   # falling edge + debounce
+            stop_last = tnow
+            ser.write(b"en 0\n")
+            print("STOP requested (en 0)", flush=True)
+        stop_prev = slvl
     now = time.time()
     if now - last_render >= 0.2:        # LCD ~5 Hz
         last_render = now

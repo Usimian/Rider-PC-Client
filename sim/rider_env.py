@@ -29,6 +29,10 @@ DR_RANGES = {
     "wheel_friction": (0.6, 1.5),      # real-floor traction unknown -> wide
 }
 
+CONTROL_RATE_HZ = (130.0, 260.0)   # per-episode control-rate DR: the real ESP32 loop is ~143-166 Hz
+                                   # (varies with load) but the policy trained at a fixed 250 -> randomize
+                                   # the rate so the policy is rate-ROBUST instead of tuned to one rate.
+
 
 class ActuatorModel:
     """Normalized command [-1, 1] -> wheel VELOCITY setpoint (rad/s).
@@ -77,10 +81,18 @@ class RiderBalanceEnv(gym.Env):
     def __init__(self, params: RiderParams = None, render_mode=None,
                  max_seconds: float = 10.0, target_x: float = 0.0, add_noise: bool = True,
                  domain_rand: bool = False, frame_stack: int = 1, pure_balance: bool = True,
-                 mirror_aug: bool = False):
+                 mirror_aug: bool = False, vel_pen: float = 0.0):
         super().__init__()
         self.p = params or DEFAULT
         self.frame_stack = frame_stack
+        # vel_pen: penalize chassis fwd-velocity^2. pure_balance had NO velocity term, so a
+        # steady forward roll scored the same as standing still -> the policy learned a creep
+        # (~0.13 m/s), VecNormalize centered on it (wheel_vel mean ~4), and that baked-in creep
+        # became a constant hold-command bias on the robot (-37) that broke fwd/back drive
+        # symmetry. A small penalty pins the reward optimum at STATIONARY. Keep it modest: the
+        # policy sees RAW velocity (not velocity error), so a large weight makes it fight the
+        # firmware's commanded drive. mirror_aug handles the directional symmetry separately.
+        self.vel_pen = vel_pen
         # mirror_aug: the balancer is physically mirror-symmetric, so each episode we
         # randomly run it in a sign-flipped frame (obs and action negated). This makes the
         # training data exactly fwd/back symmetric -> VecNormalize means stay ~0 and the
@@ -100,6 +112,7 @@ class RiderBalanceEnv(gym.Env):
         self.decim = self.p.control_decimation()
         self.ctrl_dt = self.decim * self.model.opt.timestep
         self.act = ActuatorModel(self.p, self.ctrl_dt)
+        self.max_seconds = max_seconds
         self.max_steps = int(max_seconds / self.ctrl_dt)
         self.target_x = target_x
         self.add_noise = add_noise
@@ -180,7 +193,11 @@ class RiderBalanceEnv(gym.Env):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
         if self.domain_rand:
-            self._randomize()
+            chz = self.np_random.uniform(*CONTROL_RATE_HZ)       # randomize the loop rate this episode
+            self.decim = max(1, round((1.0 / chz) / self.model.opt.timestep))
+            self.ctrl_dt = self.decim * self.model.opt.timestep
+            self.max_steps = int(self.max_seconds / self.ctrl_dt)
+            self._randomize()                                    # rebuilds ActuatorModel with the new ctrl_dt
         # small random initial lean; starts resting on the wheel (chassis pos puts wheel on floor)
         # realistic "let go from a near-still hold": small lean, small pitch rate.
         self.data.qpos[self.q_pitch] = self.np_random.uniform(-0.06, 0.06)
@@ -213,7 +230,8 @@ class RiderBalanceEnv(gym.Env):
         pos_pen = 0.0 if self.pure_balance else 0.75 * (x - self.target_x) ** 2
         act_pen = 0.02 * a ** 2                        # bumped 0.01->0.02: discourage riding the action rail
         rate_pen = (0.30 if self.pure_balance else 0.05) * (a - self._prev_a) ** 2
-        reward = upright - pos_pen - act_pen - rate_pen
+        vel_pen = self.vel_pen * x_vel ** 2            # pin optimum at STATIONARY (kills the trained creep)
+        reward = upright - pos_pen - act_pen - rate_pen - vel_pen
         if fell:
             reward -= 10.0
         self._prev_a = a

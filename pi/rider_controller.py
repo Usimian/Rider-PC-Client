@@ -36,7 +36,7 @@ AXIS_DRIVE = 1       # left stick Y (stick up = negative)
 AXIS_TURN = 3        # right stick X (verify with --test)
 BTN_BALANCE = 0      # Cross (X)
 BTN_ESTOP = 1        # Circle (O)
-BTN_DISTZERO = 2     # Square (#) -- verify with --test; sends 'poszero'
+BTN_DISTZERO = 3     # Square -- verified via --test 2026-06-16 (Cross=0,Circle=1,Triangle=2,Square=3); sends 'poszero'
 DEADZONE = 0.12
 MAX_SPEED = 0.35     # m/s of position-target travel at full stick (match firmware posvmax; 0.6 overshot/fell)
 MAX_YAW_RATE = 1.0   # rad/s commanded at full right-stick (firmware closes the loop on the gyro)

@@ -26,15 +26,18 @@ from rider_env import ActuatorModel          # reuse the measured latency+lag+de
 # sampled INDEPENDENTLY for L and R -> the policy sees asymmetric wheels every episode.
 DR_RANGES = {
     "vel_gain":       (0.80, 1.20),    # per-wheel cmd->vel gain
-    "actuator_tau_s": (0.010, 0.020),  # per-wheel first-order lag
-    "latency_s":      (0.002, 0.006),  # per-wheel pure latency
+    "actuator_tau_s": (0.012, 0.022),  # per-wheel first-order lag (bench: ~16 ms, 2026-06-16)
+    "latency_s":      (0.006, 0.014),  # per-wheel pure latency (bench actuator ~4.6 ms + the 6 ms loop)
     "stiction_frac":  (0.0, 0.10),     # per-wheel deadband -> models a sticky wheel (one side dead-leg)
     "mass_scale":     (0.85, 1.15),
     "wheel_friction": (0.6, 1.5),
+    "yaw_rate_bias":  (-0.20, 0.20),   # constant gyro-Z zero-rate bias (rad/s, ~+/-11 deg/s) added to the
+                                       # yaw-rate OBS -> policy must stay stable without per-boot gyro recal
 }
 
 CMD_FWD_MAX = 0.30     # m/s forward command at full
 CMD_YAW_MAX = 2.0      # rad/s yaw command at full
+VEL_OBS_LP  = 0.7      # wheel-velocity obs low-pass, MATCHES firmware gPolVelLP (models the ~17ms sensing lag)
 
 
 class RiderDiffDriveEnv(gym.Env):
@@ -114,6 +117,12 @@ class RiderDiffDriveEnv(gym.Env):
             pitch += np.random.normal(0, self.p.accel_pitch_noise_deg * d2r)
             prate += np.random.normal(0, self.p.gyro_noise_dps * d2r)
             yrate += np.random.normal(0, self.p.gyro_noise_dps * d2r)
+        yrate += self.yaw_bias          # per-episode constant gyro-Z bias (0 when domain_rand off)
+        # low-pass the wheel-velocity obs to match firmware gPolVelLP -> policy trains against the
+        # SAME sensing lag it meets on the robot (the main unmodeled delay behind the oscillation).
+        self.wLf = VEL_OBS_LP*self.wLf + (1.0-VEL_OBS_LP)*wL
+        self.wRf = VEL_OBS_LP*self.wRf + (1.0-VEL_OBS_LP)*wR
+        wL, wR = self.wLf, self.wRf
         mr = self.mirror
         # mirror (L<->R reflection): swap wheels, negate yaw-rate & yaw command
         o = np.array([pitch, prate, mr * yrate, (wL if mr > 0 else wR), (wR if mr > 0 else wL),
@@ -157,6 +166,8 @@ class RiderDiffDriveEnv(gym.Env):
         self._prev_a = np.zeros(2, np.float32)
         self._pitch_int = 0.0
         self.mirror = (1.0 if self.np_random.uniform() < 0.5 else -1.0) if self.mirror_aug else 1.0
+        self.yaw_bias = self.np_random.uniform(*DR_RANGES["yaw_rate_bias"]) if self.domain_rand else 0.0
+        self.wLf = 0.0; self.wRf = 0.0          # wheel-velocity obs low-pass state
         self._sample_cmd()
         s = self._single_obs()
         self._stack.clear()
@@ -187,8 +198,9 @@ class RiderDiffDriveEnv(gym.Env):
         upright = np.cos(pitch)
         track_fwd = 6.0 * (fwd - self.cmd_fwd) ** 2        # tuned up (was 2.0) -> tighter forward tracking
         track_yaw = 1.2 * (yrate - self.cmd_yaw) ** 2      # tuned up (was 0.30) -> tighter yaw tracking
-        act_pen = 0.01 * float(np.sum(a ** 2))
-        rate_pen = 0.08 * float(np.sum((a - self._prev_a) ** 2))   # relaxed (was 0.10) so smoothness doesn't cap tracking
+        act_pen = 0.02 * float(np.sum(a ** 2))                     # up (was 0.01) -> discourage bang-bang saturation
+        rate_pen = 0.30 * float(np.sum((a - self._prev_a) ** 2))   # up (was 0.08) -> strongly favor SMOOTH control
+                                                                   # (bench: policy was bang-bang -> oscillated on hw)
         # anti-stall: while turning, both wheels should contribute -- penalize one wheel idle
         stall_pen = 0.0
         if abs(self.cmd_yaw) > 0.2:

@@ -10,9 +10,9 @@ Mapped **by physical position** on 2026-06-14 (full press test, all four confirm
 | Position     | GPIO | XGO label | Use in this project                         |
 |--------------|------|-----------|---------------------------------------------|
 | upper-left   | 17   | C (key3)  | balance start/stop toggle (next to "RIDER") |
-| upper-right  | 22   | D (key4)  | (free)                                      |
+| upper-right  | 22   | D (key4)  | **tap → `en 0` (STOP) to the ESP32**        |
 | lower-left   | 23   | B (key2)  | **hold ~1.5 s → `sudo poweroff`**           |
-| lower-right  | 24   | A (key1)  | (free)                                      |
+| lower-right  | 24   | A (key1)  | tap → `poszero` (reset distance: odom+target→0) |
 
 Read on the **Pi** via lgpio in `rider_status_screen.py` (NOT on the ESP32). GPIO label
 order from XGO `key.py`: key1=A=24, key2=B=23, key3=C=17, key4=D=22.

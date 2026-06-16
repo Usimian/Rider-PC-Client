@@ -19,6 +19,11 @@ def build_mjcf_3d(p: RiderParams) -> str:
     ww = 0.008                      # wheel half-width (m)
     vmax = p.vel_max_rad_s
     frng = p.vel_forcerange_Nm
+    # PER-WHEEL armature = half the (lumped) param: with TWO spin joints the COMMON-MODE reflected
+    # rotor inertia is 2x per-wheel, so half here makes balancing match the 2-D/real lumped value
+    # (p.wheel_armature). Without this the 3-D had 2x reaction-torque authority -> "too easy" -> the
+    # policy learned ~1/3 the authority reality needs (2026-06-16, root cause of the under-power).
+    arm = p.wheel_armature / 2.0
     return f"""<mujoco model="rider_diffdrive">
   <option timestep="{p.physics_timestep_s}" gravity="0 0 -9.81" integrator="implicitfast"/>
   <visual><headlight diffuse="0.6 0.6 0.6"/><global offwidth="640" offheight="480"/></visual>
@@ -36,12 +41,12 @@ def build_mjcf_3d(p: RiderParams) -> str:
       <geom name="torso" type="box" pos="0 0 {p.com_height_m}" size="{hx} {hy} {hz}"
             mass="{p.body_mass_kg}" rgba="0.85 0.5 0.2 1"/>
       <body name="wheel_L" pos="0 {half_track} 0">
-        <joint name="spin_L" type="hinge" axis="0 1 0" armature="{p.wheel_armature}"/>
+        <joint name="spin_L" type="hinge" axis="0 1 0" armature="{arm}"/>
         <geom name="wheelL" type="cylinder" fromto="0 {-ww} 0 0 {ww} 0" size="{r}"
               mass="{p.wheel_mass_kg}" rgba="0.1 0.1 0.1 1"/>
       </body>
       <body name="wheel_R" pos="0 {-half_track} 0">
-        <joint name="spin_R" type="hinge" axis="0 1 0" armature="{p.wheel_armature}"/>
+        <joint name="spin_R" type="hinge" axis="0 1 0" armature="{arm}"/>
         <geom name="wheelR" type="cylinder" fromto="0 {-ww} 0 0 {ww} 0" size="{r}"
               mass="{p.wheel_mass_kg}" rgba="0.1 0.1 0.1 1"/>
       </body>
