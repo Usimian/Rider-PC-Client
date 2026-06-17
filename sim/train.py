@@ -10,11 +10,14 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
 
 from rider_env import RiderBalanceEnv
+from caps_ppo import CAPS_PPO       # PPO + spatial action-smoothness (used when --caps_lambda > 0)
 
 
-def make_env(domain_rand=False, frame_stack=1, vel_pen=0.0):
-    return lambda: RiderBalanceEnv(add_noise=True, domain_rand=domain_rand,
-                                   frame_stack=frame_stack, mirror_aug=True, vel_pen=vel_pen)
+def make_env(domain_rand=False, frame_stack=1, vel_pen=0.0, mirror_aug=True, rate_dr=True,
+             pos_anchor=0.0, pure_balance=True, pos_weight=0.75):
+    return lambda: RiderBalanceEnv(add_noise=True, domain_rand=domain_rand, frame_stack=frame_stack,
+                                   mirror_aug=mirror_aug, vel_pen=vel_pen, rate_dr=rate_dr,
+                                   pos_anchor=pos_anchor, pure_balance=pure_balance, pos_weight=pos_weight)
 
 
 def evaluate(model, vecnorm, frame_stack=1, n=20):
@@ -55,15 +58,30 @@ if __name__ == "__main__":
     ap.add_argument("--vel_pen", type=float, default=0.0)   # fwd-velocity^2 weight: pins optimum stationary, BUT
                                                             # >0 fights the wheel motion balancing needs -> breaks
                                                             # balance on HW (tried 2026-06-16). Keep 0; see memory.
+    ap.add_argument("--caps_lambda", type=float, default=0.0)  # >0 -> CAPS spatial smoothness (kills mirror_aug jitter)
+    ap.add_argument("--caps_sigma", type=float, default=0.05)
+    ap.add_argument("--no_mirror", action="store_true")   # disable mirror_aug (reproduce ppo_v_pure recipe)
+    ap.add_argument("--no_rate_dr", action="store_true")  # disable control-rate DR (ppo_v_pure predates it)
+    ap.add_argument("--pos_anchor", type=float, default=0.0)  # small x^2 penalty: break cruise w/o mirror/velpen
+    ap.add_argument("--pos_aware", action="store_true")   # position-aware end-to-end (x_err/x_int in obs + objective)
+    ap.add_argument("--pos_weight", type=float, default=0.75)  # position-error^2 weight (pos_aware mode)
     args = ap.parse_args()
 
-    venv = make_vec_env(make_env(args.domain_rand, args.frame_stack, args.vel_pen), n_envs=args.nenv)
+    venv = make_vec_env(make_env(args.domain_rand, args.frame_stack, args.vel_pen,
+                                 mirror_aug=not args.no_mirror, rate_dr=not args.no_rate_dr,
+                                 pos_anchor=args.pos_anchor, pure_balance=not args.pos_aware,
+                                 pos_weight=args.pos_weight), n_envs=args.nenv)
     venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
-    model = PPO("MlpPolicy", venv, verbose=1, device="cpu", n_steps=1024, batch_size=2048,
-                gamma=0.997, gae_lambda=0.95, learning_rate=3e-4,
-                policy_kwargs=dict(net_arch=[64, 64]),
-                tensorboard_log="./tb")
-    print(f"training PPO: {args.steps} steps, {args.nenv} envs, net [64,64] ...")
+    common = dict(verbose=1, device="cpu", n_steps=1024, batch_size=2048, gamma=0.997,
+                  gae_lambda=0.95, learning_rate=3e-4, policy_kwargs=dict(net_arch=[64, 64]),
+                  tensorboard_log="./tb")
+    if args.caps_lambda > 0.0:
+        model = CAPS_PPO("MlpPolicy", venv, caps_lambda=args.caps_lambda, caps_sigma=args.caps_sigma, **common)
+        print(f"training CAPS-PPO (lambda={args.caps_lambda}, sigma={args.caps_sigma}): "
+              f"{args.steps} steps, {args.nenv} envs, net [64,64] ...")
+    else:
+        model = PPO("MlpPolicy", venv, **common)
+        print(f"training PPO: {args.steps} steps, {args.nenv} envs, net [64,64] ...")
     model.learn(total_timesteps=args.steps, progress_bar=False)
     model.save(args.out)
     venv.save(args.out + "_vecnorm.pkl")

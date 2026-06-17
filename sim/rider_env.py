@@ -81,8 +81,14 @@ class RiderBalanceEnv(gym.Env):
     def __init__(self, params: RiderParams = None, render_mode=None,
                  max_seconds: float = 10.0, target_x: float = 0.0, add_noise: bool = True,
                  domain_rand: bool = False, frame_stack: int = 1, pure_balance: bool = True,
-                 mirror_aug: bool = False, vel_pen: float = 0.0):
+                 mirror_aug: bool = False, vel_pen: float = 0.0, rate_dr: bool = True,
+                 pos_anchor: float = 0.0, pos_weight: float = 0.75):
         super().__init__()
+        # pos_weight: position-error^2 penalty when NOT pure_balance (position-aware end-to-end policy).
+        # The policy SEES x_err/x_int and learns the full cascade (position->lean->torque) itself, so it
+        # holds its spot WITHOUT a cruise -- the proper way to a smooth non-drifting balancer. Pairs with
+        # the high rate_pen below (the old position-aware attempt used 0.05 -> too twitchy on HW).
+        self.pos_weight = pos_weight
         self.p = params or DEFAULT
         self.frame_stack = frame_stack
         # vel_pen: penalize chassis fwd-velocity^2. pure_balance had NO velocity term, so a
@@ -93,6 +99,13 @@ class RiderBalanceEnv(gym.Env):
         # policy sees RAW velocity (not velocity error), so a large weight makes it fight the
         # firmware's commanded drive. mirror_aug handles the directional symmetry separately.
         self.vel_pen = vel_pen
+        self.rate_dr = rate_dr   # per-episode control-rate randomization (added 2026-06-16); ppo_v_pure predates it
+        # pos_anchor: SMALL position^2 penalty in pure_balance. Integrated x^2 explodes for a SUSTAINED
+        # cruise (the bias source) but is ~free for balance transients (small net displacement) -- so it
+        # breaks the creep WITHOUT mirror_aug and WITHOUT the velocity penalty's fight against balancing.
+        # The policy still doesn't SEE position (obs stays pure-balance, deployable as-is); it just learns
+        # not to sustain a velocity. Replaces the cruise as the smoothness mechanism. 0 = old behavior.
+        self.pos_anchor = pos_anchor
         # mirror_aug: the balancer is physically mirror-symmetric, so each episode we
         # randomly run it in a sign-flipped frame (obs and action negated). This makes the
         # training data exactly fwd/back symmetric -> VecNormalize means stay ~0 and the
@@ -193,10 +206,11 @@ class RiderBalanceEnv(gym.Env):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
         if self.domain_rand:
-            chz = self.np_random.uniform(*CONTROL_RATE_HZ)       # randomize the loop rate this episode
-            self.decim = max(1, round((1.0 / chz) / self.model.opt.timestep))
-            self.ctrl_dt = self.decim * self.model.opt.timestep
-            self.max_steps = int(self.max_seconds / self.ctrl_dt)
+            if self.rate_dr:
+                chz = self.np_random.uniform(*CONTROL_RATE_HZ)   # randomize the loop rate this episode
+                self.decim = max(1, round((1.0 / chz) / self.model.opt.timestep))
+                self.ctrl_dt = self.decim * self.model.opt.timestep
+                self.max_steps = int(self.max_seconds / self.ctrl_dt)
             self._randomize()                                    # rebuilds ActuatorModel with the new ctrl_dt
         # small random initial lean; starts resting on the wheel (chassis pos puts wheel on floor)
         # realistic "let go from a near-still hold": small lean, small pitch rate.
@@ -227,9 +241,9 @@ class RiderBalanceEnv(gym.Env):
         upright = np.cos(pitch)                        # ~1 upright
         # pure_balance: NO position objective (code does position). Heavy command-
         # smoothness to kill the on-robot shimmy (jerky velocity cmd = jerky cart accel).
-        pos_pen = 0.0 if self.pure_balance else 0.75 * (x - self.target_x) ** 2
+        pos_pen = (self.pos_anchor if self.pure_balance else self.pos_weight) * (x - self.target_x) ** 2
         act_pen = 0.02 * a ** 2                        # bumped 0.01->0.02: discourage riding the action rail
-        rate_pen = (0.30 if self.pure_balance else 0.05) * (a - self._prev_a) ** 2
+        rate_pen = 0.30 * (a - self._prev_a) ** 2      # high smoothness pressure in BOTH modes (was 0.05 non-pure)
         vel_pen = self.vel_pen * x_vel ** 2            # pin optimum at STATIONARY (kills the trained creep)
         reward = upright - pos_pen - act_pen - rate_pen - vel_pen
         if fell:
