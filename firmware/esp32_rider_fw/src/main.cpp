@@ -65,7 +65,9 @@ volatile float gKiVel = 0.0f;       // velocity I  (0 = pure pitch)
 volatile float gKpPit = 70.0f;      // pitch P     (lean error -> torque)
 volatile float gKdPit = 13.0f;      // pitch-rate damping (-Kd*dq)
 volatile float gImuZero = 0.0f;     // base lean trim (deg); setpoint carries the offset
-volatile float gSetpoint = 4.18f;   // measured true balance tilt (our frame); pitch = theta-set
+volatile float gSetpoint = 3.6f;    // balance tilt (our frame); pitch = theta-set. 4.18->3.6 (2026-06-17):
+                                    // with the symmetric mc_l4a policy, 3.6 keeps the forward-DRIVE lean near +3deg
+                                    // (vs +5.5 at 4.18) -> cut the low-speed forward launch shimmy ~27%; balance solid.
 volatile float gVx       = 0.0f;    // commanded forward velocity (0 = hold)
 volatile float gPolarity = 1.0f;    // +1 for cascade (pitDes-pitch order) = our verified tilt/rate sign
 volatile float gPosSign  = -1.0f;   // wheel vel/pos cascade sign (-1: our pitch axis is inverted vs factory)
