@@ -60,15 +60,17 @@ volatile bool  gEnabled  = false;   // balance OFF until 'en 1'
 // Pure pitch loop (outer cascade zeroed); factory cascade gains fought our torque-direct
 // actuation and oscillated. kppit/kdpit empirically tuned. set=measured balance angle.
 volatile float gKpPos = 0.0f;       // position P  (0 = pure pitch; outer loop off)
-volatile float gKpVel = 0.01f;      // velocity P  (gentle drift-damping; holds its spot)
+volatile float gKpVel = 0.05f;      // velocity P (middle loop). 0.05 = data-verified robust 2026-06-18: survives a nudge
+                                    // (bounded ~5deg transient, recovers, u never rails -- confirmed in rider-recorder log).
+                                    // The velocity loop is the limit-cycle engine: >=0.08 is large-signal unstable (a nudge
+                                    // -> saturated +/-58deg swing, both wheels common-mode). 0.05 keeps some chatter cut + stays robust.
 volatile float gKiVel = 0.0f;       // velocity I  (0 = pure pitch)
-volatile float gKpPit = 70.0f;      // pitch P     (lean error -> torque)
+volatile float gKpPit = 50.0f;      // pitch P (lean error -> torque). 50 = tuned 2026-06-18: 70 over-drove (more
+                                    // chatter + looser hold 0.39deg), 40 too soft (1.35deg); 50 = tightest hold (0.25) + least chatter.
 volatile float gKdPit = 13.0f;      // pitch-rate damping (-Kd*dq)
 volatile float gImuZero = 0.0f;     // base lean trim (deg); setpoint carries the offset
-volatile float gSetpoint = 4.18f;   // measured true balance tilt (our frame); pitch = theta-set. RESTORED 3.6->4.18
-                                    // (2026-06-18): 3.6 (the shimmy-cut value) sits 0.58deg off the mc_l4a policy's
-                                    // trained/measured balance point -> biases the policy's pitch-error input ->
-                                    // growing limit cycle -> fall. 4.18 = the config b22819a balanced on. 'set' to tune.
+volatile float gSetpoint = 3.6f;    // balance tilt (cascade branch); pitch = theta-set. 3.6 = the no-rearward-creep
+                                    // angle found on the robot 2026-06-18 (4.18 left a constant rearward drive). 'set' to tune.
 volatile float gVx       = 0.0f;    // commanded forward velocity (0 = hold)
 volatile float gPolarity = 1.0f;    // +1 for cascade (pitDes-pitch order) = our verified tilt/rate sign
 volatile float gPosSign  = -1.0f;   // wheel vel/pos cascade sign (-1: our pitch axis is inverted vs factory)
@@ -830,11 +832,14 @@ static void balanceTask(void*){
       // factory anti-deadzone min-magnitude (±5) + stiction boost (±10 past ±20)
       if(pitU > 0.0f && pitU < 5.0f) pitU = 5.0f; else if(pitU < 0.0f && pitU > -5.0f) pitU = -5.0f;
       if(pitU > gFFband) pitU += gFF; else if(pitU < -gFFband) pitU -= gFF;
-      u = gPolarity * (pitU + dqU);
-      u = clampf(u, -(float)gUMax, (float)gUMax);
+      float uraw = gPolarity * (pitU + dqU);
+      uF = gPolULP*uF + (1.0f-gPolULP)*uraw;   // OUTPUT low-pass: smooths the raw-PID chatter the way the
+                                               // policy's smooth NN is inherently clean. 'polulp' tunes (0=off=raw,
+                                               // higher=smoother but adds command lag -> can destabilize, like clp).
+      u = clampf(uF, -(float)gUMax, (float)gUMax);
     } else {
       pidReset(&pidPos); pidReset(&pidVel); pidReset(&pidPit);   // clear PID state when idle
-      casInit=false;                                            // re-init drive state on next enable
+      uF = 0.0f; casInit=false;                                 // reset output-LP + drive state for next enable
       if(!gEnabled && gTestTor!=0) u = (float)gTestTor;          // stand-only debug
     }
 #endif
