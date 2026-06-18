@@ -786,14 +786,44 @@ static void balanceTask(void*){
     }
 #else
     // ===== CASCADE controller (factory-style PID) -- ONLY in the -DCONTROLLER_CASCADE build =====
+    static bool casInit=false;          // cascade drive-state init on enable (mirrors the policy's polInit)
     if(gEnabled && !fallen){
       // live gains -> structs
       pidPos.Kp=gKpPos; pidVel.Kp=gKpVel; pidVel.Ki=gKiVel; pidPit.Kp=gKpPit;
+      // ---- DRIVE MANAGEMENT: the SAME gDriveVel velocity-drive interface as the policy build, so
+      //      the DS4 'dv' stick drives the cascade identically. Slew vdesS (accel-capped) toward the
+      //      stick speed; the position target gPosTargetEff tracks it; releasing the stick latches the
+      //      current spot as the new hold-home. The cascade then tracks gPosTargetEff (position loop)
+      //      with vdes as the velocity feedforward (replaces the old constant gVx). ----
+      float vdes = 0.0f, sdt = (dt>1e-4f ? dt : 0.004f);
+      if(!casInit){ gPosTarget=wheel_x; gPosTargetEff=wheel_x; vdesS=0.0f; casInit=true; }
+      else {
+        float damax = gPosAmax * sdt;
+        bool turning = (fabsf(gYawRateCmd) > 0.001f);
+        if(turning && !wasTurning){ gPosTarget=wheel_x; gPosTargetEff=wheel_x; }  // re-anchor home at the spin center
+        wasTurning = turning;
+        if(fabsf(gDriveVel) > 0.001f){                                   // VELOCITY DRIVE (stick held)
+          float vtgt = (gDriveVel < -gPosVmaxBack) ? -gPosVmaxBack : gDriveVel;
+          if(vtgt > vdesS+damax) vdesS+=damax; else if(vtgt < vdesS-damax) vdesS-=damax; else vdesS=vtgt;
+          gPosTarget=wheel_x; gPosTargetEff=wheel_x; wasVelDrive=true;
+        } else {                                                          // HOLD / 'ptgt' move (stick released)
+          if(wasVelDrive){ vdesS=0.0f; wasVelDrive=false; }
+          float dist=gPosTarget-gPosTargetEff;
+          float vstop=sqrtf(2.0f*gPosAmax*fabsf(dist));
+          float vcap=fminf((dist>=0.0f)?gPosVmax:gPosVmaxBack, vstop);
+          float vcmd=(dist>=0.0f)?vcap:-vcap;
+          if(vcmd > vdesS+damax) vdesS+=damax; else if(vcmd < vdesS-damax) vdesS-=damax; else vdesS=vcmd;
+          gPosTargetEff += vdesS*sdt;
+          if((dist>=0.0f && gPosTargetEff>gPosTarget)||(dist<0.0f && gPosTargetEff<gPosTarget)){ gPosTargetEff=gPosTarget; vdesS=0.0f; }
+        }
+        vdes = vdesS;
+      }
+      tTgtEff=gPosTargetEff; tVdes=vdes;                                   // driving telemetry
       // --- factory cascade: pos(P) -> vel target ; vel(PI) -> lean ; pitch(P) -> torque ---
-      // position error in the home frame: ZERO at enable (stable_pos==wheel_x), so no
-      // start kick regardless of the absolute odometer offset. Sign found empirically.
-      pidPos.Des = gPosErrSign * (wheel_x - stable_pos);  pidPos.FB = 0.0f;  calPID(&pidPos);
-      pidVel.Des = gVx + pidPos.U;      pidVel.FB = gPosSign * wheel_vx;  calPID(&pidVel);
+      // position error tracks the SLEWED target gPosTargetEff (stick-driven); ZERO at enable. vdes is the
+      // velocity feedforward, frame-matched to the gPosSign velocity feedback (verify drive DIR on robot).
+      pidPos.Des = gPosErrSign * (wheel_x - gPosTargetEff);  pidPos.FB = 0.0f;  calPID(&pidPos);
+      pidVel.Des = gPosSign * vdes + pidPos.U;  pidVel.FB = gPosSign * wheel_vx;  calPID(&pidVel);
       pidPit.Des = gImuZero + pidVel.U; pidPit.FB = pitchF;               calPID(&pidPit);
       float pitU = pidPit.U;
       float dqU  = clampf(-gKdPit * rateF, -gDqUMax, gDqUMax);   // pitch-rate damping (filtered rate)
@@ -804,6 +834,7 @@ static void balanceTask(void*){
       u = clampf(u, -(float)gUMax, (float)gUMax);
     } else {
       pidReset(&pidPos); pidReset(&pidVel); pidReset(&pidPit);   // clear PID state when idle
+      casInit=false;                                            // re-init drive state on next enable
       if(!gEnabled && gTestTor!=0) u = (float)gTestTor;          // stand-only debug
     }
 #endif
