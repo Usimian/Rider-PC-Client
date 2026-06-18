@@ -488,14 +488,11 @@ static void policyInferT(const float* obs, float* out){
 static void balanceTask(void*){
   for(int i=0;i<3;i++){ legTorqueOff(LEFT_LEG); legTorqueOff(RIGHT_LEG); wheelTorque(0,0); vTaskDelay(2); }
   wheelTorqueEnAll(0);   // LIMP the wheels at boot (reg 0x18=0 after the coast-kill): FREE until 'en 1'
-  // Assert velocity-open-loop mode (reg 0x11=0) on both wheels, like the factory SetVelOpenloop
-  // (RIG-Omni xgo.cc). 0x11 is persistent EEPROM; a stray servo write flipping it to a non-velocity
-  // mode silently kills balance -- the policy's wheel-VELOCITY commands stop tracking, it saturates
-  // and the robot falls (root cause 2026-06-18, cost an afternoon). Write only if not already 0.
-  { uint8_t m=0xFF; bool okL=servoReadN(LEFT_W,0x11,1,&m);  bool wrL=(!okL||m!=0); if(wrL) wheelSetReg(LEFT_W,0x11,0);
-    uint8_t mr=0xFF; bool okR=servoReadN(RIGHT_W,0x11,1,&mr); bool wrR=(!okR||mr!=0); if(wrR) wheelSetReg(RIGHT_W,0x11,0);
-    char b[80]; int k=snprintf(b,sizeof(b),"# wmode-init: L 0x11=%d%s R 0x11=%d%s (->velocity-open-loop)\n",
-                               okL?m:-1, wrL?" FIXED":"", okR?mr:-1, wrR?" FIXED":""); emit(b,k); }
+  // NOTE: wheel velocity-open-loop mode (reg 0x11=0) is "set and forget" -- it lives in the servo's
+  // persistent EEPROM and nothing in normal operation touches it. Set it ONCE with 'wmode 0' (done
+  // 2026-06-18) and it stays across reboots. We do NOT re-assert it at boot: that only guards against
+  // someone deliberately re-flipping it (i.e. us during servo work), and a boot-time servo write before
+  // the bus is settled is unreliable anyway (a flip-test proved it didn't take). See docs/servo_registers.md.
   calibrateGyro();                  // boot cal -> sets yaw bias + zeroes heading/pose (robot should be still)
   gGyroBias = -1.19f;               // ...but FORCE the pitch (balance) bias to the baked constant, so a
                                     // boot measurement on a moving robot can never break balance startup. 'gcal' re-measures both.
