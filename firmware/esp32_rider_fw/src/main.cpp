@@ -87,19 +87,6 @@ volatile float gPosErrSign = 1.0f;  // position-loop correction sign (empiricall
 #define CTRL_NAME "POL"
 #endif
 volatile float gPolSign  = 1.0f;    // action->wheel-command sign (verify on robot)
-volatile float gPolBias  = 0.0f;    // 'polbias' -> constant wheel-command offset added to the policy output.
-                                     // ppo_v_pure emits a constant ~-37 command at the upright equilibrium (a
-                                     // forward-creep bias baked into VecNormalize); that constant adds to backward
-                                     // drive (-> saturation/shimmy) and subtracts from forward. A constant offset
-                                     // is DYNAMICALLY NEUTRAL (leaves f's response identical, unlike antisym which
-                                     // rewrote the whole surface and broke driving) -> cancels the bias cleanly.
-                                     // Null it live: set so the resting hold command reads ~0.
-volatile bool  gPolAntisym = false; // 'polasym' -> anti-symmetrize the balance policy: g(s)=0.5*(f(s)-f(-s)).
-                                     // ppo_v_pure was trained without mirror_aug, so a forward creep got baked
-                                     // into VecNormalize -> a constant command bias at the upright equilibrium
-                                     // (~-37 on the bench) that broke fwd/back drive symmetry (back saturated).
-                                     // Anti-symmetrizing forces g(0)=0 (bias gone) WITHOUT mirror_aug's training-
-                                     // induced jitter. Costs one extra inference (sub-ms). 0 = raw asymmetric f.
 volatile bool  gPolJoint   = false; // use Stage-1 balance+turn policy ('polj'); 0 = legacy 1-output balancer
 volatile float gYawObsSign = 1.0f;  // sim yaw-rate OBS sign ('yawobssign'); verify on stand
 volatile float gPolTurnSign= 1.0f;  // turn-output sign ('poljsign'); verify on stand
@@ -787,17 +774,10 @@ static void balanceTask(void*){
         float obs[POL_OBS];                            // frame_stack=2: [prev_frame, curr_frame]
         for(int k=0;k<7;k++){ obs[k]=polPrevFrame[k]; obs[7+k]=frame[k]; }
         for(int k=0;k<7;k++) polPrevFrame[k]=frame[k];
-        float ainf;
-        if(gPolAntisym){                               // g(s)=0.5*(f(s)-f(-s)) -> odd, g(0)=0 (kills the bias)
-          float obsN[POL_OBS]; for(int k=0;k<POL_OBS;k++) obsN[k]=-obs[k];
-          ainf = 0.5f*(policyInfer(obs) - policyInfer(obsN));
-        } else {
-          ainf = policyInfer(obs);                     // raw asymmetric policy (A/B baseline)
-        }
+        float ainf = policyInfer(obs);
         uraw = gPolSign * ainf * POL_VELMAX_RADS * POL_RAW_PER_RADS; // raw wheel velocity cmd
       }
       { float ims=(micros()-ti0)*1e-3f; if(ims>inferMaxAcc) inferMaxAcc=ims; }   // INSTRUMENT
-      uraw += gPolBias;                        // cancel the policy's constant equilibrium-command bias (dyn. neutral)
       uF = gPolULP*uF + (1.0f-gPolULP)*uraw;   // low-pass the policy command -> kills the cycle-to-cycle shimmy
       u = clampf(uF, -(float)gUMax, (float)gUMax);
     } else {
@@ -987,8 +967,6 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"logdump")){ gLogDump=true; return; }                                // dump the held enable->fall balance log over USB
   // ('polrun' removed: controller is selected at BUILD time now -- see gPolMode at top. No runtime toggle.)
   else if (!strcmp(s,"polsign")) gPolSign=(v<0.0f?-1.0f:1.0f);  // flip action->wheel sign (verify on robot)
-  else if (!strcmp(s,"polasym")) gPolAntisym=(v!=0.0f);  // anti-symmetrize balance policy (kills upright bias)
-  else if (!strcmp(s,"polbias")) gPolBias=v;             // constant wheel-cmd offset to cancel the policy bias
   else if (!strcmp(s,"polulp"))  gPolULP=clampf(v,0.0f,0.95f);  // policy-output low-pass (0=off..0.95 heavy)
   else if (!strcmp(s,"polvlp"))  gPolVelLP=clampf(v,0.0f,0.97f);// policy velocity-OBS low-pass (kills quantization shimmy)
   else if (!strcmp(s,"poshold")) gPosHoldK=v;          // code position-hold P gain (deg/m); 0 = pure balance
