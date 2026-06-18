@@ -361,6 +361,14 @@ while True:
                 mqc.publish("rider/debug/dcap", line)
             except Exception:
                 pass
+    elif line.startswith("# cfg"):
+        # forward the firmware's servo config-register dump ('cfgdump <id>') over MQTT
+        # so wheel-servo registers can be inspected/compared without USB-C / passthrough fw.
+        if mqc is not None:
+            try:
+                mqc.publish("rider/debug/cfg", line)
+            except Exception:
+                pass
     # relay any queued commands to the ESP32
     while not cmd_q.empty():
         try:

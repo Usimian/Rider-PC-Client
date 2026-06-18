@@ -65,9 +65,10 @@ volatile float gKiVel = 0.0f;       // velocity I  (0 = pure pitch)
 volatile float gKpPit = 70.0f;      // pitch P     (lean error -> torque)
 volatile float gKdPit = 13.0f;      // pitch-rate damping (-Kd*dq)
 volatile float gImuZero = 0.0f;     // base lean trim (deg); setpoint carries the offset
-volatile float gSetpoint = 3.6f;    // balance tilt (our frame); pitch = theta-set. 4.18->3.6 (2026-06-17):
-                                    // with the symmetric mc_l4a policy, 3.6 keeps the forward-DRIVE lean near +3deg
-                                    // (vs +5.5 at 4.18) -> cut the low-speed forward launch shimmy ~27%; balance solid.
+volatile float gSetpoint = 4.18f;   // measured true balance tilt (our frame); pitch = theta-set. RESTORED 3.6->4.18
+                                    // (2026-06-18): 3.6 (the shimmy-cut value) sits 0.58deg off the mc_l4a policy's
+                                    // trained/measured balance point -> biases the policy's pitch-error input ->
+                                    // growing limit cycle -> fall. 4.18 = the config b22819a balanced on. 'set' to tune.
 volatile float gVx       = 0.0f;    // commanded forward velocity (0 = hold)
 volatile float gPolarity = 1.0f;    // +1 for cascade (pitDes-pitch order) = our verified tilt/rate sign
 volatile float gPosSign  = -1.0f;   // wheel vel/pos cascade sign (-1: our pitch axis is inverted vs factory)
@@ -159,10 +160,10 @@ static const float POL_DEG2RAD     = 0.017453292f;
 static const float POL_WHEEL_R     = 0.03f;      // wheel radius (m) -> x_vel = wheel_omega*r
 static const float POL_VELMAX_RADS = 30.0f;      // action=1 -> 30 rad/s (sim vel_max)
 static const float POL_RAW_PER_RADS= 7.764f;     // raw wheel-cmd per rad/s (1/0.1288, measured)
-volatile int   gUMax     = 450;     // output clamp (current limit). 1000 browned out ID21 (shared 8.4V
+volatile int   gUMax     = 400;     // output clamp (current limit). 1000 browned out ID21 (shared 8.4V
                                     // rail sags under high wheel current -> right wheel drops off the bus
-                                    // -> latched runaway). 450 = below the free-spin hold (500); NOT yet
-                                    // validated under real balancing load. 'umax' to tune from real data.
+                                    // -> latched runaway). 400 (Marc, 2026-06-18) = below the free-spin hold
+                                    // (500), runaway guard for the first armed balance test. 'umax' to tune.
 volatile float gFF       = 10.0f;   // stiction boost beyond +/-FFband (factory: +10 past 20)
 volatile float gFFband   = 20.0f;   // boost threshold
 volatile float gDqUMax   = 60.0f;   // clamp on rate-damping term
@@ -487,6 +488,14 @@ static void policyInferT(const float* obs, float* out){
 static void balanceTask(void*){
   for(int i=0;i<3;i++){ legTorqueOff(LEFT_LEG); legTorqueOff(RIGHT_LEG); wheelTorque(0,0); vTaskDelay(2); }
   wheelTorqueEnAll(0);   // LIMP the wheels at boot (reg 0x18=0 after the coast-kill): FREE until 'en 1'
+  // Assert velocity-open-loop mode (reg 0x11=0) on both wheels, like the factory SetVelOpenloop
+  // (RIG-Omni xgo.cc). 0x11 is persistent EEPROM; a stray servo write flipping it to a non-velocity
+  // mode silently kills balance -- the policy's wheel-VELOCITY commands stop tracking, it saturates
+  // and the robot falls (root cause 2026-06-18, cost an afternoon). Write only if not already 0.
+  { uint8_t m=0xFF; bool okL=servoReadN(LEFT_W,0x11,1,&m);  bool wrL=(!okL||m!=0); if(wrL) wheelSetReg(LEFT_W,0x11,0);
+    uint8_t mr=0xFF; bool okR=servoReadN(RIGHT_W,0x11,1,&mr); bool wrR=(!okR||mr!=0); if(wrR) wheelSetReg(RIGHT_W,0x11,0);
+    char b[80]; int k=snprintf(b,sizeof(b),"# wmode-init: L 0x11=%d%s R 0x11=%d%s (->velocity-open-loop)\n",
+                               okL?m:-1, wrL?" FIXED":"", okR?mr:-1, wrR?" FIXED":""); emit(b,k); }
   calibrateGyro();                  // boot cal -> sets yaw bias + zeroes heading/pose (robot should be still)
   gGyroBias = -1.19f;               // ...but FORCE the pitch (balance) bias to the baked constant, so a
                                     // boot measurement on a moving robot can never break balance startup. 'gcal' re-measures both.
