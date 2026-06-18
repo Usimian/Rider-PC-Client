@@ -75,7 +75,16 @@ volatile float gPosErrSign = 1.0f;  // position-loop correction sign (empiricall
 // ---- neural-policy control (ADDITIVE; PID stays the default). 'pol 1' to enable. ----
 // SIM-TRAINED, NOT YET HW-VERIFIED. Obs/action signs almost certainly need an
 // on-robot check (flip with 'polsign', and watch the obs match the sim's SI units).
-volatile bool  gPolMode  = false;   // 'pol 1' -> run the trained policy instead of the PID
+// Controller is chosen at BUILD time, not runtime. The control loop is split by #ifdef so each
+// binary contains EXACTLY ONE controller -- there is no runtime mode flag to drop or mis-set.
+// Default build = POLICY; the cascade lives ONLY in the -DCONTROLLER_CASCADE build (env:esp32_cascade).
+#ifdef CONTROLLER_CASCADE
+#define POLICY_BUILD 0
+#define CTRL_NAME "CAS"
+#else
+#define POLICY_BUILD 1
+#define CTRL_NAME "POL"
+#endif
 volatile float gPolSign  = 1.0f;    // action->wheel-command sign (verify on robot)
 volatile float gPolBias  = 0.0f;    // 'polbias' -> constant wheel-command offset added to the policy output.
                                      // ppo_v_pure emits a constant ~-37 command at the upright equilibrium (a
@@ -150,7 +159,10 @@ static const float POL_DEG2RAD     = 0.017453292f;
 static const float POL_WHEEL_R     = 0.03f;      // wheel radius (m) -> x_vel = wheel_omega*r
 static const float POL_VELMAX_RADS = 30.0f;      // action=1 -> 30 rad/s (sim vel_max)
 static const float POL_RAW_PER_RADS= 7.764f;     // raw wheel-cmd per rad/s (1/0.1288, measured)
-volatile int   gUMax     = 1000;    // output clamp = factory pid_pit.UMax class (was throttled to 110)
+volatile int   gUMax     = 450;     // output clamp (current limit). 1000 browned out ID21 (shared 8.4V
+                                    // rail sags under high wheel current -> right wheel drops off the bus
+                                    // -> latched runaway). 450 = below the free-spin hold (500); NOT yet
+                                    // validated under real balancing load. 'umax' to tune from real data.
 volatile float gFF       = 10.0f;   // stiction boost beyond +/-FFband (factory: +10 past 20)
 volatile float gFFband   = 20.0f;   // boost threshold
 volatile float gDqUMax   = 60.0f;   // clamp on rate-damping term
@@ -179,11 +191,12 @@ volatile bool  gOdoReset=true;            // 'odoreset' + each gyro-cal -> loop 
 volatile bool  gPosZeroReq=false;         // 'poszero' (controller button) -> loop re-zeros the distance frame WITHOUT dropping balance
 // --- drive-capture: high-rate commanded-vs-actual wheel velocity + pitch, WHILE balancing/driving ---
 // (the sim can't model the real servo under load; this catches commanded(u) vs actual(encoder v) divergence)
-#define DCAP_N 256
-volatile bool gDcArm=false;               // true = capturing; set by 'drivecap', cleared when buffer full
-volatile bool gDcReady=false;             // full -> loop() dumps it (non-blocking; control task keeps balancing)
+#define DCAP_N 600                        // ~3.7s @ ~163Hz: enough for a full enable->balance->fall episode
+volatile bool gDcArm=false;               // true = capturing (auto-armed on 'en 1', stopped on 'en 0' or full)
+volatile bool gDcReady=false;             // capture stopped/full -> data HELD until 'logdump'
+volatile bool gLogDump=false;             // 'logdump' -> loop() emits the held balance log over USB
 static uint32_t dcT[DCAP_N]; static int16_t dcCmd[DCAP_N]; static int16_t dcV[DCAP_N];
-static uint8_t  dcWid[DCAP_N]; static int16_t dcP[DCAP_N]; static int dcIdx=0;
+static uint8_t  dcWid[DCAP_N]; static int16_t dcP[DCAP_N]; static int16_t dcR[DCAP_N]; static int dcIdx=0;
 volatile float gYawBias=0.0f;             // gyro-Z zero-rate bias (deg/s), from calibrateGyro
 volatile float gVbatK=3.0f;              // GPIO33 divider ratio: pack = pin*K. Schematic R8=20K(top)/R7=10K(bot) => x3.0
 // 2S pack (net VCC8.4V): 8.4V full, 6.0V empty -> linear % for display.
@@ -245,8 +258,11 @@ static void imuData(int16_t*ax,int16_t*ay,int16_t*az,int16_t*gx,int16_t*gy,int16
 // ID11's reply) -> silent until power-cycle. Reproduced + fixed 2026-06-12.
 static void busSettle(){
   Serial2.flush();                                  // wait for our TX to finish
-  uint32_t t0=micros();
-  while(micros()-t0 < 700) if(Serial2.available()) Serial2.read();  // consume echo+reply, leave bus idle
+  uint32_t t0=micros(), last=t0;
+  while(micros()-t0 < 700){                          // hard cap 700us (startup/config writes)
+    if(Serial2.available()){ Serial2.read(); last=micros(); }      // consume echo (+ any reply)
+    else if(micros()-last > 80) break;               // bus idle >80us -> drained; leave early so the
+  }                                                  // per-loop wheelTorque settle stays cheap (~0.3ms).
 }
 static void legTorqueOff(uint8_t id){   // standard 1-byte write reg 0x18 = 0
   while(Serial2.available()) Serial2.read();
@@ -266,7 +282,9 @@ static void wheelTorque(int16_t tl,int16_t tr){  // SYNC_WRITE reg 0x1E both whe
   buf[7]=LEFT_W;  buf[8]=0;buf[9]=0;  buf[10]=tl&0xFF; buf[11]=(tl>>8)&0xFF;
   buf[12]=RIGHT_W;buf[13]=0;buf[14]=0;buf[15]=tr&0xFF; buf[16]=(tr>>8)&0xFF;
   uint8_t chk=0; for(int i=2;i<17;i++) chk+=buf[i]; buf[17]=~chk;
-  Serial2.write(buf,18); Serial2.flush();
+  Serial2.write(buf,18); busSettle();   // drain TX echo + leave bus idle -- WITHOUT this the next
+                                        // loop's RIGHT_W (ID21) read collided with stragglers under
+                                        // drive load -> ID21 dropped off the bus (failR>12 -> fault).
 }
 // Torque enable/disable BOTH wheels via one SYNC_WRITE to reg 0x18 (broadcast 0xFE ->
 // NO status reply per FeeTech protocol). Replaces back-to-back addressed wheelSetReg
@@ -278,7 +296,7 @@ static void wheelTorqueEnAll(uint8_t on){
   buf[7]=LEFT_W; buf[8]=on;
   buf[9]=RIGHT_W;buf[10]=on;
   uint8_t chk=0; for(int i=2;i<11;i++) chk+=buf[i]; buf[11]=~chk;
-  Serial2.write(buf,12); Serial2.flush();
+  Serial2.write(buf,12); busSettle();   // drain echo + bus idle (same ID21-dropout fix)
 }
 // Factory R-1.1.3 wheel command (WritePos_Sync_kp): SYNC_WRITE reg 0x1E carrying
 // per-servo [position(2), torque(2)] — the servo's internal position loop drives
@@ -289,7 +307,9 @@ static void wheelPosTor(int16_t pl,int16_t pr,int16_t tl,int16_t tr){
   buf[7]=LEFT_W;  buf[8]=pl&0xFF;buf[9]=(pl>>8)&0xFF;  buf[10]=tl&0xFF; buf[11]=(tl>>8)&0xFF;
   buf[12]=RIGHT_W;buf[13]=pr&0xFF;buf[14]=(pr>>8)&0xFF; buf[15]=tr&0xFF; buf[16]=(tr>>8)&0xFF;
   uint8_t chk=0; for(int i=2;i<17;i++) chk+=buf[i]; buf[17]=~chk;
-  Serial2.write(buf,18); Serial2.flush();
+  Serial2.write(buf,18); busSettle();   // drain TX echo + leave bus idle -- WITHOUT this the next
+                                        // loop's RIGHT_W (ID21) read collided with stragglers under
+                                        // drive load -> ID21 dropped off the bus (failR>12 -> fault).
 }
 // Read present pos (10-bit) + vel (signed) from reg 0x24. Half-duplex: flush RX
 // first to drop the TX echo; reply frame is FF FF id 0x0B ... (LEN filter).
@@ -466,6 +486,7 @@ static void policyInferT(const float* obs, float* out){
 // ---------------- balance task (core 1) ----------------
 static void balanceTask(void*){
   for(int i=0;i<3;i++){ legTorqueOff(LEFT_LEG); legTorqueOff(RIGHT_LEG); wheelTorque(0,0); vTaskDelay(2); }
+  wheelTorqueEnAll(0);   // LIMP the wheels at boot (reg 0x18=0 after the coast-kill): FREE until 'en 1'
   calibrateGyro();                  // boot cal -> sets yaw bias + zeroes heading/pose (robot should be still)
   gGyroBias = -1.19f;               // ...but FORCE the pitch (balance) bias to the baked constant, so a
                                     // boot measurement on a moving robot can never break balance startup. 'gcal' re-measures both.
@@ -637,7 +658,11 @@ static void balanceTask(void*){
     // in gradually at posvmax, so driving never trips the guard; only a genuine track loss
     // (wheel_x lags the slewed target by >gMaxPosErr) does. Before policy init (fresh enable)
     // reference current position so the in-branch homing isn't locked out. Non-policy: enable home.
-    float posRef = gPolMode ? (polInit ? gPosTargetEff : wheel_x) : stable_pos;
+#if POLICY_BUILD
+    float posRef = polInit ? gPosTargetEff : wheel_x;   // policy: measure runaway from the slewed target
+#else
+    float posRef = stable_pos;                          // cascade: home position
+#endif
     bool fallen = (fabsf(qErr) > gFallDeg) || (fabsf(wheel_x - posRef) > gMaxPosErr);
     gFallen = fallen;                          // expose to the LED status (loop() reads it)
     if(gPosZeroReq){                           // re-zero the distance frame mid-balance: odometer + target + slew
@@ -649,7 +674,9 @@ static void balanceTask(void*){
     }
     float u = 0.0f;
     float turnPol = 0.0f;          // Stage-1 turn-policy turn output (raw wheel cmd); used by the output stage
-    if(gEnabled && !fallen && gPolMode){
+#if POLICY_BUILD
+    // ===== POLICY controller -- the ONLY controller in the default build =====
+    if(gEnabled && !fallen){
       // ---- neural-policy control: PURE balancer + code-based position hold ----
       // Pitch sign flipped to the sim frame (MEASURED: forward lean -> th DECREASES,
       // but sim wants forward=+pitch). Position handled in CODE: bias the setpoint
@@ -767,7 +794,13 @@ static void balanceTask(void*){
       uraw += gPolBias;                        // cancel the policy's constant equilibrium-command bias (dyn. neutral)
       uF = gPolULP*uF + (1.0f-gPolULP)*uraw;   // low-pass the policy command -> kills the cycle-to-cycle shimmy
       u = clampf(uF, -(float)gUMax, (float)gUMax);
-    } else if(gEnabled && !fallen){
+    } else {
+      polInit = false;                                          // re-init policy episode on next enable
+      if(!gEnabled && gTestTor!=0) u = (float)gTestTor;         // stand-only debug
+    }
+#else
+    // ===== CASCADE controller (factory-style PID) -- ONLY in the -DCONTROLLER_CASCADE build =====
+    if(gEnabled && !fallen){
       // live gains -> structs
       pidPos.Kp=gKpPos; pidVel.Kp=gKpVel; pidVel.Ki=gKiVel; pidPit.Kp=gKpPit;
       // --- factory cascade: pos(P) -> vel target ; vel(PI) -> lean ; pitch(P) -> torque ---
@@ -785,9 +818,9 @@ static void balanceTask(void*){
       u = clampf(u, -(float)gUMax, (float)gUMax);
     } else {
       pidReset(&pidPos); pidReset(&pidVel); pidReset(&pidPit);   // clear PID state when idle
-      polInit = false;                                           // re-init policy episode on next enable
       if(!gEnabled && gTestTor!=0) u = (float)gTestTor;          // stand-only debug
     }
+#endif
     // Output: drive wheels only when actively balancing (or stand-test). When idle,
     // DISABLE wheel torque (reg 0x18=0) so the wheels go limp instead of holding pos-0.
     static int8_t ditherSign = 1;
@@ -844,7 +877,7 @@ static void balanceTask(void*){
     // drive-capture sample (commanded u vs actual encoder v, per wheel, + pitch) at loop rate
     if(gDcArm && dcIdx<DCAP_N){
       dcT[dcIdx]=micros(); dcCmd[dcIdx]=(int16_t)u; dcV[dcIdx]=(int16_t)v;
-      dcWid[dcIdx]=rdWid; dcP[dcIdx]=(int16_t)(theta*100.0f); dcIdx++;
+      dcWid[dcIdx]=rdWid; dcP[dcIdx]=(int16_t)(theta*100.0f); dcR[dcIdx]=(int16_t)(rate*10.0f); dcIdx++;
       if(dcIdx>=DCAP_N){ gDcArm=false; gDcReady=true; }
     }
 
@@ -868,6 +901,7 @@ void setup(){
   Serial1.begin(115200, SERIAL_8N1, 4, 5);   // UART1 -> Raspberry Pi (RX=IO4, TX=IO5)
   Serial2.begin(1000000, SERIAL_8N1, 13, 14);
   for(int i=0;i<3;i++){ legTorqueOff(LEFT_LEG); legTorqueOff(RIGHT_LEG); wheelTorque(0,0); delay(3); }
+  wheelTorqueEnAll(0);   // LIMP the wheels at boot (reg 0x18=0 after the coast-kill): FREE until 'en 1'
 
   Wire.begin(SDA_PIN, SCL_PIN, 400000);
   delay(200);
@@ -903,7 +937,7 @@ static void applyCmd(char* s){
   char* sp=s; while(*sp && *sp!=' ') sp++;
   float v=0;
   if(*sp){ *sp=0; v=atof(sp+1); }
-  if      (!strcmp(s,"en"))  { gEnabled=(v!=0.0f); gTurn=0.0f; gYawRateCmd=0.0f; gDriveVel=0.0f; if(gEnabled){ gWheelFault=0; wheel1_x=0; wheel2_x=0; wheel_x=0; stable_pos=0.0f; gPosTarget=0.0f; gHdgTarget=0.0f; gOdoReset=true; } }  // enable: clear fault + ZERO the position frame (wheel odometer + PID home + target + dead-reckoned pose) so current pos and target both start at 0; stable_pos MUST zero with wheel_x or PID-mode posErr = -(old home) trips the runaway cutout on re-enable; zero any turn
+  if      (!strcmp(s,"en"))  { gEnabled=(v!=0.0f); gTurn=0.0f; gYawRateCmd=0.0f; gDriveVel=0.0f; if(gEnabled){ gWheelFault=0; wheel1_x=0; wheel2_x=0; wheel_x=0; stable_pos=0.0f; gPosTarget=0.0f; gHdgTarget=0.0f; gOdoReset=true; dcIdx=0; gDcReady=false; gDcArm=true; } else { gDcArm=false; gDcReady=true; } }  // enable: clear fault + ZERO the position frame (wheel odometer + PID home + target + dead-reckoned pose) so current pos and target both start at 0; stable_pos MUST zero with wheel_x or PID-mode posErr = -(old home) trips the runaway cutout on re-enable; zero any turn
   else if (!strcmp(s,"d"))     gEnabled=false;
   else if (!strcmp(s,"kppos")) gKpPos=v;               // cascade gains
   else if (!strcmp(s,"kpvel")) gKpVel=v;
@@ -944,7 +978,8 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"gcal")){ gDoGcal=true; return; } // recalibrate gyro bias (hold still)
   else if (!strcmp(s,"stepcap")){ if(v!=0.0f) gStepCmd=(int)v; gStepCap=true; return; } // wheel step-response capture
   else if (!strcmp(s,"drivecap")){ dcIdx=0; gDcReady=false; gDcArm=true; return; }       // arm high-rate cmd-vs-actual capture (run WHILE balancing/driving)
-  else if (!strcmp(s,"polrun")) gPolMode=(v!=0.0f);   // neural-policy control on/off (additive; PID is default; 'pol' is gPolarity!)
+  else if (!strcmp(s,"logdump")){ gLogDump=true; return; }                                // dump the held enable->fall balance log over USB
+  // ('polrun' removed: controller is selected at BUILD time now -- see gPolMode at top. No runtime toggle.)
   else if (!strcmp(s,"polsign")) gPolSign=(v<0.0f?-1.0f:1.0f);  // flip action->wheel sign (verify on robot)
   else if (!strcmp(s,"polasym")) gPolAntisym=(v!=0.0f);  // anti-symmetrize balance policy (kills upright bias)
   else if (!strcmp(s,"polbias")) gPolBias=v;             // constant wheel-cmd offset to cancel the policy bias
@@ -1044,8 +1079,8 @@ void loop(){
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
     char b[640];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f polrun=%d poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d\n",
-      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gKpPit, gKdPit, gKpPos, gKpVel, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, gPolMode, gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR);
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d\n",
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gKpPit, gKdPit, gKpPos, gKpVel, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, CTRL_NAME, gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR);
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     if(gPolJoint && k>0){                        // Stage-1 turn-policy diagnostics (obs + outputs)
       k--;                                       // drop trailing '\n'
@@ -1057,13 +1092,16 @@ void loop(){
   }
   // drive-capture dump: buffer filled by the control task -> emit here (loop() task), so the
   // control task keeps balancing while we stream ~256 lines. Yield periodically (WDT + control).
-  if(gDcReady){
-    for(int i=0;i<DCAP_N;i++){
-      char b[64]; int k=snprintf(b,sizeof(b),"# dcap %d %lu %d %d %d %d\n",
-                                 i,(unsigned long)dcT[i],(int)dcCmd[i],(int)dcWid[i],(int)dcV[i],(int)dcP[i]);
+  if(gLogDump){
+    int n = (dcIdx>DCAP_N)?DCAP_N:dcIdx;                 // captured sample count, held since 'en 1'
+    { char h[56]; int hk=snprintf(h,sizeof(h),"# dcap n=%d cols: i t_us u wid v th_x100 rate_x10\n",n); emit(h,hk); }
+    for(int i=0;i<n;i++){
+      char b[72]; int k=snprintf(b,sizeof(b),"# dcap %d %lu %d %d %d %d %d\n",
+                                 i,(unsigned long)dcT[i],(int)dcCmd[i],(int)dcWid[i],(int)dcV[i],(int)dcP[i],(int)dcR[i]);
       emit(b,k);
       if((i & 15)==0) delay(1);
     }
-    emit("# dcap done\n",12); gDcReady=false; dcIdx=0;
+    { char d[16]; int dk=snprintf(d,sizeof(d),"# dcap done\n"); emit(d,dk); }
+    gLogDump=false;
   }
 }

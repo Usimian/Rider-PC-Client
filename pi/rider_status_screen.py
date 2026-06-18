@@ -279,6 +279,19 @@ def draw_battery(d, x, y, pct, font, w=50, h=26):
     d.text((bx0 + (w - _text_w(d, s, font)) // 2, by0 + 4), s, fill=(0, 0, 0), font=font)
 
 
+def wifi_connected():
+    """True if a wlan interface is operationally up (associated). NOTE: iwgetid/`iw` report
+    nothing on this Pi's brcmfmac driver, but /sys operstate is reliable. Fast file read, no
+    subprocess -- safe to call every render."""
+    try:
+        for p in glob.glob("/sys/class/net/wl*/operstate"):
+            if open(p).read().strip() == "up":
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def render():
     img = Image.new("RGB", (320, 240), BG)
     d = ImageDraw.Draw(img)
@@ -289,8 +302,8 @@ def render():
     # title turns blue when a controller (DS4) is connected, white otherwise
     d.text((10, 6), "RIDER",
            fill=(80, 160, 255) if controller_connected() else (255, 255, 255), font=f_l)
-    # MQTT link dot
-    d.ellipse((92, 18, 104, 30), fill=(0, 200, 120) if mq_ok else (110, 110, 110))
+    # WiFi link dot (next to RIDER): green = wlan associated, grey = down -- the "can I reach the Pi" signal
+    d.ellipse((92, 18, 104, 30), fill=(0, 200, 120) if wifi_connected() else (110, 110, 110))
     # battery (header, between title and badge): iPhone-style icon, % inside, no voltage
     batt = int(tel.get("batt", 0))
     draw_battery(d, 112, 11, batt, f_s)
