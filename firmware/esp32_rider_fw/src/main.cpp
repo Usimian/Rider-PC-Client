@@ -59,9 +59,12 @@ volatile bool  gEnabled  = false;   // balance OFF until 'en 1'
 // --- DEFAULTS = first config that actually balanced (2026-06-12, two good wheels) ---
 // Pure pitch loop (outer cascade zeroed); factory cascade gains fought our torque-direct
 // actuation and oscillated. kppit/kdpit empirically tuned. set=measured balance angle.
-volatile float gKpPos = 15.0f;      // position P (outer loop). 0->15 (2026-06-18): position hold ON by default
-                                    // -- the operating mode now that the velocity integral (gKiVel) clears the SSE.
-                                    // 'kppos 0' for a bare-balance isolation test.
+volatile float gKpPos = 0.0f;       // position P (outer loop). 15->0 (2026-06-19, FLOOR): position HOMING OFF.
+                                    // The factory had no position homing and no offset problem; our position loop
+                                    // was self-inflicted -- on the floor it fought stiction, parked ~10cm off-target,
+                                    // and the integral needed to break loose wound up unstable. With the corrected
+                                    // setpoint (3.55) the balance is unbiased and HOLDS STATION on its own (0 drift
+                                    // over 24s, floor-verified). 'kppos N' to re-enable (needs anti-windup first).
 volatile float gKpVel = 0.05f;      // velocity P (middle loop). 0.05 = data-verified robust 2026-06-18: survives a nudge
                                     // (bounded ~5deg transient, recovers, u never rails -- confirmed in rider-recorder log).
                                     // The velocity loop is the limit-cycle engine: >=0.08 is large-signal unstable (a nudge
@@ -73,12 +76,31 @@ volatile float gKiVel = 0.01f;      // velocity I (middle loop). 0->0.01 (2026-0
                                     // reset, near-setpoint I-weaken). Conservative start; tune up via 'kivel' if slow.
 volatile float gKpPit = 50.0f;      // pitch P (lean error -> torque). 50 = tuned 2026-06-18: 70 over-drove (more
                                     // chatter + looser hold 0.39deg), 40 too soft (1.35deg); 50 = tightest hold (0.25) + least chatter.
-volatile float gKdPit = 2.3f;       // pitch-rate damping (-Kd*dq). 13->2.3 (2026-06-18): the factory value;
-                                    // killed the ~14Hz shimmy (u std 52->26, sign-flips ~0, hold tight 0.25-0.30deg).
+volatile float gKdPit = 10.0f;      // pitch-rate damping (-Kd*dq). 2.3->10 (2026-06-19, FLOOR): 2.3 was tuned on the
+                                    // STAND (which masks floor dynamics) and left a violent wheel oscillation on the
+                                    // floor (wv_rms 6.4, peak 20 -> diverged/fell). 10 = floor-tuned sweet spot:
+                                    // wv_rms 2.9, peak 5, pitch +-0.2deg; past 10 stops helping. live-tune via 'kdpit'.
 volatile float gImuZero = 0.0f;     // base lean trim (deg); setpoint carries the offset
-volatile float gSetpoint = 3.64f;   // balance tilt (cascade branch); pitch = theta-set. 3.64 = MEASURED balance point:
-                                    // 10s avg of th while balancing (std 0.59, wv ~0 = parked) 2026-06-18. Matches the
-                                    // earlier 3.6 no-rearward-creep angle; refined to the measured mean. 'set' to tune.
+volatile float gSetpoint = 3.55f;   // balance tilt (cascade branch); pitch = theta-set. 3.64->3.55 (2026-06-19, FLOOR):
+                                    // 3.64 was measured WITH the position loop active, which biased it; bare-balance
+                                    // (kppos=0) crept backward at 3.64. 3.55 = true no-creep balance point: 0.0 mm/s
+                                    // drift over 24s on the floor. (Higher = rearward drive; 4.18 was constant rearward.)
+// ---- LQR full-state feedback (ported from RIG-Omni hover/xgo.cc 2026-06-19) ----
+// The factory's ACTUAL controller is a flat LQR: u = -(Kx*x + Kvx*vx + Kq*q + Kdq*dq), NOT a nested
+// cascade (their cascade is commented out). Same torque-direct actuation + same units as us (wheel_x in m,
+// pitch in deg -- identical formulas), so the factory gains transfer directly. Replaces the cascade to
+// kill the shimmy (no inter-loop lag) + give clean position hold (one flat term, no stick-slip/windup).
+// FACTORY VALUES: Kx=1400, Kvx=6.8, Kq=32, Kdq=1.6. We START pos/vel at 0 so the first floor test is a
+// pure pitch+rate balancer (sign anchored to our proven balance), then dial Kx->1400 / Kvx->6.8 on the
+// FLOOR verifying the restoring sign (if it drives away, use a negative gain). Live: 'lqrx/lqrvx/lqrq/lqrdq'.
+volatile float gLqrX  = -500.0f;    // position-error gain. FLOOR-TUNED 2026-06-19: NEGATIVE (our wheel frame is
+                                    // inverted vs factory's +1400, which diverges here). Sweet spot -500 (holds tight,
+                                    // stable; -600 plateaus, -700 diverges). 'lqrx' to tune.
+volatile float gLqrVx = -6.0f;      // velocity-error gain (damping). NEGATIVE (frame-inverted). -6 w/ vlp=0.85 holds
+                                    // ~4.7mm; cliff ~-7. Capped by quantization-noisy encoder velocity -> velocity
+                                    // observer (gObsA/B below) gives a cleaner v -> allows more damping. 'lqrvx'.
+volatile float gLqrQ  = 32.0f;      // pitch-error gain (factory 32) -- balances; sign matches our working PD
+volatile float gLqrDq = 1.6f;       // pitch-rate gain (factory 1.6) -- factory uses far less than our cascade kd
 volatile float gVx       = 0.0f;    // commanded forward velocity (0 = hold)
 volatile float gPolarity = 1.0f;    // +1 for cascade (pitDes-pitch order) = our verified tilt/rate sign
 volatile float gPosSign  = -1.0f;   // wheel vel/pos cascade sign (-1: our pitch axis is inverted vs factory)
@@ -88,10 +110,11 @@ volatile float gPosErrSign = 1.0f;  // position-loop correction sign (empiricall
 // on-robot check (flip with 'polsign', and watch the obs match the sim's SI units).
 // Controller is chosen at BUILD time, not runtime. The control loop is split by #ifdef so each
 // binary contains EXACTLY ONE controller -- there is no runtime mode flag to drop or mis-set.
-// Default build = POLICY; the cascade lives ONLY in the -DCONTROLLER_CASCADE build (env:esp32_cascade).
+// Default build = POLICY; the LQR controller lives ONLY in the -DCONTROLLER_CASCADE build
+// (env:esp32_cascade -- name is historical; it now carries the factory-style LQR, not the old cascade).
 #ifdef CONTROLLER_CASCADE
 #define POLICY_BUILD 0
-#define CTRL_NAME "CAS"
+#define CTRL_NAME "LQR"
 #else
 #define POLICY_BUILD 1
 #define CTRL_NAME "POL"
@@ -239,7 +262,10 @@ static const float GYRO_LSB_PER_DPS = 16.4f;
 // wheel encoder constants (match RIG-Omni xgo.cc exactly)
 static const float WHEEL_PI = 3.14159265f;
 static const float K_V = 60.0f * WHEEL_PI / 1024.0f;  // raw-vel -> scaled vel
-static const float LP_VEL = 0.7f;                     // velocity low-pass
+volatile float LP_VEL = 0.85f;                        // wheel-velocity feedback low-pass. 0.7->0.85 (2026-06-19, FLOOR):
+                                                      // smoother wheel_vx pushed the lqrvx damping cliff higher (-6 vs -5)
+                                                      // -> hold ~4.7mm. RUNTIME-TUNABLE via 'vlp'
+                                                      // (higher = smoother wheel_vx -> less velocity-loop buzz, more lag)
 static const float WHEEL_CIRC_M = WHEEL_PI * 0.06f;   // 6 cm wheels
 
 // ---------------- IMU ----------------
@@ -401,23 +427,6 @@ static int   last11=-1, last21=-1;
 static float wheel_x=0, wheel_vx=0;        // fused: meters, scaled vel
 static float gHdgTarget=0;                 // heading-lock target = (wheel1_x - wheel2_x) to hold
 static float stable_pos=0;                 // home position (m), captured on enable
-// Faithful copy of factory CalIWeakenPID (RIG-Omni xgo.cc:715) + struct (xgo.h).
-struct PID { float Des,FB,Kp,Ki,Kd,E,PreE,SumE,U,UMax,EMax,EMin,Up,PMax,Ui,IMax,Ud,DMax; };
-static PID pidPos = {0,0, 60.0f, 0.0f,    0,0,0,0,0, 1000,100, 0.0001f, 0,1000, 0,1000, 0,1000};
-static PID pidVel = {0,0, 0.15f, 0.01f,   0,0,0,0,0,  100,100, 0.01f,   0, 100, 0, 100, 0, 100};
-static PID pidPit = {0,0, 21.0f, 0.0f,    0,0,0,0,0, 1000,  0, 0.01f,   0,1000, 0,1000, 0, 100};
-static void calPID(PID* p){
-  p->E = p->Des - p->FB;
-  if(p->E * p->PreE < 0){ p->Ui = 0; p->SumE = 0; }       // reset I on error sign-flip
-  p->SumE += p->E;
-  if(p->EMax > 0) p->SumE = clampf(p->SumE, -p->EMax, p->EMax);
-  p->Ui = clampf(p->Ki * p->SumE, -p->IMax, p->IMax);
-  p->Ud = clampf(p->Kd * (p->E - p->PreE), -p->DMax, p->DMax);
-  p->Up = clampf(p->Kp * p->E, -p->PMax, p->PMax);
-  p->PreE = p->E;
-  p->U = clampf(p->Up + p->Ui + p->Ud, -p->UMax, p->UMax);
-}
-static void pidReset(PID* p){ p->SumE=0; p->PreE=0; p->Ui=0; p->U=0; }
 
 static void odomUpdate(uint8_t id, int pos, int vel){
   if(id==LEFT_W){
@@ -815,11 +824,9 @@ static void balanceTask(void*){
       if(!gEnabled && gTestTor!=0) u = (float)gTestTor;         // stand-only debug
     }
 #else
-    // ===== CASCADE controller (factory-style PID) -- ONLY in the -DCONTROLLER_CASCADE build =====
-    static bool casInit=false;          // cascade drive-state init on enable (mirrors the policy's polInit)
+    // ===== LQR full-state controller (factory RIG-Omni port) -- ONLY in the -DCONTROLLER_CASCADE build =====
+    static bool casInit=false;          // drive-state init on enable (mirrors the policy's polInit)
     if(gEnabled && !fallen){
-      // live gains -> structs
-      pidPos.Kp=gKpPos; pidVel.Kp=gKpVel; pidVel.Ki=gKiVel; pidPit.Kp=gKpPit;
       // ---- DRIVE MANAGEMENT: the SAME gDriveVel velocity-drive interface as the policy build, so
       //      the DS4 'dv' stick drives the cascade identically. Slew vdesS (accel-capped) toward the
       //      stick speed; the position target gPosTargetEff tracks it; releasing the stick latches the
@@ -849,31 +856,22 @@ static void balanceTask(void*){
         vdes = vdesS;
       }
       tTgtEff=gPosTargetEff; tVdes=vdes;                                   // driving telemetry
-      // --- factory cascade: pos(P) -> vel target ; vel(PI) -> lean ; pitch(P) -> torque ---
-      // position error tracks the SLEWED target gPosTargetEff (stick-driven); ZERO at enable. vdes is the
-      // velocity feedforward, frame-matched to the gPosSign velocity feedback (verify drive DIR on robot).
-      pidPos.Des = gPosErrSign * (wheel_x - gPosTargetEff);  pidPos.FB = 0.0f;  calPID(&pidPos);
-      pidVel.Des = gPosSign * vdes + pidPos.U;  pidVel.FB = gPosSign * wheel_vx;  calPID(&pidVel);
-      // DRIVE FEEDFORWARD: kpvel (0.05, tuned tiny for HOLD stability) makes only ~0.02deg of lean
-      // per 0.35m/s stick -> the cascade couldn't actually drive. Mirror the policy's proven velocity-
-      // tracking bias (gDriveKd deg per m/s, clamped gPosHoldMax). Only active while MOVING so the
-      // tuned hold is untouched. gPosSign is the SAME sign the working position-hold uses, so the
-      // drive direction is correct by construction (a wrong sign would make hold run away, not hold).
-      bool moving = (fabsf(gDriveVel) > 0.001f) || (gPosTargetEff != gPosTarget);
-      float driveFF = moving ? clampf(gDriveKd * gPosSign * (vdes - wheel_vx), -gPosHoldMax, gPosHoldMax) : 0.0f;
-      pidPit.Des = gImuZero + pidVel.U + driveFF; pidPit.FB = pitchF;    calPID(&pidPit);
-      float pitU = pidPit.U;
-      float dqU  = clampf(-gKdPit * rateF, -gDqUMax, gDqUMax);   // pitch-rate damping (filtered rate)
-      // factory anti-deadzone min-magnitude (±5) + stiction boost (±10 past ±20)
-      if(pitU > 0.0f && pitU < 5.0f) pitU = 5.0f; else if(pitU < 0.0f && pitU > -5.0f) pitU = -5.0f;
-      if(pitU > gFFband) pitU += gFF; else if(pitU < -gFFband) pitU -= gFF;
-      float uraw = gPolarity * (pitU + dqU);
-      uF = gPolULP*uF + (1.0f-gPolULP)*uraw;   // OUTPUT low-pass: smooths the raw-PID chatter the way the
-                                               // policy's smooth NN is inherently clean. 'polulp' tunes (0=off=raw,
-                                               // higher=smoother but adds command lag -> can destabilize, like clp).
+      // --- LQR full-state feedback: u = -(Kx*x + Kvx*vx + Kq*q + Kdq*dq) (RIG-Omni hover port) ---
+      // States in OUR units (identical to the factory's): x position err (m), vx velocity err (m/s),
+      // q pitch err (deg), dq pitch rate (deg/s). gPosTargetEff/vdes come from the drive interface above
+      // (so 'dv' drive + turn still work; pos error is measured from the slewed target).
+      float lqr_x  = wheel_x - gPosTargetEff;           // position error (m)
+      float lqr_vx = wheel_vx - vdes;                   // velocity error (m/s)
+      float lqr_q  = pitch;                             // pitch error (deg) = theta - gSetpoint
+      float lqr_dq = dqf;                               // pitch rate (deg/s)
+      // Sign anchor: the pitch term -gLqrQ*q reproduces our PROVEN balance sign (the cascade was
+      // u ~ -kppit*pitch), and the wheel L:+u/R:-u mapping below is our existing working frame -- so it
+      // stays UP on the first arm. pos/vel gains start at 0 -> floor-verify their restoring sign, then raise.
+      float uraw = -(gLqrX*lqr_x + gLqrVx*lqr_vx + gLqrQ*lqr_q + gLqrDq*lqr_dq);
+      if(uraw > gFFband) uraw += gFF; else if(uraw < -gFFband) uraw -= gFF;   // factory stiction boost (+/-10 past +/-20)
+      uF = gPolULP*uF + (1.0f-gPolULP)*uraw;            // output LP available ('polulp', default 0=off=raw)
       u = clampf(uF, -(float)gUMax, (float)gUMax);
     } else {
-      pidReset(&pidPos); pidReset(&pidVel); pidReset(&pidPit);   // clear PID state when idle
       uF = 0.0f; casInit=false;                                 // reset output-LP + drive state for next enable
       if(!gEnabled && gTestTor!=0) u = (float)gTestTor;          // stand-only debug
     }
@@ -1010,6 +1008,10 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"iclamp")) gVelIClamp=v;
   else if (!strcmp(s,"umax"))  gUMax=(int)v;
   else if (!strcmp(s,"set"))   gSetpoint=v;
+  else if (!strcmp(s,"lqrx"))  gLqrX=v;                 // LQR position-error gain (factory 1400; sign-verify on floor)
+  else if (!strcmp(s,"lqrvx")) gLqrVx=v;                // LQR velocity-error gain (factory 6.8)
+  else if (!strcmp(s,"lqrq"))  gLqrQ=v;                 // LQR pitch-error gain (factory 32)
+  else if (!strcmp(s,"lqrdq")) gLqrDq=v;                // LQR pitch-rate gain (factory 1.6)
   else if (!strcmp(s,"cap"))   gSetpoint=tTheta;
   else if (!strcmp(s,"vx"))    gVx=v;
   else if (!strcmp(s,"pol"))   gPolarity=(v<0.0f?-1.0f:1.0f);
@@ -1040,6 +1042,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"polsign")) gPolSign=(v<0.0f?-1.0f:1.0f);  // flip action->wheel sign (verify on robot)
   else if (!strcmp(s,"polulp"))  gPolULP=clampf(v,0.0f,0.95f);  // policy-output low-pass (0=off..0.95 heavy)
   else if (!strcmp(s,"polvlp"))  gPolVelLP=clampf(v,0.0f,0.97f);// policy velocity-OBS low-pass (kills quantization shimmy)
+  else if (!strcmp(s,"vlp"))     LP_VEL=clampf(v,0.0f,0.98f);   // wheel-velocity feedback low-pass (cascade buzz)
   else if (!strcmp(s,"poshold")) gPosHoldK=v;          // code position-hold P gain (deg/m); 0 = pure balance
   else if (!strcmp(s,"poshi"))   gPosHoldKi=v;         // code position-hold I gain (deg per m*s); kills offset
   else if (!strcmp(s,"poshd"))   gPosHoldKd=v;         // HOLD/close-in D gain (deg per m/s) -- high = crisp hold
@@ -1135,8 +1138,8 @@ void loop(){
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
     char b[640];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f kivel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f\n",
-      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gKpPit, gKdPit, gKpPos, gKpVel, gKiVel, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, CTRL_NAME, gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw);
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f\n",
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, CTRL_NAME, gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw);
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     if(gPolJoint && k>0){                        // Stage-1 turn-policy diagnostics (obs + outputs)
       k--;                                       // drop trailing '\n'
