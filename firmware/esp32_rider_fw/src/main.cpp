@@ -100,7 +100,26 @@ volatile float gLqrVx = -6.0f;      // velocity-error gain (damping). NEGATIVE (
                                     // ~4.7mm; cliff ~-7. Capped by quantization-noisy encoder velocity -> velocity
                                     // observer (gObsA/B below) gives a cleaner v -> allows more damping. 'lqrvx'.
 volatile float gLqrQ  = 32.0f;      // pitch-error gain (factory 32) -- balances; sign matches our working PD
-volatile float gLqrDq = 1.6f;       // pitch-rate gain (factory 1.6) -- factory uses far less than our cascade kd
+volatile float gLqrDq = 3.0f;       // pitch-rate gain. 1.6->3.0 (2026-06-19, FLOOR): factory 1.6 underdamps on our
+                                    // plant -> push-fall AND falls on placement at boot. 3.0 survives pushes (mild ~20Hz
+                                    // buzz, accepted). >=6 rings (rate-loop limit cycle). live-tune via 'lqrdq'.
+// ---- velocity observer (alpha-beta / g-h filter on wheel_x) ----
+// Raw wheel_vx (1024-cnt encoder differentiated) is quantization-noisy -> caps the velocity-damping
+// gain (the lqrvx cliff). This integrates a constant-velocity model and corrects with the encoder
+// position -> a SMOOTH, low-lag velocity. Feeds the LQR's velocity term -> should allow higher |lqrvx|
+// -> tighter hold (toward a couple mm). DEFAULT OFF (gObsA=0 -> falls back to raw wheel_vx, the known-good
+// 4.7mm config). Enable on the floor with 'obsa 0.5' then re-raise lqrvx. 'obsa'(alpha) / 'obsb'(beta).
+volatile float gObsA = 0.0f;        // alpha: position-correction gain (0=observer OFF; ~0.3-0.6 typical)
+volatile float gObsB = 0.10f;       // beta: velocity-correction gain (~0.05-0.2; higher tracks faster/noisier)
+// ---- drive velocity FEEDFORWARD ----
+// The LQR's velocity FEEDBACK (gLqrVx) is hold-tuned and pinned under the stability cliff, so it leans
+// the robot only weakly per unit speed -> drive tops out ~0.10 m/s. This FF commands drive directly,
+// proportional to the commanded velocity (vdes), decoupled from the hold gains, so it can drive fast
+// while the LQR keeps balance. Sign: NEGATIVE (forward = -u in our frame, like the other forward gains).
+// DEFAULT 0 (off) -> boots at the known-good no-drive config; ramp on the floor with 'driveff'.
+// NOW a LEAN feedforward: degrees of setpoint tilt per m/s commanded (folded into lqr_q, clamped +-6deg).
+// NEGATIVE = forward (forward drive leans th below setpoint). Try ~ -4 to -6; sign-verify on floor.
+volatile float gDriveFF = 0.0f;     // lean-FF: deg of setpoint tilt per m/s commanded velocity
 volatile float gVx       = 0.0f;    // commanded forward velocity (0 = hold)
 volatile float gPolarity = 1.0f;    // +1 for cascade (pitDes-pitch order) = our verified tilt/rate sign
 volatile float gPosSign  = -1.0f;   // wheel vel/pos cascade sign (-1: our pitch axis is inverted vs factory)
@@ -144,11 +163,10 @@ volatile float gPosIntBand = 0.15f; // only integrate within this dist of target
 volatile float gPosDeadband= 0.012f;// hold dead-band (m): when settled within this of target, STOP chasing the
                                     // exact center (P off, I frozen, D kept) so the loop can't limit-cycle against
                                     // wheel stiction -> robot sits STILL instead of hunting. 0=off. live-tune 'posdb'
-volatile float gPosVmax    = 0.05f; // move speed cap (m/s): full-stick drive speed. 0.35->0.05 (2026-06-18, cascade):
-                                    // 0.15+ drove faster than the cascade balancer could keep up. 0.05 = full throttle-
-                                    // stick range maps 0..0.05 (controller MAX_SPEED matched). Peak drive lean
-                                    // gDriveKd*vcap = 0.5deg. live-tune via 'posvmax'.
-volatile float gPosVmaxBack= 0.05f; // BACKWARD speed cap (m/s). matched to forward 0.05 (cascade)
+volatile float gPosVmax    = 0.25f; // move speed cap (m/s): full-stick drive speed. ->0.25 (2026-06-19, LQR): allow
+                                    // real drive speeds now that the lean-FF (gDriveFF) gives drive authority. The cap
+                                    // only bounds the target ramp; no motion without a command. live-tune via 'posvmax'.
+volatile float gPosVmaxBack= 0.25f; // BACKWARD speed cap (m/s). matched to forward.
                                     // (the +setpoint lean + ppo_v_pure's forward cruise make backward the "against"
                                     // direction -> the balance policy saturates ~23% at full speed = the shimmy).
                                     // Matching the demand to the headroom (lower cap backward) keeps it out of the
@@ -206,6 +224,7 @@ volatile int   gWheelFault = 0;     // 0=ok; else ID of a wheel that dropped off
 // telemetry (written by task, read by loop)
 volatile float tTheta=0, tRate=0, tU=0, tWheelX=0, tWheelVx=0;
 volatile float tPacc=0, tPraw=0;    // accel-pitch: comp-corrected vs raw (lever-arm comp verify)
+volatile float tVest=0;             // velocity-observer estimate (vs raw wv) -- observer verify
 volatile float tRoll=0;                  // lateral tilt (deg), accel-only readout for leg leveling
 volatile float tVbat=0;                  // smoothed pack voltage (V), read from GPIO33 divider
 volatile float tYaw=0;                    // integrated heading (deg), gyro-Z only -> drifts slowly
@@ -826,6 +845,7 @@ static void balanceTask(void*){
 #else
     // ===== LQR full-state controller (factory RIG-Omni port) -- ONLY in the -DCONTROLLER_CASCADE build =====
     static bool casInit=false;          // drive-state init on enable (mirrors the policy's polInit)
+    static float obsX=0, obsV=0; static bool obsInit=false;   // velocity-observer state (alpha-beta on wheel_x)
     if(gEnabled && !fallen){
       // ---- DRIVE MANAGEMENT: the SAME gDriveVel velocity-drive interface as the policy build, so
       //      the DS4 'dv' stick drives the cascade identically. Slew vdesS (accel-capped) toward the
@@ -842,9 +862,10 @@ static void balanceTask(void*){
         if(fabsf(gDriveVel) > 0.001f){                                   // VELOCITY DRIVE (stick held)
           float vtgt = clampf(gDriveVel, -gPosVmaxBack, gPosVmax);        // clamp BOTH dirs (forward was uncapped)
           if(vtgt > vdesS+damax) vdesS+=damax; else if(vtgt < vdesS-damax) vdesS-=damax; else vdesS=vtgt;
-          gPosTarget=wheel_x; gPosTargetEff=wheel_x; wasVelDrive=true;
+          gPosTargetEff += vdesS*sdt; gPosTarget=gPosTargetEff; wasVelDrive=true;  // ADVANCE target at cmd velocity
+                                                                                   // -> position term drives it (like ptgt)
         } else {                                                          // HOLD / 'ptgt' move (stick released)
-          if(wasVelDrive){ vdesS=0.0f; wasVelDrive=false; }
+          if(wasVelDrive){ vdesS=0.0f; gPosTarget=wheel_x; gPosTargetEff=wheel_x; wasVelDrive=false; }  // latch at current spot
           float dist=gPosTarget-gPosTargetEff;
           float vstop=sqrtf(2.0f*gPosAmax*fabsf(dist));
           float vcap=fminf((dist>=0.0f)?gPosVmax:gPosVmaxBack, vstop);
@@ -860,19 +881,32 @@ static void balanceTask(void*){
       // States in OUR units (identical to the factory's): x position err (m), vx velocity err (m/s),
       // q pitch err (deg), dq pitch rate (deg/s). gPosTargetEff/vdes come from the drive interface above
       // (so 'dv' drive + turn still work; pos error is measured from the slewed target).
+      // velocity observer: alpha-beta filter on wheel_x -> smooth low-lag velocity (vs noisy raw wheel_vx).
+      float odt = (dt>1e-4f ? dt : 0.004f);
+      float vel_est;
+      if(gObsA > 0.0f){
+        if(!obsInit){ obsX=wheel_x; obsV=0.0f; obsInit=true; }
+        float resid = wheel_x - (obsX + obsV*odt);      // measurement - prediction
+        obsX += obsV*odt + gObsA*resid;
+        obsV += (gObsB/odt)*resid;
+        vel_est = obsV;
+      } else { vel_est = wheel_vx; obsInit=false; }      // observer OFF -> raw velocity
+      tVest = vel_est;
       float lqr_x  = wheel_x - gPosTargetEff;           // position error (m)
-      float lqr_vx = wheel_vx - vdes;                   // velocity error (m/s)
-      float lqr_q  = pitch;                             // pitch error (deg) = theta - gSetpoint
+      float lqr_vx = vel_est - vdes;                    // velocity error (m/s) -- observer or raw
+      float lqr_q  = pitch - clampf(gDriveFF*vdes, -6.0f, 6.0f);  // pitch err; LEAN-FF tilts the setpoint
+                                                        // forward ~gDriveFF deg per m/s -> robot leans to cruise (works
+                                                        // for the dv/joystick path; a command-FF gets cancelled by balance)
       float lqr_dq = dqf;                               // pitch rate (deg/s)
       // Sign anchor: the pitch term -gLqrQ*q reproduces our PROVEN balance sign (the cascade was
       // u ~ -kppit*pitch), and the wheel L:+u/R:-u mapping below is our existing working frame -- so it
       // stays UP on the first arm. pos/vel gains start at 0 -> floor-verify their restoring sign, then raise.
-      float uraw = -(gLqrX*lqr_x + gLqrVx*lqr_vx + gLqrQ*lqr_q + gLqrDq*lqr_dq);
+      float uraw = -(gLqrX*lqr_x + gLqrVx*lqr_vx + gLqrQ*lqr_q + gLqrDq*lqr_dq);  // lean-FF folded into lqr_q
       if(uraw > gFFband) uraw += gFF; else if(uraw < -gFFband) uraw -= gFF;   // factory stiction boost (+/-10 past +/-20)
       uF = gPolULP*uF + (1.0f-gPolULP)*uraw;            // output LP available ('polulp', default 0=off=raw)
       u = clampf(uF, -(float)gUMax, (float)gUMax);
     } else {
-      uF = 0.0f; casInit=false;                                 // reset output-LP + drive state for next enable
+      uF = 0.0f; casInit=false; obsInit=false;                  // reset output-LP + drive + observer for next enable
       if(!gEnabled && gTestTor!=0) u = (float)gTestTor;          // stand-only debug
     }
 #endif
@@ -886,7 +920,7 @@ static void balanceTask(void*){
       if(!wasDriving){ wheelTorqueEnAll(1);                                      // enable both (broadcast, no collision)
                        torqAcc=0; }                                             // seed accumulator at 0
       float uout = u;
-      if(gEnabled && !fallen && gDither>0){ uout += (float)(gDither*ditherSign); ditherSign = -ditherSign; }
+      if(driving && gDither>0){ uout += (float)(gDither*ditherSign); ditherSign = -ditherSign; }  // dither in balance OR stand-test
       // turn differential: from the Stage-1 policy (turnPol) when active, else the hand-tuned gTurn
       float tn = gPolJoint ? clampf(turnPol, -(float)gUMax, (float)gUMax)
                            : clampf(gTurn, -gTurnMax, gTurnMax);
@@ -1012,6 +1046,9 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"lqrvx")) gLqrVx=v;                // LQR velocity-error gain (factory 6.8)
   else if (!strcmp(s,"lqrq"))  gLqrQ=v;                 // LQR pitch-error gain (factory 32)
   else if (!strcmp(s,"lqrdq")) gLqrDq=v;                // LQR pitch-rate gain (factory 1.6)
+  else if (!strcmp(s,"obsa"))  gObsA=clampf(v,0.0f,1.0f);   // vel-observer alpha (0=OFF->raw wheel_vx)
+  else if (!strcmp(s,"obsb"))  gObsB=clampf(v,0.0f,1.0f);   // vel-observer beta
+  else if (!strcmp(s,"driveff")) gDriveFF=v;                // drive velocity feedforward (wheel-cmd per m/s; ~-300)
   else if (!strcmp(s,"cap"))   gSetpoint=tTheta;
   else if (!strcmp(s,"vx"))    gVx=v;
   else if (!strcmp(s,"pol"))   gPolarity=(v<0.0f?-1.0f:1.0f);
@@ -1138,8 +1175,8 @@ void loop(){
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
     char b[640];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f\n",
-      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, CTRL_NAME, gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw);
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f\n",
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, CTRL_NAME, gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest);
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     if(gPolJoint && k>0){                        // Stage-1 turn-policy diagnostics (obs + outputs)
       k--;                                       // drop trailing '\n'
