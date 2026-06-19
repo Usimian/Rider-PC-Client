@@ -38,7 +38,8 @@ BTN_BALANCE = 0      # Cross (X)
 BTN_ESTOP = 1        # Circle (O)
 BTN_DISTZERO = 3     # Square -- verified via --test 2026-06-16 (Cross=0,Circle=1,Triangle=2,Square=3); sends 'poszero'
 DEADZONE = 0.12
-MAX_SPEED = 0.35     # m/s of position-target travel at full stick (match firmware posvmax; 0.6 overshot/fell)
+MAX_SPEED = 0.05     # m/s at full stick. 0.35->0.05 (2026-06-18, cascade): full throttle-stick range maps 0..0.05
+                     # so the whole stick is usable (matches firmware gPosVmax). 0.15+ outran the cascade balancer.
 MAX_YAW_RATE = 1.0   # rad/s commanded at full right-stick (firmware closes the loop on the gyro)
 TURN_SIGN = 1        # flip if right-stick-right turns the wrong way
 SEND_HZ = 20

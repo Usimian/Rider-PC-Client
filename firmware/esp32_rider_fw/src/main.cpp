@@ -59,18 +59,26 @@ volatile bool  gEnabled  = false;   // balance OFF until 'en 1'
 // --- DEFAULTS = first config that actually balanced (2026-06-12, two good wheels) ---
 // Pure pitch loop (outer cascade zeroed); factory cascade gains fought our torque-direct
 // actuation and oscillated. kppit/kdpit empirically tuned. set=measured balance angle.
-volatile float gKpPos = 0.0f;       // position P  (0 = pure pitch; outer loop off)
+volatile float gKpPos = 15.0f;      // position P (outer loop). 0->15 (2026-06-18): position hold ON by default
+                                    // -- the operating mode now that the velocity integral (gKiVel) clears the SSE.
+                                    // 'kppos 0' for a bare-balance isolation test.
 volatile float gKpVel = 0.05f;      // velocity P (middle loop). 0.05 = data-verified robust 2026-06-18: survives a nudge
                                     // (bounded ~5deg transient, recovers, u never rails -- confirmed in rider-recorder log).
                                     // The velocity loop is the limit-cycle engine: >=0.08 is large-signal unstable (a nudge
                                     // -> saturated +/-58deg swing, both wheels common-mode). 0.05 keeps some chatter cut + stays robust.
-volatile float gKiVel = 0.0f;       // velocity I  (0 = pure pitch)
+volatile float gKiVel = 0.01f;      // velocity I (middle loop). 0->0.01 (2026-06-18): kills the position
+                                    // steady-state error (P-only parked ~13cm out -- vel cmd below the stiction
+                                    // deadband). The persistent stuck-wheel velocity error winds up lean until it
+                                    // breaks loose, then homes. Anti-windup in calPID (SumE clamp EMax=100, sign-flip
+                                    // reset, near-setpoint I-weaken). Conservative start; tune up via 'kivel' if slow.
 volatile float gKpPit = 50.0f;      // pitch P (lean error -> torque). 50 = tuned 2026-06-18: 70 over-drove (more
                                     // chatter + looser hold 0.39deg), 40 too soft (1.35deg); 50 = tightest hold (0.25) + least chatter.
-volatile float gKdPit = 13.0f;      // pitch-rate damping (-Kd*dq)
+volatile float gKdPit = 2.3f;       // pitch-rate damping (-Kd*dq). 13->2.3 (2026-06-18): the factory value;
+                                    // killed the ~14Hz shimmy (u std 52->26, sign-flips ~0, hold tight 0.25-0.30deg).
 volatile float gImuZero = 0.0f;     // base lean trim (deg); setpoint carries the offset
-volatile float gSetpoint = 3.6f;    // balance tilt (cascade branch); pitch = theta-set. 3.6 = the no-rearward-creep
-                                    // angle found on the robot 2026-06-18 (4.18 left a constant rearward drive). 'set' to tune.
+volatile float gSetpoint = 3.64f;   // balance tilt (cascade branch); pitch = theta-set. 3.64 = MEASURED balance point:
+                                    // 10s avg of th while balancing (std 0.59, wv ~0 = parked) 2026-06-18. Matches the
+                                    // earlier 3.6 no-rearward-creep angle; refined to the measured mean. 'set' to tune.
 volatile float gVx       = 0.0f;    // commanded forward velocity (0 = hold)
 volatile float gPolarity = 1.0f;    // +1 for cascade (pitDes-pitch order) = our verified tilt/rate sign
 volatile float gPosSign  = -1.0f;   // wheel vel/pos cascade sign (-1: our pitch axis is inverted vs factory)
@@ -113,8 +121,11 @@ volatile float gPosIntBand = 0.15f; // only integrate within this dist of target
 volatile float gPosDeadband= 0.012f;// hold dead-band (m): when settled within this of target, STOP chasing the
                                     // exact center (P off, I frozen, D kept) so the loop can't limit-cycle against
                                     // wheel stiction -> robot sits STILL instead of hunting. 0=off. live-tune 'posdb'
-volatile float gPosVmax    = 0.35f; // move speed cap (m/s): full-stick drive speed. 0.35 = tuned clean-stop ceiling (0.6 overshot/toppled). live-tune via 'posvmax'
-volatile float gPosVmaxBack= 0.22f; // BACKWARD speed cap (m/s). Backward has less policy headroom than forward
+volatile float gPosVmax    = 0.05f; // move speed cap (m/s): full-stick drive speed. 0.35->0.05 (2026-06-18, cascade):
+                                    // 0.15+ drove faster than the cascade balancer could keep up. 0.05 = full throttle-
+                                    // stick range maps 0..0.05 (controller MAX_SPEED matched). Peak drive lean
+                                    // gDriveKd*vcap = 0.5deg. live-tune via 'posvmax'.
+volatile float gPosVmaxBack= 0.05f; // BACKWARD speed cap (m/s). matched to forward 0.05 (cascade)
                                     // (the +setpoint lean + ppo_v_pure's forward cruise make backward the "against"
                                     // direction -> the balance policy saturates ~23% at full speed = the shimmy).
                                     // Matching the demand to the headroom (lower cap backward) keeps it out of the
@@ -171,6 +182,7 @@ volatile int   gWheelFault = 0;     // 0=ok; else ID of a wheel that dropped off
 
 // telemetry (written by task, read by loop)
 volatile float tTheta=0, tRate=0, tU=0, tWheelX=0, tWheelVx=0;
+volatile float tPacc=0, tPraw=0;    // accel-pitch: comp-corrected vs raw (lever-arm comp verify)
 volatile float tRoll=0;                  // lateral tilt (deg), accel-only readout for leg leveling
 volatile float tVbat=0;                  // smoothed pack voltage (V), read from GPIO33 divider
 volatile float tYaw=0;                    // integrated heading (deg), gyro-Z only -> drifts slowly
@@ -203,6 +215,12 @@ volatile int   gPollLock=0;         // 'lock <id>' -> poll only that wheel (0 = 
 volatile int   gCfgDumpId=0;        // 'cfgdump <id>' -> dump servo config regs 0x00-0x2F
 volatile float gGyroBias=-1.19f;    // pitch gyro zero-rate bias (deg/s) -- BAKED CONSTANT (avg of measured boots -1.15/-1.16/-1.27). NOT re-measured at boot (boot cal sometimes sampled a moving robot -> bad bias -> wouldn't balance). 'gcal' still re-measures.
 volatile float gCfAlpha=0.996f;     // compl-filter gyro weight PER SAMPLE @~333Hz (~1s accel trim).
+// --- IMU lever-arm comp: the IMU sits ~120mm ABOVE the axle, so body rotation about the axle
+// injects tangential (alpha*r) + centripetal (omega^2*r) accel that isn't gravity and corrupts
+// the accel-tilt. Subtract it so atan2 sees only gravity -> the body's TRUE lean (IMU reading
+// normalized to the axle/CoM). KIMU converts the m/s^2 lever terms to accel counts: (LSB/g)/g * r.
+static const float KIMU = (2048.0f/9.81f)*0.12f;   // ICM-42670 +-16g => 2048 LSB/g; r=0.12m (120mm up)
+volatile float gImuComp = -0.5f;    // lever-arm comp scale+sign (0=off; -0.5 verified on robot). 'imucomp'
 // --- factory control-input filter (R-1.1.3 FUN_400d529c, Ghidra-confirmed) ---
 // Between IMU fusion and the PID, the factory heavily low-passes pitch & rate
 // (0.95/0.05) and slew-limits the smoothed pitch to 5 deg/cycle. We lacked this.
@@ -395,7 +413,6 @@ static void calPID(PID* p){
   if(p->EMax > 0) p->SumE = clampf(p->SumE, -p->EMax, p->EMax);
   p->Ui = clampf(p->Ki * p->SumE, -p->IMax, p->IMax);
   p->Ud = clampf(p->Kd * (p->E - p->PreE), -p->DMax, p->DMax);
-  if(p->E < p->EMin && p->E > -p->EMin) p->SumE *= 0.95f;   // I-weaken near setpoint (factory 0.95)
   p->Up = clampf(p->Kp * p->E, -p->PMax, p->PMax);
   p->PreE = p->E;
   p->U = clampf(p->Up + p->Ui + p->Ud, -p->UMax, p->UMax);
@@ -568,8 +585,19 @@ static void balanceTask(void*){
 
     // --- IMU -> tilt + rate (read LATE, just before compute, so pitch is fresh -- see note above) ---
     int16_t ax,ay,az,gx,gy,gz; imuData(&ax,&ay,&az,&gx,&gy,&gz);
-    // ----- factory IMU pitch fusion (RIG-Omni imu.cc:240-246, verbatim) -----
-    float pit_acc  = atan2f((float)ay,(float)az)*57.2958f;       // forward/vertical -> deg
+    // ----- factory IMU pitch fusion + LEVER-ARM COMP (IMU ~120mm above axle) -----
+    // Remove the IMU's own rotation-induced accel before atan2, so the accel-tilt reflects the
+    // body's true lean (normalized to the axle/CoM), not the IMU swinging on its 120mm lever.
+    float pcOmega = ((float)gx/GYRO_LSB_PER_DPS - gGyroBias) * 0.0174533f;  // pitch rate, rad/s
+    static float pcOmPrev=0, pcAlphaF=0;
+    float pcAlpha = (dt>1e-4f) ? (pcOmega - pcOmPrev)/dt : 0.0f;            // angular accel, rad/s^2
+    pcAlphaF = 0.8f*pcAlphaF + 0.2f*pcAlpha;                               // filter the noisy derivative
+    pcOmPrev = pcOmega;
+    float ayC = (float)ay - gImuComp*KIMU*pcAlphaF;            // remove tangential (alpha*r)
+    float azC = (float)az + gImuComp*KIMU*pcOmega*pcOmega;     // remove centripetal (omega^2*r)
+    float pit_acc  = atan2f(ayC, azC)*57.2958f;                // forward/vertical -> deg (lever-arm corrected)
+    float pit_acc_raw = atan2f((float)ay,(float)az)*57.2958f;  // uncorrected, for verify-against-raw
+    tPacc = pit_acc; tPraw = pit_acc_raw;                      // expose both for the lever-arm-comp test
     // roll readout (side-to-side tilt, orthogonal axis). Accel-only + gentle LP --
     // not controlled, just a display value for when the servo legs level the body.
     float roll_acc = atan2f((float)ax,(float)az)*57.2958f;
@@ -805,7 +833,7 @@ static void balanceTask(void*){
         if(turning && !wasTurning){ gPosTarget=wheel_x; gPosTargetEff=wheel_x; }  // re-anchor home at the spin center
         wasTurning = turning;
         if(fabsf(gDriveVel) > 0.001f){                                   // VELOCITY DRIVE (stick held)
-          float vtgt = (gDriveVel < -gPosVmaxBack) ? -gPosVmaxBack : gDriveVel;
+          float vtgt = clampf(gDriveVel, -gPosVmaxBack, gPosVmax);        // clamp BOTH dirs (forward was uncapped)
           if(vtgt > vdesS+damax) vdesS+=damax; else if(vtgt < vdesS-damax) vdesS-=damax; else vdesS=vtgt;
           gPosTarget=wheel_x; gPosTargetEff=wheel_x; wasVelDrive=true;
         } else {                                                          // HOLD / 'ptgt' move (stick released)
@@ -826,7 +854,14 @@ static void balanceTask(void*){
       // velocity feedforward, frame-matched to the gPosSign velocity feedback (verify drive DIR on robot).
       pidPos.Des = gPosErrSign * (wheel_x - gPosTargetEff);  pidPos.FB = 0.0f;  calPID(&pidPos);
       pidVel.Des = gPosSign * vdes + pidPos.U;  pidVel.FB = gPosSign * wheel_vx;  calPID(&pidVel);
-      pidPit.Des = gImuZero + pidVel.U; pidPit.FB = pitchF;               calPID(&pidPit);
+      // DRIVE FEEDFORWARD: kpvel (0.05, tuned tiny for HOLD stability) makes only ~0.02deg of lean
+      // per 0.35m/s stick -> the cascade couldn't actually drive. Mirror the policy's proven velocity-
+      // tracking bias (gDriveKd deg per m/s, clamped gPosHoldMax). Only active while MOVING so the
+      // tuned hold is untouched. gPosSign is the SAME sign the working position-hold uses, so the
+      // drive direction is correct by construction (a wrong sign would make hold run away, not hold).
+      bool moving = (fabsf(gDriveVel) > 0.001f) || (gPosTargetEff != gPosTarget);
+      float driveFF = moving ? clampf(gDriveKd * gPosSign * (vdes - wheel_vx), -gPosHoldMax, gPosHoldMax) : 0.0f;
+      pidPit.Des = gImuZero + pidVel.U + driveFF; pidPit.FB = pitchF;    calPID(&pidPit);
       float pitU = pidPit.U;
       float dqU  = clampf(-gKdPit * rateF, -gDqUMax, gDqUMax);   // pitch-rate damping (filtered rate)
       // factory anti-deadzone min-magnitude (±5) + stiction boost (±10 past ±20)
@@ -1039,6 +1074,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"ff"))    gFF=v;                  // friction feed-forward magnitude
   else if (!strcmp(s,"ffband")) gFFband=v;             // friction FF deadband
   else if (!strcmp(s,"cfa"))   gCfAlpha=clampf(v,0.9f,0.9999f); // compl-filter gyro weight
+  else if (!strcmp(s,"imucomp")) gImuComp=v;                    // IMU lever-arm comp scale/sign (0=off, -0.5 verified)
   else if (!strcmp(s,"clp"))   gCtrlLP=clampf(v,0.0f,0.999f);   // control-input low-pass (factory 0.95)
   else if (!strcmp(s,"slew"))  gSlewDeg=clampf(v,0.5f,90.0f);   // per-cycle pitch slew clamp (factory 5)
   else if (!strcmp(s,"fall"))  gFallDeg=clampf(v,10.0f,70.0f);  // tilt-error torque cutoff (deg)
@@ -1099,8 +1135,8 @@ void loop(){
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
     char b[640];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d\n",
-      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gKpPit, gKdPit, gKpPos, gKpVel, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, CTRL_NAME, gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR);
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f kivel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f\n",
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gKpPit, gKdPit, gKpPos, gKpVel, gKiVel, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, CTRL_NAME, gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw);
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     if(gPolJoint && k>0){                        // Stage-1 turn-policy diagnostics (obs + outputs)
       k--;                                       // drop trailing '\n'
