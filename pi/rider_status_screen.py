@@ -150,9 +150,11 @@ def do_reboot():
 
 
 # ---------------- MQTT (republish + relay) ----------------
+g_drivemode = "computer"   # joystick / computer -- boot default is computer; controller publishes on change
+
 def on_connect(client, userdata, flags, reason_code, properties=None):
     for t in ("rider/control/line", "rider/control/system",
-              "rider/control/movement", "rider/control/settings"):
+              "rider/control/movement", "rider/control/settings", "rider/control/drivemode"):
         client.subscribe(t)
 
 
@@ -162,7 +164,12 @@ def on_message(client, userdata, msg):
     except Exception:
         p = {}
     t = msg.topic
-    if t == "rider/control/line":
+    if t == "rider/control/drivemode":
+        global g_drivemode
+        m = (p.get("mode") or "").lower()
+        if m in ("joystick", "computer"):
+            g_drivemode = m
+    elif t == "rider/control/line":
         line = p.get("line") or p.get("cmd")
         if line:
             cmd_q.put(str(line))
@@ -323,6 +330,10 @@ def render():
     # R = robot's right wheel (wp1), L = wp2  -- swapped so R sits on the right
     d.text((10, 112), "L %+.3fm    R %+.3fm" % (wp2, wp1), fill=(255, 255, 255), font=f_xl)
     d.text((10, 148), "Tgt %+.3fm    Err %+.3fm" % (tg, err), fill=ecol, font=f_xl)
+
+    # drive source (Start-button toggle): cyan = joystick, orange = computer/MQTT -- just above CPU row
+    dm_col = (80, 200, 255) if g_drivemode == "joystick" else (255, 170, 60)
+    d.text((10, 186), "DRIVE: %s" % g_drivemode.upper(), fill=dm_col, font=f_m)
 
     cpu = psutil.cpu_percent(); temp = cpu_temp_c(); pw = cm5_power_w()
     tcol = (255, 90, 90) if temp >= 80 else (255, 215, 60) if temp >= 70 else (170, 195, 235)

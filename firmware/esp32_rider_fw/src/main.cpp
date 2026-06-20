@@ -55,35 +55,53 @@ volatile int      gLedBright = 20; // global LED brightness 0..255 (scales statu
 #define RIGHT_LEG 22
 
 // ---------------- shared state (tuned live; scalar volatiles) ----------------
-// CASCADED PID (factory R-1.1.3 architecture, NOT parallel LQR — see memory).
-//   pos(P) -> velocity target ; vel(PI) -> lean target ; pitch(P) -> torque ; + rate damping
 volatile bool  gEnabled  = false;   // balance OFF until 'en 1'
-// --- DEFAULTS = first config that actually balanced (2026-06-12, two good wheels) ---
-// Pure pitch loop (outer cascade zeroed); factory cascade gains fought our torque-direct
-// actuation and oscillated. kppit/kdpit empirically tuned. set=measured balance angle.
-volatile float gKpPos = 0.0f;       // position P  (0 = pure pitch; outer loop off)
-volatile float gKpVel = 0.01f;      // velocity P  (gentle drift-damping; holds its spot)
-volatile float gKiVel = 0.0f;       // velocity I  (0 = pure pitch)
-volatile float gKpPit = 70.0f;      // pitch P     (lean error -> torque)
-volatile float gKdPit = 13.0f;      // pitch-rate damping (-Kd*dq)
 volatile float gImuZero = 0.0f;     // base lean trim (deg); setpoint carries the offset
-volatile float gSetpoint = 4.18f;   // measured true balance tilt (our frame); pitch = theta-set. RESTORED 3.6->4.18
-                                    // (2026-06-18): 3.6 (the shimmy-cut value) sits 0.58deg off the mc_l4a policy's
-                                    // trained/measured balance point -> biases the policy's pitch-error input ->
-                                    // growing limit cycle -> fall. 4.18 = the config b22819a balanced on. 'set' to tune.
-volatile float gVx       = 0.0f;    // commanded forward velocity (0 = hold)
-volatile float gPolarity = 1.0f;    // +1 for cascade (pitDes-pitch order) = our verified tilt/rate sign
-volatile float gPosSign  = -1.0f;   // wheel vel/pos cascade sign (-1: our pitch axis is inverted vs factory)
-volatile float gPosErrSign = 1.0f;  // position-loop correction sign (empirically found; flip with 'pesign')
-// ---- neural-policy control (ADDITIVE; PID stays the default). 'pol 1' to enable. ----
+volatile float gSetpoint = 3.55f;   // balance tilt (deg); pitch = theta - set. 3.64->3.55 (2026-06-19, FLOOR):
+                                    // bare-balance crept backward at 3.64; 3.55 = true no-creep balance point (0.0 mm/s
+                                    // drift over 24s on the floor). Higher = rearward drive. 'set' to tune.
+// ---- LQR full-state feedback: u = -(Kx*x + Kvx*vx + Kq*q + Kdq*dq) ----
+// Ported from RIG-Omni hover/xgo.cc (the ESP32-S3 SUCCESSOR product -- a sibling reference, NOT the Rider's
+// own factory firmware). x=position err (m), vx=velocity err (m/s), q=pitch err (deg), dq=pitch rate (deg/s).
+// Torque-direct (wheel L:+u/R:-u). FLOOR-TUNED on the real plant (the stand masks the dynamics). RIG-Omni's
+// magnitudes (1400/6.8/32/1.6) do NOT transfer -- our wheel frame is inverted (pos/vel gains NEGATIVE) and
+// 1400 diverges here. Live-tune: 'lqrx/lqrvx/lqrq/lqrdq'.
+volatile float gLqrX  = -500.0f;    // position-error gain. FLOOR-TUNED 2026-06-19: NEGATIVE (our wheel frame is
+                                    // inverted vs factory's +1400, which diverges here). Sweet spot -500 (holds tight,
+                                    // stable; -600 plateaus, -700 diverges). 'lqrx' to tune.
+volatile float gLqrVx = -6.0f;      // velocity-error gain (damping). NEGATIVE (frame-inverted). -6 w/ vlp=0.85 holds
+                                    // ~4.7mm; cliff ~-7. Capped by quantization-noisy encoder velocity -> velocity
+                                    // observer (gObsA/B below) gives a cleaner v -> allows more damping. 'lqrvx'.
+volatile float gLqrQ  = 32.0f;      // pitch-error gain (factory 32) -- balances; sign matches our working PD
+volatile float gLqrDq = 3.0f;       // pitch-rate gain. 1.6->3.0 (2026-06-19, FLOOR): factory 1.6 underdamps on our
+                                    // plant -> push-fall AND falls on placement at boot. 3.0 survives pushes (mild ~20Hz
+                                    // buzz, accepted). >=6 rings (rate-loop limit cycle). live-tune via 'lqrdq'.
+// ---- velocity observer (alpha-beta / g-h filter on wheel_x) ----
+// Raw wheel_vx (1024-cnt encoder differentiated) is quantization-noisy -> caps the velocity-damping
+// gain (the lqrvx cliff). This integrates a constant-velocity model and corrects with the encoder
+// position -> a SMOOTH, low-lag velocity. Feeds the LQR's velocity term -> should allow higher |lqrvx|
+// -> tighter hold (toward a couple mm). DEFAULT OFF (gObsA=0 -> falls back to raw wheel_vx, the known-good
+// 4.7mm config). Enable on the floor with 'obsa 0.5' then re-raise lqrvx. 'obsa'(alpha) / 'obsb'(beta).
+volatile float gObsA = 0.0f;        // alpha: position-correction gain (0=observer OFF; ~0.3-0.6 typical)
+volatile float gObsB = 0.10f;       // beta: velocity-correction gain (~0.05-0.2; higher tracks faster/noisier)
+// ---- drive velocity FEEDFORWARD ----
+// The LQR's velocity FEEDBACK (gLqrVx) is hold-tuned and pinned under the stability cliff, so it leans
+// the robot only weakly per unit speed -> drive tops out ~0.10 m/s. This FF commands drive directly,
+// proportional to the commanded velocity (vdes), decoupled from the hold gains, so it can drive fast
+// while the LQR keeps balance. Sign: NEGATIVE (forward = -u in our frame, like the other forward gains).
+// DEFAULT 0 (off) -> boots at the known-good no-drive config; ramp on the floor with 'driveff'.
+// NOW a LEAN feedforward: degrees of setpoint tilt per m/s commanded (folded into lqr_q, clamped +-6deg).
+// NEGATIVE = forward (forward drive leans th below setpoint). Try ~ -4 to -6; sign-verify on floor.
+volatile float gDriveFF = 0.0f;     // lean-FF: deg of setpoint tilt per m/s commanded velocity
+// ---- neural-policy control. 'pol 1' to enable. ----
 // SIM-TRAINED, NOT YET HW-VERIFIED. Obs/action signs almost certainly need an
 // on-robot check (flip with 'polsign', and watch the obs match the sim's SI units).
 // Controller is chosen at BUILD time, not runtime. The control loop is split by #ifdef so each
 // binary contains EXACTLY ONE controller -- there is no runtime mode flag to drop or mis-set.
-// Default build = POLICY; the cascade lives ONLY in the -DCONTROLLER_CASCADE build (env:esp32_cascade).
-#ifdef CONTROLLER_CASCADE
+// Default build = POLICY; the LQR controller lives ONLY in the -DCONTROLLER_LQR build (env:esp32_lqr).
+#ifdef CONTROLLER_LQR
 #define POLICY_BUILD 0
-#define CTRL_NAME "CAS"
+#define CTRL_NAME "LQR"
 #else
 #define POLICY_BUILD 1
 #define CTRL_NAME "POL"
@@ -116,8 +134,10 @@ volatile float gPosIntBand = 0.15f; // only integrate within this dist of target
 volatile float gPosDeadband= 0.012f;// hold dead-band (m): when settled within this of target, STOP chasing the
                                     // exact center (P off, I frozen, D kept) so the loop can't limit-cycle against
                                     // wheel stiction -> robot sits STILL instead of hunting. 0=off. live-tune 'posdb'
-volatile float gPosVmax    = 0.35f; // move speed cap (m/s): full-stick drive speed. 0.35 = tuned clean-stop ceiling (0.6 overshot/toppled). live-tune via 'posvmax'
-volatile float gPosVmaxBack= 0.22f; // BACKWARD speed cap (m/s). Backward has less policy headroom than forward
+volatile float gPosVmax    = 0.25f; // move speed cap (m/s): full-stick drive speed. ->0.25 (2026-06-19, LQR): allow
+                                    // real drive speeds now that the lean-FF (gDriveFF) gives drive authority. The cap
+                                    // only bounds the target ramp; no motion without a command. live-tune via 'posvmax'.
+volatile float gPosVmaxBack= 0.25f; // BACKWARD speed cap (m/s). matched to forward.
                                     // (the +setpoint lean + ppo_v_pure's forward cruise make backward the "against"
                                     // direction -> the balance policy saturates ~23% at full speed = the shimmy).
                                     // Matching the demand to the headroom (lower cap backward) keeps it out of the
@@ -174,6 +194,8 @@ volatile int   gWheelFault = 0;     // 0=ok; else ID of a wheel that dropped off
 
 // telemetry (written by task, read by loop)
 volatile float tTheta=0, tRate=0, tU=0, tWheelX=0, tWheelVx=0;
+volatile float tPacc=0, tPraw=0;    // accel-pitch: comp-corrected vs raw (lever-arm comp verify)
+volatile float tVest=0;             // velocity-observer estimate (vs raw wv) -- observer verify
 volatile float tRoll=0;                  // lateral tilt (deg), accel-only readout for leg leveling
 volatile float tVbat=0;                  // smoothed pack voltage (V), read from GPIO33 divider
 volatile float tYaw=0;                    // integrated heading (deg), gyro-Z only -> drifts slowly
@@ -206,11 +228,15 @@ volatile int   gPollLock=0;         // 'lock <id>' -> poll only that wheel (0 = 
 volatile int   gCfgDumpId=0;        // 'cfgdump <id>' -> dump servo config regs 0x00-0x2F
 volatile float gGyroBias=-1.19f;    // pitch gyro zero-rate bias (deg/s) -- BAKED CONSTANT (avg of measured boots -1.15/-1.16/-1.27). NOT re-measured at boot (boot cal sometimes sampled a moving robot -> bad bias -> wouldn't balance). 'gcal' still re-measures.
 volatile float gCfAlpha=0.996f;     // compl-filter gyro weight PER SAMPLE @~333Hz (~1s accel trim).
+// --- IMU lever-arm comp: the IMU sits ~120mm ABOVE the axle, so body rotation about the axle
+// injects tangential (alpha*r) + centripetal (omega^2*r) accel that isn't gravity and corrupts
+// the accel-tilt. Subtract it so atan2 sees only gravity -> the body's TRUE lean (IMU reading
+// normalized to the axle/CoM). KIMU converts the m/s^2 lever terms to accel counts: (LSB/g)/g * r.
+static const float KIMU = (2048.0f/9.81f)*0.12f;   // ICM-42670 +-16g => 2048 LSB/g; r=0.12m (120mm up)
+volatile float gImuComp = -0.5f;    // lever-arm comp scale+sign (0=off; -0.5 verified on robot). 'imucomp'
 // --- factory control-input filter (R-1.1.3 FUN_400d529c, Ghidra-confirmed) ---
 // Between IMU fusion and the PID, the factory heavily low-passes pitch & rate
 // (0.95/0.05) and slew-limits the smoothed pitch to 5 deg/cycle. We lacked this.
-volatile float gCtrlLP  = 0.40f;    // control-input low-pass: used = LP*used + (1-LP)*raw
-volatile float gSlewDeg = 5.0f;     // per-cycle slew clamp on the smoothed pitch (deg)
                                     // 0.98 was WAY too accel-trusting (~0.15s): forward accel tips the
                                     // apparent gravity vector -> estimator reads "level" while still
                                     // leaning -> runaway in the lean direction. Accel must trim SLOWLY.
@@ -224,7 +250,10 @@ static const float GYRO_LSB_PER_DPS = 16.4f;
 // wheel encoder constants (match RIG-Omni xgo.cc exactly)
 static const float WHEEL_PI = 3.14159265f;
 static const float K_V = 60.0f * WHEEL_PI / 1024.0f;  // raw-vel -> scaled vel
-static const float LP_VEL = 0.7f;                     // velocity low-pass
+volatile float LP_VEL = 0.85f;                        // wheel-velocity feedback low-pass. 0.7->0.85 (2026-06-19, FLOOR):
+                                                      // smoother wheel_vx pushed the lqrvx damping cliff higher (-6 vs -5)
+                                                      // -> hold ~4.7mm. RUNTIME-TUNABLE via 'vlp'
+                                                      // (higher = smoother wheel_vx -> less velocity-loop buzz, more lag)
 static const float WHEEL_CIRC_M = WHEEL_PI * 0.06f;   // 6 cm wheels
 
 // ---------------- IMU ----------------
@@ -386,24 +415,6 @@ static int   last11=-1, last21=-1;
 static float wheel_x=0, wheel_vx=0;        // fused: meters, scaled vel
 static float gHdgTarget=0;                 // heading-lock target = (wheel1_x - wheel2_x) to hold
 static float stable_pos=0;                 // home position (m), captured on enable
-// Faithful copy of factory CalIWeakenPID (RIG-Omni xgo.cc:715) + struct (xgo.h).
-struct PID { float Des,FB,Kp,Ki,Kd,E,PreE,SumE,U,UMax,EMax,EMin,Up,PMax,Ui,IMax,Ud,DMax; };
-static PID pidPos = {0,0, 60.0f, 0.0f,    0,0,0,0,0, 1000,100, 0.0001f, 0,1000, 0,1000, 0,1000};
-static PID pidVel = {0,0, 0.15f, 0.01f,   0,0,0,0,0,  100,100, 0.01f,   0, 100, 0, 100, 0, 100};
-static PID pidPit = {0,0, 21.0f, 0.0f,    0,0,0,0,0, 1000,  0, 0.01f,   0,1000, 0,1000, 0, 100};
-static void calPID(PID* p){
-  p->E = p->Des - p->FB;
-  if(p->E * p->PreE < 0){ p->Ui = 0; p->SumE = 0; }       // reset I on error sign-flip
-  p->SumE += p->E;
-  if(p->EMax > 0) p->SumE = clampf(p->SumE, -p->EMax, p->EMax);
-  p->Ui = clampf(p->Ki * p->SumE, -p->IMax, p->IMax);
-  p->Ud = clampf(p->Kd * (p->E - p->PreE), -p->DMax, p->DMax);
-  if(p->E < p->EMin && p->E > -p->EMin) p->SumE *= 0.95f;   // I-weaken near setpoint (factory 0.95)
-  p->Up = clampf(p->Kp * p->E, -p->PMax, p->PMax);
-  p->PreE = p->E;
-  p->U = clampf(p->Up + p->Ui + p->Ud, -p->UMax, p->UMax);
-}
-static void pidReset(PID* p){ p->SumE=0; p->PreE=0; p->Ui=0; p->U=0; }
 
 static void odomUpdate(uint8_t id, int pos, int vel){
   if(id==LEFT_W){
@@ -507,14 +518,13 @@ static void balanceTask(void*){
   gGyroBias = -1.19f;               // ...but FORCE the pitch (balance) bias to the baked constant, so a
                                     // boot measurement on a moving robot can never break balance startup. 'gcal' re-measures both.
   float theta=0, dqf=0; bool primed=false;
-  float pitchF=0, rateF=0; bool fpInit=false;   // factory control-input filter state
   uint32_t lastUs = micros(); uint32_t n=0;
   uint32_t hzN=0, hzFail=0, hzT=millis();   // loop-rate / read-fail measurement
   float dtMaxAcc=0;                          // worst-case raw cycle period this report window
   float rdMaxAcc=0, workMaxAcc=0, postMaxAcc=0, inferMaxAcc=0; // INSTRUMENT: read + work + post-read + inference time this window
   for(;;){
     // --- on-demand gyro recal (only while disabled + still) ---
-    if(gDoGcal && !gEnabled){ wheelTorque(0,0); calibrateGyro(); gDoGcal=false; primed=false; fpInit=false; }
+    if(gDoGcal && !gEnabled){ wheelTorque(0,0); calibrateGyro(); gDoGcal=false; primed=false; }
     // --- config dump (read-only): regs 0x00-0x7F in 8-byte chunks ---
     // (extended past 0x2F to hunt the wheel-servo present-voltage register for battery telemetry)
     if(gCfgDumpId){ uint8_t id=gCfgDumpId; gCfgDumpId=0;
@@ -589,8 +599,19 @@ static void balanceTask(void*){
 
     // --- IMU -> tilt + rate (read LATE, just before compute, so pitch is fresh -- see note above) ---
     int16_t ax,ay,az,gx,gy,gz; imuData(&ax,&ay,&az,&gx,&gy,&gz);
-    // ----- factory IMU pitch fusion (RIG-Omni imu.cc:240-246, verbatim) -----
-    float pit_acc  = atan2f((float)ay,(float)az)*57.2958f;       // forward/vertical -> deg
+    // ----- factory IMU pitch fusion + LEVER-ARM COMP (IMU ~120mm above axle) -----
+    // Remove the IMU's own rotation-induced accel before atan2, so the accel-tilt reflects the
+    // body's true lean (normalized to the axle/CoM), not the IMU swinging on its 120mm lever.
+    float pcOmega = ((float)gx/GYRO_LSB_PER_DPS - gGyroBias) * 0.0174533f;  // pitch rate, rad/s
+    static float pcOmPrev=0, pcAlphaF=0;
+    float pcAlpha = (dt>1e-4f) ? (pcOmega - pcOmPrev)/dt : 0.0f;            // angular accel, rad/s^2
+    pcAlphaF = 0.8f*pcAlphaF + 0.2f*pcAlpha;                               // filter the noisy derivative
+    pcOmPrev = pcOmega;
+    float ayC = (float)ay - gImuComp*KIMU*pcAlphaF;            // remove tangential (alpha*r)
+    float azC = (float)az + gImuComp*KIMU*pcOmega*pcOmega;     // remove centripetal (omega^2*r)
+    float pit_acc  = atan2f(ayC, azC)*57.2958f;                // forward/vertical -> deg (lever-arm corrected)
+    float pit_acc_raw = atan2f((float)ay,(float)az)*57.2958f;  // uncorrected, for verify-against-raw
+    tPacc = pit_acc; tPraw = pit_acc_raw;                      // expose both for the lever-arm-comp test
     // roll readout (side-to-side tilt, orthogonal axis). Accel-only + gentle LP --
     // not controlled, just a display value for when the servo legs level the body.
     float roll_acc = atan2f((float)ax,(float)az)*57.2958f;
@@ -654,15 +675,7 @@ static void balanceTask(void*){
     // while disabled, keep home = current position so 'enable' locks here
     if(!gEnabled) stable_pos = wheel_x;
 
-    // --- CASCADED PID (factory architecture) ---
-    // pos/vel errors RESHAPE the target lean; the pitch loop produces torque.
-    float pitch = theta - gSetpoint;                 // our tilt, offset to factory's frame
-    // --- factory control-input filter (R-1.1.3 FUN_400d529c): 0.95/0.05 LP + slew ---
-    if(!fpInit){ pitchF = pitch; rateF = dqf; fpInit = true; }
-    float pn = gCtrlLP*pitchF + (1.0f-gCtrlLP)*pitch;        // heavy low-pass on pitch
-    if(fabsf(pn - pitchF) < gSlewDeg) pitchF = pn;           // slew clamp: <=gSlewDeg per cycle
-    else pitchF += (pn > pitchF ? gSlewDeg : -gSlewDeg);
-    rateF = gCtrlLP*rateF + (1.0f-gCtrlLP)*dqf;              // same LP on rate
+    float pitch = theta - gSetpoint;                 // tilt error fed to the controllers (deg)
     float qErr  = pitch - gImuZero;                  // for fall/telemetry (lean error from base)
     static bool  polInit=false;          // neural-policy episode state (reset on disable)
     static float polIpitch=0,polPrevX=0,polPrevFrame[7]={0},posErrInt=0,xvelF=0,xvelP=0,uF=0,gPosTargetEff=0,vdesS=0;
@@ -678,7 +691,7 @@ static void balanceTask(void*){
 #if POLICY_BUILD
     float posRef = polInit ? gPosTargetEff : wheel_x;   // policy: measure runaway from the slewed target
 #else
-    float posRef = stable_pos;                          // cascade: home position
+    float posRef = stable_pos;                          // LQR: home position
 #endif
     bool fallen = (fabsf(qErr) > gFallDeg) || (fabsf(wheel_x - posRef) > gMaxPosErr);
     gFallen = fallen;                          // expose to the LED status (loop() reads it)
@@ -818,25 +831,69 @@ static void balanceTask(void*){
       if(!gEnabled && gTestTor!=0) u = (float)gTestTor;         // stand-only debug
     }
 #else
-    // ===== CASCADE controller (factory-style PID) -- ONLY in the -DCONTROLLER_CASCADE build =====
+    // ===== LQR full-state controller -- ONLY in the -DCONTROLLER_LQR build =====
+    static bool lqrInit=false;          // drive-state init on enable (mirrors the policy's polInit)
+    static float obsX=0, obsV=0; static bool obsInit=false;   // velocity-observer state (alpha-beta on wheel_x)
     if(gEnabled && !fallen){
-      // live gains -> structs
-      pidPos.Kp=gKpPos; pidVel.Kp=gKpVel; pidVel.Ki=gKiVel; pidPit.Kp=gKpPit;
-      // --- factory cascade: pos(P) -> vel target ; vel(PI) -> lean ; pitch(P) -> torque ---
-      // position error in the home frame: ZERO at enable (stable_pos==wheel_x), so no
-      // start kick regardless of the absolute odometer offset. Sign found empirically.
-      pidPos.Des = gPosErrSign * (wheel_x - stable_pos);  pidPos.FB = 0.0f;  calPID(&pidPos);
-      pidVel.Des = gVx + pidPos.U;      pidVel.FB = gPosSign * wheel_vx;  calPID(&pidVel);
-      pidPit.Des = gImuZero + pidVel.U; pidPit.FB = pitchF;               calPID(&pidPit);
-      float pitU = pidPit.U;
-      float dqU  = clampf(-gKdPit * rateF, -gDqUMax, gDqUMax);   // pitch-rate damping (filtered rate)
-      // factory anti-deadzone min-magnitude (±5) + stiction boost (±10 past ±20)
-      if(pitU > 0.0f && pitU < 5.0f) pitU = 5.0f; else if(pitU < 0.0f && pitU > -5.0f) pitU = -5.0f;
-      if(pitU > gFFband) pitU += gFF; else if(pitU < -gFFband) pitU -= gFF;
-      u = gPolarity * (pitU + dqU);
-      u = clampf(u, -(float)gUMax, (float)gUMax);
+      // ---- DRIVE MANAGEMENT: the SAME gDriveVel velocity-drive interface as the policy build, so
+      //      the DS4 'dv' stick drives the LQR identically. Slew vdesS (accel-capped) toward the
+      //      stick speed; the position target gPosTargetEff tracks it; releasing the stick latches the
+      //      current spot as the new hold-home. The LQR then tracks gPosTargetEff (position loop)
+      //      with vdes as the velocity feedforward. ----
+      float vdes = 0.0f, sdt = (dt>1e-4f ? dt : 0.004f);
+      if(!lqrInit){ gPosTarget=wheel_x; gPosTargetEff=wheel_x; vdesS=0.0f; lqrInit=true; }
+      else {
+        float damax = gPosAmax * sdt;
+        bool turning = (fabsf(gYawRateCmd) > 0.001f);
+        if(turning && !wasTurning){ gPosTarget=wheel_x; gPosTargetEff=wheel_x; }  // re-anchor home at the spin center
+        wasTurning = turning;
+        if(fabsf(gDriveVel) > 0.001f){                                   // VELOCITY DRIVE (stick held)
+          float vtgt = clampf(gDriveVel, -gPosVmaxBack, gPosVmax);        // clamp BOTH dirs (forward was uncapped)
+          if(vtgt > vdesS+damax) vdesS+=damax; else if(vtgt < vdesS-damax) vdesS-=damax; else vdesS=vtgt;
+          gPosTargetEff += vdesS*sdt; gPosTarget=gPosTargetEff; wasVelDrive=true;  // ADVANCE target at cmd velocity
+                                                                                   // -> position term drives it (like ptgt)
+        } else {                                                          // HOLD / 'ptgt' move (stick released)
+          if(wasVelDrive){ vdesS=0.0f; gPosTarget=wheel_x; gPosTargetEff=wheel_x; wasVelDrive=false; }  // latch at current spot
+          float dist=gPosTarget-gPosTargetEff;
+          float vstop=sqrtf(2.0f*gPosAmax*fabsf(dist));
+          float vcap=fminf((dist>=0.0f)?gPosVmax:gPosVmaxBack, vstop);
+          float vcmd=(dist>=0.0f)?vcap:-vcap;
+          if(vcmd > vdesS+damax) vdesS+=damax; else if(vcmd < vdesS-damax) vdesS-=damax; else vdesS=vcmd;
+          gPosTargetEff += vdesS*sdt;
+          if((dist>=0.0f && gPosTargetEff>gPosTarget)||(dist<0.0f && gPosTargetEff<gPosTarget)){ gPosTargetEff=gPosTarget; vdesS=0.0f; }
+        }
+        vdes = vdesS;
+      }
+      tTgtEff=gPosTargetEff; tVdes=vdes;                                   // driving telemetry
+      // --- LQR full-state feedback: u = -(Kx*x + Kvx*vx + Kq*q + Kdq*dq) (RIG-Omni hover port) ---
+      // States in OUR units (identical to the factory's): x position err (m), vx velocity err (m/s),
+      // q pitch err (deg), dq pitch rate (deg/s). gPosTargetEff/vdes come from the drive interface above
+      // (so 'dv' drive + turn still work; pos error is measured from the slewed target).
+      // velocity observer: alpha-beta filter on wheel_x -> smooth low-lag velocity (vs noisy raw wheel_vx).
+      float odt = (dt>1e-4f ? dt : 0.004f);
+      float vel_est;
+      if(gObsA > 0.0f){
+        if(!obsInit){ obsX=wheel_x; obsV=0.0f; obsInit=true; }
+        float resid = wheel_x - (obsX + obsV*odt);      // measurement - prediction
+        obsX += obsV*odt + gObsA*resid;
+        obsV += (gObsB/odt)*resid;
+        vel_est = obsV;
+      } else { vel_est = wheel_vx; obsInit=false; }      // observer OFF -> raw velocity
+      tVest = vel_est;
+      float lqr_x  = wheel_x - gPosTargetEff;           // position error (m)
+      float lqr_vx = vel_est - vdes;                    // velocity error (m/s) -- observer or raw
+      float lqr_q  = pitch - clampf(gDriveFF*vdes, -6.0f, 6.0f);  // pitch err; LEAN-FF tilts the setpoint
+                                                        // forward ~gDriveFF deg per m/s -> robot leans to cruise (works
+                                                        // for the dv/joystick path; a command-FF gets cancelled by balance)
+      float lqr_dq = dqf;                               // pitch rate (deg/s)
+      // Sign anchor: the pitch term -gLqrQ*q with q=+ pitch, plus the wheel L:+u/R:-u mapping below, is our
+      // verified balance sign -- so it stays UP on the first arm. pos/vel gains floor-verified NEGATIVE.
+      float uraw = -(gLqrX*lqr_x + gLqrVx*lqr_vx + gLqrQ*lqr_q + gLqrDq*lqr_dq);  // lean-FF folded into lqr_q
+      if(uraw > gFFband) uraw += gFF; else if(uraw < -gFFband) uraw -= gFF;   // factory stiction boost (+/-10 past +/-20)
+      uF = gPolULP*uF + (1.0f-gPolULP)*uraw;            // output LP available ('polulp', default 0=off=raw)
+      u = clampf(uF, -(float)gUMax, (float)gUMax);
     } else {
-      pidReset(&pidPos); pidReset(&pidVel); pidReset(&pidPit);   // clear PID state when idle
+      uF = 0.0f; lqrInit=false; obsInit=false;                  // reset output-LP + drive + observer for next enable
       if(!gEnabled && gTestTor!=0) u = (float)gTestTor;          // stand-only debug
     }
 #endif
@@ -850,7 +907,7 @@ static void balanceTask(void*){
       if(!wasDriving){ wheelTorqueEnAll(1);                                      // enable both (broadcast, no collision)
                        torqAcc=0; }                                             // seed accumulator at 0
       float uout = u;
-      if(gEnabled && !fallen && gDither>0){ uout += (float)(gDither*ditherSign); ditherSign = -ditherSign; }
+      if(driving && gDither>0){ uout += (float)(gDither*ditherSign); ditherSign = -ditherSign; }  // dither in balance OR stand-test
       // turn differential: from the Stage-1 policy (turnPol) when active, else the hand-tuned gTurn
       float tn = gPolJoint ? clampf(turnPol, -(float)gUMax, (float)gUMax)
                            : clampf(gTurn, -gTurnMax, gTurnMax);
@@ -931,9 +988,9 @@ void setup(){
     tRetDL = servoReadN(LEFT_W,0x07,1,rb)  ? rb[0] : -1;
     tRetDR = servoReadN(RIGHT_W,0x07,1,rb) ? rb[0] : -1; }
   Serial.printf("\n=== Rider balance FW (LQR) ===  IMU WHO_AM_I=0x%02X  retDelay L=%d R=%d\n", imuRead(REG_WHO_AM_I), tRetDL, tRetDR);
-  Serial.println("CASCADE PID: pos->vel->pitch + rate damp (factory R-1.1.3). Legs torque-OFF. DISABLED.");
-  Serial.println("Cmds: en 1|0 | kppos kpvel kivel kppit kdpit izero <v> | kp(=kppit) kd(=kdpit) |");
-  Serial.println("      umax dqmax iclamp ff ffband fall <v> | set cap vx psign pol home gcal | d get");
+  Serial.println("LQR full-state: u = -(lqrx*x + lqrvx*vx + lqrq*q + lqrdq*dq). Legs torque-OFF. DISABLED.");
+  Serial.println("Cmds: en 1|0 | lqrx lqrvx lqrq lqrdq izero set <v> | umax ff ffband fall vlp <v> |");
+  Serial.println("      driveff obsa obsb cap home gcal | d get");
 
   gLeds.begin(); gLeds.clear(); gLeds.show();       // status LEDs (IO27): off until first state update
   pinMode(LED_RED, OUTPUT);  digitalWrite(LED_RED,  LED_OFF);   // discrete red (fault) -- off
@@ -947,8 +1004,8 @@ static void emit(const char* b, int k){ Serial.write((const uint8_t*)b,k); Seria
 static void ackState(){
   char b[210];
   int k = snprintf(b, sizeof(b),
-    "# en=%d kppos=%.1f kpvel=%.3f kivel=%.3f kppit=%.1f kdpit=%.2f izero=%.1f set=%.2f vx=%.2f pol=%+.0f psign=%+.0f Umax=%d ff=%.0f ffb=%.0f clp=%.2f slew=%.1f posmode=%d torlim=%d fault=%d gbias=%.2f posaware=%d\n",
-    gEnabled,gKpPos,gKpVel,gKiVel,gKpPit,gKdPit,gImuZero,gSetpoint,gVx,gPolarity,gPosSign,gUMax,gFF,gFFband,gCtrlLP,gSlewDeg,gPosMode,gTorLim,gWheelFault,gGyroBias,gPosAware);
+    "# en=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f izero=%.1f set=%.2f Umax=%d ff=%.0f ffb=%.0f posmode=%d torlim=%d fault=%d gbias=%.2f posaware=%d\n",
+    gEnabled,gLqrX,gLqrVx,gLqrQ,gLqrDq,gImuZero,gSetpoint,gUMax,gFF,gFFband,gPosMode,gTorLim,gWheelFault,gGyroBias,gPosAware);
   emit(b,k);
 }
 static void applyCmd(char* s){
@@ -958,11 +1015,6 @@ static void applyCmd(char* s){
   if(*sp){ *sp=0; v=atof(sp+1); }
   if      (!strcmp(s,"en"))  { gEnabled=(v!=0.0f); gTurn=0.0f; gYawRateCmd=0.0f; gDriveVel=0.0f; if(gEnabled){ gWheelFault=0; wheel1_x=0; wheel2_x=0; wheel_x=0; stable_pos=0.0f; gPosTarget=0.0f; gHdgTarget=0.0f; gOdoReset=true; dcIdx=0; gDcReady=false; gDcArm=true; } else { gDcArm=false; gDcReady=true; } }  // enable: clear fault + ZERO the position frame (wheel odometer + PID home + target + dead-reckoned pose) so current pos and target both start at 0; stable_pos MUST zero with wheel_x or PID-mode posErr = -(old home) trips the runaway cutout on re-enable; zero any turn
   else if (!strcmp(s,"d"))     gEnabled=false;
-  else if (!strcmp(s,"kppos")) gKpPos=v;               // cascade gains
-  else if (!strcmp(s,"kpvel")) gKpVel=v;
-  else if (!strcmp(s,"kivel")) gKiVel=v;
-  else if (!strcmp(s,"kppit")||!strcmp(s,"kp")) gKpPit=v;
-  else if (!strcmp(s,"kdpit")||!strcmp(s,"kd")) gKdPit=v;
   else if (!strcmp(s,"izero")) gImuZero=v;
   else if (!strcmp(s,"dqmax")) gDqUMax=v;
   else if (!strcmp(s,"posmode")) gPosMode=(v!=0.0f);            // factory position-goal wheel cmd on/off
@@ -972,11 +1024,14 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"iclamp")) gVelIClamp=v;
   else if (!strcmp(s,"umax"))  gUMax=(int)v;
   else if (!strcmp(s,"set"))   gSetpoint=v;
+  else if (!strcmp(s,"lqrx"))  gLqrX=v;                 // LQR position-error gain (floor-tuned -500)
+  else if (!strcmp(s,"lqrvx")) gLqrVx=v;                // LQR velocity-error gain (floor-tuned -6)
+  else if (!strcmp(s,"lqrq"))  gLqrQ=v;                 // LQR pitch-error gain (32)
+  else if (!strcmp(s,"lqrdq")) gLqrDq=v;                // LQR pitch-rate gain (3)
+  else if (!strcmp(s,"obsa"))  gObsA=clampf(v,0.0f,1.0f);   // vel-observer alpha (0=OFF->raw wheel_vx)
+  else if (!strcmp(s,"obsb"))  gObsB=clampf(v,0.0f,1.0f);   // vel-observer beta
+  else if (!strcmp(s,"driveff")) gDriveFF=v;                // drive velocity feedforward (wheel-cmd per m/s; ~-300)
   else if (!strcmp(s,"cap"))   gSetpoint=tTheta;
-  else if (!strcmp(s,"vx"))    gVx=v;
-  else if (!strcmp(s,"pol"))   gPolarity=(v<0.0f?-1.0f:1.0f);
-  else if (!strcmp(s,"psign")) gPosSign=(v<0.0f?-1.0f:1.0f);
-  else if (!strcmp(s,"pesign")) gPosErrSign=(v<0.0f?-1.0f:1.0f);  // flip position-loop correction sign
   else if (!strcmp(s,"home"))  stable_pos=tWheelX;     // re-home here
   else if (!strcmp(s,"rd")){ gDumpRead=true; return; } // dump next raw read frame
   else if (!strcmp(s,"wt")){ gTestTor=(int)v; }        // stand-only wheel torque test
@@ -1002,6 +1057,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"polsign")) gPolSign=(v<0.0f?-1.0f:1.0f);  // flip action->wheel sign (verify on robot)
   else if (!strcmp(s,"polulp"))  gPolULP=clampf(v,0.0f,0.95f);  // policy-output low-pass (0=off..0.95 heavy)
   else if (!strcmp(s,"polvlp"))  gPolVelLP=clampf(v,0.0f,0.97f);// policy velocity-OBS low-pass (kills quantization shimmy)
+  else if (!strcmp(s,"vlp"))     LP_VEL=clampf(v,0.0f,0.98f);   // wheel-velocity feedback low-pass (wheel buzz)
   else if (!strcmp(s,"poshold")) gPosHoldK=v;          // code position-hold P gain (deg/m); 0 = pure balance
   else if (!strcmp(s,"poshi"))   gPosHoldKi=v;         // code position-hold I gain (deg per m*s); kills offset
   else if (!strcmp(s,"poshd"))   gPosHoldKd=v;         // HOLD/close-in D gain (deg per m/s) -- high = crisp hold
@@ -1037,8 +1093,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"ff"))    gFF=v;                  // friction feed-forward magnitude
   else if (!strcmp(s,"ffband")) gFFband=v;             // friction FF deadband
   else if (!strcmp(s,"cfa"))   gCfAlpha=clampf(v,0.9f,0.9999f); // compl-filter gyro weight
-  else if (!strcmp(s,"clp"))   gCtrlLP=clampf(v,0.0f,0.999f);   // control-input low-pass (factory 0.95)
-  else if (!strcmp(s,"slew"))  gSlewDeg=clampf(v,0.5f,90.0f);   // per-cycle pitch slew clamp (factory 5)
+  else if (!strcmp(s,"imucomp")) gImuComp=v;                    // IMU lever-arm comp scale/sign (0=off, -0.5 verified)
   else if (!strcmp(s,"fall"))  gFallDeg=clampf(v,10.0f,70.0f);  // tilt-error torque cutoff (deg)
   else if (!strcmp(s,"dither")) gDither=(int)v;                 // stiction dither amplitude (0=off)
   else if (!strcmp(s,"get")||!strcmp(s,"?")) {}
@@ -1097,8 +1152,8 @@ void loop(){
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
     char b[640];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d kppit=%.0f kdpit=%.2f kppos=%.0f kpvel=%.3f set=%.2f izero=%.1f psign=%+.0f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d\n",
-      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gKpPit, gKdPit, gKpPos, gKpVel, gSetpoint, gImuZero, gPosSign, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, CTRL_NAME, gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR);
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f\n",
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, CTRL_NAME, gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest);
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     if(gPolJoint && k>0){                        // Stage-1 turn-policy diagnostics (obs + outputs)
       k--;                                       // drop trailing '\n'

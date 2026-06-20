@@ -15,7 +15,7 @@ Mapping (balancer w/ position-hold; turning not available yet):
 Run normally:  /home/pi/xgovenv/bin/python rider_controller.py
 Verify mapping: /home/pi/xgovenv/bin/python rider_controller.py --test
 """
-import os, sys, time, json, signal
+import os, sys, time, json, signal, subprocess
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1")
 import pygame
@@ -37,12 +37,23 @@ AXIS_TURN = 3        # right stick X (verify with --test)
 BTN_BALANCE = 0      # Cross (X)
 BTN_ESTOP = 1        # Circle (O)
 BTN_DISTZERO = 3     # Square -- verified via --test 2026-06-16 (Cross=0,Circle=1,Triangle=2,Square=3); sends 'poszero'
+BTN_MODE = 9         # Start/Options -- toggles joystick<->computer drive. VERIFY index with --test (DS4 Options often 9)
 DEADZONE = 0.12
-MAX_SPEED = 0.35     # m/s of position-target travel at full stick (match firmware posvmax; 0.6 overshot/fell)
+MAX_SPEED = 0.25     # m/s at full stick. ->0.25 (2026-06-19, LQR): matches firmware gPosVmax now that the dv-advance
+                     # fix + LQR drive the robot at real speed. Drive authority tops ~0.15 m/s; cap leaves headroom.
 MAX_YAW_RATE = 1.0   # rad/s commanded at full right-stick (firmware closes the loop on the gyro)
 TURN_SIGN = 1        # flip if right-stick-right turns the wrong way
 SEND_HZ = 20
 LOOP_HZ = 50
+
+BEEP_WAV = "/home/pi/beep.wav"   # wm8960 speaker (card 2)
+def beep(n):
+    """n short beeps, non-blocking: 1 = joystick mode, 2 = computer mode."""
+    try:
+        subprocess.Popen(" ; sleep 0.12 ; ".join(["aplay -q -D plughw:2,0 " + BEEP_WAV] * n),
+                         shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 state = {"en": 0, "pos": 0.0}
 
@@ -81,6 +92,9 @@ def main():
     def send(line):
         mqc.publish(TOPIC_CMD, json.dumps({"line": line}), qos=0)
 
+    def pub_mode(m):
+        mqc.publish("rider/control/drivemode", json.dumps({"mode": m}), qos=0, retain=True)
+
     pygame.init()
     pygame.joystick.init()
     js = None
@@ -99,6 +113,7 @@ def main():
     last_send = 0.0
     last_turn = None
     last_turn_send = 0.0
+    drive_mode = "computer"   # BOOT in computer mode (safe default). 'joystick' = stick drives; press Start to opt in.
     period = 1.0 / LOOP_HZ
     send_period = 1.0 / SEND_HZ
 
@@ -106,6 +121,8 @@ def main():
         if abs(v) < DEADZONE:
             return 0.0
         return (v - (DEADZONE if v > 0 else -DEADZONE)) / (1 - DEADZONE)
+
+    time.sleep(0.5); pub_mode(drive_mode)   # boot in computer mode -> tell the LCD
 
     while _running:
         # process the event queue: keeps axis/button state fresh AND handles hotplug --
@@ -116,6 +133,9 @@ def main():
                 js = None
         if js is None:
             if not ensure_js():
+                if drive_mode == "joystick":          # joystick gone -> fall back to computer
+                    drive_mode = "computer"; pub_mode(drive_mode); beep(2)
+                    print("joystick disconnected -> computer mode", flush=True)
                 time.sleep(1.0); continue
         try:
             naxes, nbtn = js.get_numaxes(), js.get_numbuttons()
@@ -145,10 +165,17 @@ def main():
             send("en 0")
         if edge(BTN_DISTZERO):
             send("poszero")                    # re-zero distance, balance stays on
+        if edge(BTN_MODE):                     # Start/Options toggles drive source
+            drive_mode = "computer" if drive_mode == "joystick" else "joystick"
+            send("dv 0"); send("turnrate 0")   # clear any stick command on the switch
+            beep(2 if drive_mode == "computer" else 1)   # 1 beep=joystick, 2=computer
+            pub_mode(drive_mode)               # -> LCD shows the active drive source
+            print("drive_mode -> %s" % drive_mode, flush=True)
         prev_btn = {i: buttons[i] for i in range(len(buttons))}
 
-        # drive (left stick Y) + turn (right stick X) only while balancing
-        if state["en"]:
+        # drive (left stick Y) + turn (right stick X): only while balancing AND in joystick mode.
+        # In computer mode the controller stays silent so MQTT/autonomy drive commands aren't stomped.
+        if state["en"] and drive_mode == "joystick":
             # VELOCITY drive: the stick commands a SPEED (m/s), not an accumulating position.
             # Firmware drives at this speed while non-zero and latches the current position as
             # the hold-home the instant it returns to 0 (-> drives smooth, stops where you let

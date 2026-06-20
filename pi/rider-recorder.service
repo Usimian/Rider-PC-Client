@@ -1,0 +1,20 @@
+[Unit]
+Description=Rider continuous telemetry+dcap recorder (diagnostic: always-on MQTT log)
+After=mosquitto.service
+Wants=mosquitto.service
+
+[Service]
+# Subscribe to the balance telemetry + on-demand high-rate dcap dumps and append every line
+# (timestamped) to a rolling log. Restart=always makes it a self-healing loop, and being a
+# systemd unit it auto-starts on boot -> it is ALWAYS running, surviving power-cycles, so no
+# robot event (fall / swing / nudge) is ever missed for lack of a recorder.
+# NOTE: %% is required -- systemd expands a single % (%%I/%%t/%%p reach mosquitto_sub as %I/%t/%p:
+# ISO-8601 timestamp, topic, payload). A single % gets eaten by systemd and logs garbage.
+ExecStart=/usr/bin/mosquitto_sub -h localhost -t rider/debug/telem -t rider/debug/dcap -v -F "%%I %%t %%p"
+StandardOutput=append:/home/pi/riderlog.txt
+StandardError=append:/home/pi/riderlog.txt
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

@@ -89,7 +89,7 @@ class RiderBalanceEnv(gym.Env):
         super().__init__()
         self.rate_pen = rate_pen   # temporal action-rate^2 weight (chatter suppressor); default 0.30 = deployed
         # pos_weight: position-error^2 penalty when NOT pure_balance (position-aware end-to-end policy).
-        # The policy SEES x_err/x_int and learns the full cascade (position->lean->torque) itself, so it
+        # The policy SEES x_err/x_int and learns the full position->lean->torque mapping itself, so it
         # holds its spot WITHOUT a cruise -- the proper way to a smooth non-drifting balancer. Pairs with
         # the high rate_pen below (the old position-aware attempt used 0.05 -> too twitchy on HW).
         self.pos_weight = pos_weight

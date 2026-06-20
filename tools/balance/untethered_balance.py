@@ -23,14 +23,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cap", action="store_true", help="capture current tilt as setpoint")
     ap.add_argument("--secs", type=float, default=30.0, help="auto-disable after N s")
-    ap.add_argument("--kppos", type=float, default=None, help="cascade position P")
-    ap.add_argument("--kpvel", type=float, default=None, help="cascade velocity P")
-    ap.add_argument("--kivel", type=float, default=None, help="cascade velocity I")
-    ap.add_argument("--kppit", type=float, default=None, help="cascade pitch P")
-    ap.add_argument("--kdpit", type=float, default=None, help="pitch-rate damping")
+    ap.add_argument("--lqrx", type=float, default=None, help="LQR position-error gain")
+    ap.add_argument("--lqrvx", type=float, default=None, help="LQR velocity-error gain")
+    ap.add_argument("--lqrq", type=float, default=None, help="LQR pitch-error gain")
+    ap.add_argument("--lqrdq", type=float, default=None, help="LQR pitch-rate gain")
     ap.add_argument("--izero", type=float, default=None, help="base lean angle (deg)")
-    ap.add_argument("--kp", type=float, default=None, help="alias for --kppit")
-    ap.add_argument("--kd", type=float, default=None, help="alias for --kdpit")
     ap.add_argument("--dither", type=float, default=None, help="stiction dither amplitude (0=off)")
     ap.add_argument("--ff", type=float, default=None, help="friction feed-forward magnitude")
     ap.add_argument("--ffband", type=float, default=None, help="friction FF deadband")
@@ -63,9 +60,8 @@ def main():
         s.write(b"gcal\n"); s.flush(); time.sleep(1.4)
         print("gyro:", send("get"))
 
-    for name, val in (("kppos", a.kppos), ("kpvel", a.kpvel), ("kivel", a.kivel),
-                      ("kppit", a.kppit if a.kppit is not None else a.kp),
-                      ("kdpit", a.kdpit if a.kdpit is not None else a.kd),
+    for name, val in (("lqrx", a.lqrx), ("lqrvx", a.lqrvx), ("lqrq", a.lqrq),
+                      ("lqrdq", a.lqrdq),
                       ("izero", a.izero), ("dither", a.dither),
                       ("ff", a.ff), ("ffband", a.ffband),
                       ("fall", a.fall), ("umax", a.umax)):
