@@ -76,9 +76,16 @@ tel = {}
 cmd_q = queue.Queue()           # inbound MQTT -> ESP32 line commands
 
 
+g_ctrl = "?"                    # active controller from telemetry: POL (policy) or LQR
+
+
 def parse(line):
     for k, v in re.findall(r"(\w+)=(-?[\d.]+)", line):
         tel[k] = float(v)
+    m = re.search(r"\bctrl=(\w+)", line)     # string field, skipped by the numeric regex above
+    if m:
+        global g_ctrl
+        g_ctrl = m.group(1)
 
 
 def cpu_temp_c():
@@ -334,6 +341,10 @@ def render():
     # drive source (Start-button toggle): cyan = joystick, orange = computer/MQTT -- just above CPU row
     dm_col = (80, 200, 255) if g_drivemode == "joystick" else (255, 170, 60)
     d.text((10, 186), "DRIVE: %s" % g_drivemode.upper(), fill=dm_col, font=f_m)
+    # active controller (compile-time build), right-justified on the same line: POLICY (green) / LQR (purple)
+    ctrl_disp = {"POL": "POLICY", "LQR": "LQR"}.get(g_ctrl, g_ctrl)
+    ctrl_col = (150, 220, 150) if g_ctrl == "POL" else (190, 170, 255)
+    d.text((312 - _text_w(d, ctrl_disp, f_m), 186), ctrl_disp, fill=ctrl_col, font=f_m)
 
     cpu = psutil.cpu_percent(); temp = cpu_temp_c(); pw = cm5_power_w()
     tcol = (255, 90, 90) if temp >= 80 else (255, 215, 60) if temp >= 70 else (170, 195, 235)

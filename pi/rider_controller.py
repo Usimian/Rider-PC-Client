@@ -15,7 +15,7 @@ Mapping (balancer w/ position-hold; turning not available yet):
 Run normally:  /home/pi/xgovenv/bin/python rider_controller.py
 Verify mapping: /home/pi/xgovenv/bin/python rider_controller.py --test
 """
-import os, sys, time, json, signal, subprocess
+import os, sys, time, json, signal, threading
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1")
 import pygame
@@ -46,14 +46,19 @@ TURN_SIGN = 1        # flip if right-stick-right turns the wrong way
 SEND_HZ = 20
 LOOP_HZ = 50
 
-BEEP_WAV = "/home/pi/beep.wav"   # wm8960 speaker (card 2)
+BEEP_WAV = "/home/pi/beep.wav"
+_beep_snd = None     # pygame.mixer.Sound, loaded in main() after pygame.init() (which opens the audio device)
 def beep(n):
-    """n short beeps, non-blocking: 1 = joystick mode, 2 = computer mode."""
-    try:
-        subprocess.Popen(" ; sleep 0.12 ; ".join(["aplay -q -D plughw:2,0 " + BEEP_WAV] * n),
-                         shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
+    """n short beeps, non-blocking: 1 = joystick mode, 2 = computer mode. Plays through pygame's
+    own mixer -- pygame.init() already holds the audio device, so no separate aplay / ALSA card to
+    fight over (the card-number reshuffle that broke the old aplay path can't bite here)."""
+    if _beep_snd is None:
+        return
+    def _play():
+        for _ in range(n):
+            _beep_snd.play()
+            time.sleep(0.18)
+    threading.Thread(target=_play, daemon=True).start()
 
 state = {"en": 0, "pos": 0.0}
 
@@ -97,6 +102,13 @@ def main():
 
     pygame.init()
     pygame.joystick.init()
+    global _beep_snd
+    try:
+        if not pygame.mixer.get_init():
+            pygame.mixer.init()
+        _beep_snd = pygame.mixer.Sound(BEEP_WAV)
+    except Exception as e:
+        print("beep audio unavailable:", e, flush=True)
     js = None
 
     def ensure_js():
