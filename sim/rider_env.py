@@ -24,7 +24,8 @@ DR_RANGES = {
     "vel_gain":       (0.85, 1.15),    # cmd->velocity gain (vel_max multiplier)
     "actuator_tau_s": (0.010, 0.018),  # tight around measured 13 ms
     "latency_s":      (0.002, 0.006),  # tight around measured 3 ms
-    "deadband_frac":  (0.0, 0.03),     # measured negligible
+    "deadband_frac":  (0.06, 0.20),    # breakaway: free-wheel ~0.09 (clean), loaded sweep ~same but intermittent
+                                       # -> wide enough to span the real stick-slip variability (2026-06-19 bench)
     "mass_scale":     (0.85, 1.15),    # mass measured -> tighter
     "wheel_friction": (0.6, 1.5),      # real-floor traction unknown -> wide
 }
@@ -60,11 +61,13 @@ class ActuatorModel:
         if self._buf is not None:                      # pure latency
             self._buf.append(cmd)
             cmd = self._buf[0]
-        db = self.p.deadband_frac                      # deadband
+        db = self.p.deadband_frac                      # STICTION breakaway (measured ~0.09, bench command-ladder)
         if db > 0.0:
             if abs(cmd) < db:
-                cmd = 0.0
+                cmd = 0.0                              # below breakaway: STUCK
             else:
+                # deadband + linear: 0 at breakaway, linear to full. NO creep-jump -- the bench
+                # ladder (replay_actuator.py) shows a smooth line from breakaway, not a stick-slip step.
                 cmd = np.sign(cmd) * (abs(cmd) - db) / (1.0 - db)
         target = cmd * self.p.vel_max_rad_s            # velocity setpoint (rad/s)
         if self.p.actuator_tau_s > 0.0:                # first-order tracking lag
@@ -82,8 +85,9 @@ class RiderBalanceEnv(gym.Env):
                  max_seconds: float = 10.0, target_x: float = 0.0, add_noise: bool = True,
                  domain_rand: bool = False, frame_stack: int = 1, pure_balance: bool = True,
                  mirror_aug: bool = False, vel_pen: float = 0.0, rate_dr: bool = True,
-                 pos_anchor: float = 0.0, pos_weight: float = 0.75):
+                 pos_anchor: float = 0.0, pos_weight: float = 0.75, rate_pen: float = 0.30):
         super().__init__()
+        self.rate_pen = rate_pen   # temporal action-rate^2 weight (chatter suppressor); default 0.30 = deployed
         # pos_weight: position-error^2 penalty when NOT pure_balance (position-aware end-to-end policy).
         # The policy SEES x_err/x_int and learns the full cascade (position->lean->torque) itself, so it
         # holds its spot WITHOUT a cruise -- the proper way to a smooth non-drifting balancer. Pairs with
@@ -243,7 +247,7 @@ class RiderBalanceEnv(gym.Env):
         # smoothness to kill the on-robot shimmy (jerky velocity cmd = jerky cart accel).
         pos_pen = (self.pos_anchor if self.pure_balance else self.pos_weight) * (x - self.target_x) ** 2
         act_pen = 0.02 * a ** 2                        # bumped 0.01->0.02: discourage riding the action rail
-        rate_pen = 0.30 * (a - self._prev_a) ** 2      # high smoothness pressure in BOTH modes (was 0.05 non-pure)
+        rate_pen = self.rate_pen * (a - self._prev_a) ** 2   # temporal smoothness pressure (tunable; 0.30 = deployed)
         vel_pen = self.vel_pen * x_vel ** 2            # pin optimum at STATIONARY (kills the trained creep)
         reward = upright - pos_pen - act_pen - rate_pen - vel_pen
         if fell:

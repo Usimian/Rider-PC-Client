@@ -14,9 +14,9 @@ from caps_ppo import CAPS_PPO       # PPO + spatial action-smoothness (used when
 
 
 def make_env(domain_rand=False, frame_stack=1, vel_pen=0.0, mirror_aug=True, rate_dr=True,
-             pos_anchor=0.0, pure_balance=True, pos_weight=0.75):
+             pos_anchor=0.0, pure_balance=True, pos_weight=0.75, rate_pen=0.30):
     return lambda: RiderBalanceEnv(add_noise=True, domain_rand=domain_rand, frame_stack=frame_stack,
-                                   mirror_aug=mirror_aug, vel_pen=vel_pen, rate_dr=rate_dr,
+                                   mirror_aug=mirror_aug, vel_pen=vel_pen, rate_dr=rate_dr, rate_pen=rate_pen,
                                    pos_anchor=pos_anchor, pure_balance=pure_balance, pos_weight=pos_weight)
 
 
@@ -65,12 +65,13 @@ if __name__ == "__main__":
     ap.add_argument("--pos_anchor", type=float, default=0.0)  # small x^2 penalty: break cruise w/o mirror/velpen
     ap.add_argument("--pos_aware", action="store_true")   # position-aware end-to-end (x_err/x_int in obs + objective)
     ap.add_argument("--pos_weight", type=float, default=0.75)  # position-error^2 weight (pos_aware mode)
+    ap.add_argument("--rate_pen", type=float, default=0.30)    # temporal action-rate^2 weight (chatter suppressor)
     args = ap.parse_args()
 
     venv = make_vec_env(make_env(args.domain_rand, args.frame_stack, args.vel_pen,
                                  mirror_aug=not args.no_mirror, rate_dr=not args.no_rate_dr,
                                  pos_anchor=args.pos_anchor, pure_balance=not args.pos_aware,
-                                 pos_weight=args.pos_weight), n_envs=args.nenv)
+                                 pos_weight=args.pos_weight, rate_pen=args.rate_pen), n_envs=args.nenv)
     venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
     common = dict(verbose=1, device="cpu", n_steps=1024, batch_size=2048, gamma=0.997,
                   gae_lambda=0.95, learning_rate=3e-4, policy_kwargs=dict(net_arch=[64, 64]),

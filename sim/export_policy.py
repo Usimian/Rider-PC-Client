@@ -20,9 +20,12 @@ from rider_env import RiderBalanceEnv
 
 name = sys.argv[1] if len(sys.argv) > 1 else "ppo_v_dr_final"
 FS = int(sys.argv[2]) if len(sys.argv) > 2 else 2
+PFX = sys.argv[3] if len(sys.argv) > 3 else "POL"   # C macro/array prefix (POA for pos-aware -> no POL_ collision)
+POS_AWARE = "--posaware" in sys.argv                  # validate in the position-aware env (policy SEES x_err/x_int)
 
 model = PPO.load(name, device="cpu")
-vn = VecNormalize.load(name + "_vecnorm.pkl", DummyVecEnv([lambda: RiderBalanceEnv(frame_stack=FS)]))
+vn = VecNormalize.load(name + "_vecnorm.pkl",
+                       DummyVecEnv([lambda: RiderBalanceEnv(frame_stack=FS, pure_balance=not POS_AWARE)]))
 
 # --- extract weights: hidden Linears (policy_net) + output (action_net) ---
 layers = []
@@ -52,7 +55,7 @@ def npforward(raw_obs):
 
 
 # --- validate against SB3 over real rollouts ---
-env = RiderBalanceEnv(frame_stack=FS, add_noise=False)
+env = RiderBalanceEnv(frame_stack=FS, add_noise=False, pure_balance=not POS_AWARE)
 maxerr, nsteps = 0.0, 0
 for s in range(20):
     obs, _ = env.reset(seed=s)
@@ -90,15 +93,16 @@ def carr(a):
 
 
 with open(name + "_policy.h", "w") as f:
-    f.write(f"// auto-generated from {name} -- deterministic PPO policy for ESP32\n")
+    kind = "POSITION-AWARE (sees x_err/x_int)" if POS_AWARE else "deterministic"
+    f.write(f"// auto-generated from {name} -- {kind} PPO policy for ESP32 ({PFX}_*)\n")
     f.write(f"// obs (len {obs_dim}) = {FS} frames of [pitch,prate,x_err,x_vel,wheel_vel,INT_pitch,INT_x]\n")
-    f.write(f"#define POL_OBS {obs_dim}\n#define POL_FS {FS}\n")
-    f.write(f"#define POL_CLIP {clip:.1f}f\n#define POL_EPS {eps:.8g}f\n")
-    f.write(f"static const float POL_MEAN[{obs_dim}]={carr(mean)};\n")
-    f.write(f"static const float POL_VAR[{obs_dim}]={carr(var)};\n")
+    f.write(f"#define {PFX}_OBS {obs_dim}\n#define {PFX}_FS {FS}\n")
+    f.write(f"#define {PFX}_CLIP {clip:.1f}f\n#define {PFX}_EPS {eps:.8g}f\n")
+    f.write(f"static const float {PFX}_MEAN[{obs_dim}]={carr(mean)};\n")
+    f.write(f"static const float {PFX}_VAR[{obs_dim}]={carr(var)};\n")
     for i, (W, b) in enumerate(layers):
         r, c = W.shape
-        f.write(f"static const float POL_W{i}[{r}][{c}]={{")
+        f.write(f"static const float {PFX}_W{i}[{r}][{c}]={{")
         f.write(",".join(carr(W[k]) for k in range(r)))
-        f.write(f"}};\nstatic const float POL_B{i}[{r}]={carr(b)};\n")
+        f.write(f"}};\nstatic const float {PFX}_B{i}[{r}]={carr(b)};\n")
 print(f"wrote {name}_export.npz and {name}_policy.h ({sum(W.size+b.size for W,b in layers)} weights)")
