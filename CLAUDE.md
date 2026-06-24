@@ -67,9 +67,10 @@ Deploy the Pi stack: `pi/deploy_bridge.sh rider`.
 
 The root holds only README/CLAUDE/start_gui.sh + the component dirs. Bench scripts live in
 `tools/<group>/`; dead legacy-movement and failed-approach scripts were trashed 2026-06-15.
-`tools/servo/` (`servo_status.py` reader + the cal/SPIFFS tooling) is kept pending the leg-servo
-replacement — likely obsolete after, since a working encoder removes the runaway-extension
-workaround's reason to exist.
+`tools/servo/` now holds only the read-only readers — `leg_read.py` (encoder monitor) and
+`servo_status.py` (verified-register snapshot). The cal/SPIFFS-offset/set-zero tooling was trashed
+2026-06-24 after the leg-servo replacement: the new healthy encoder + persistent hard angle limits
+(`0x06`/`0x08`) replaced the runaway-extension workaround. See `docs/servo_registers.md`.
 
 ## Known firmware bug we worked around
 
