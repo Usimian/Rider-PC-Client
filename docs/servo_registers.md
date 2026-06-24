@@ -52,6 +52,17 @@ hand-spun ID21 ±3 revs each way, full 0–1023 coverage, clean multi-wrap accum
 encoder is 14-bit but the **bus reports 10-bit** — odometry is 10-bit/1024-wrap. Legs use scservo
 fine; only the wheels need the raw path.
 
+**CLOSED QUESTION — no 14-bit position is reachable over the bus (don't re-investigate).** The
+motor encoder is 14-bit but only 10-bit position is exposed. Confirmed THREE ways 2026-06-24:
+(1) live probe — reading 12 bytes from `0x24` returns extra fields, but the only >1023 candidate
+(`f4`) did NOT track rotation when hand-spun (it just dithers its high byte); (2) vendor RIG-Omni +
+our balance fw both read only `0x24`/6 bytes; (3) **factory firmware reverse-engineered** — the
+R-1.1.3 binary (byte-verified in both backups, file offset `0x4498a`) issues exactly ONE SCS read:
+`0x24`, length 6 — no read >6 bytes, no use of `0x48`, no 14-bit immediate anywhere in the code.
+So 10-bit position is the hard ceiling; the firmware's g-h velocity observer is the correct fix for
+the quantization noise, not a workaround. (Open lesser thread: is the reported `vel` cleaner than
+differenced position? — run `tools/wheel/wheel_resolution_probe.py`.)
+
 ### Legs (ID 12 / 22) — **K-power RC08P** servo map, FULLY VERIFIED 2026-06-24
 
 The leg servos are **NBD-branded, customized from the K-power RC08P** (per Luwu source). They
