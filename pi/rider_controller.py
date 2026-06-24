@@ -8,8 +8,9 @@ serial/telemetry -- the bridge stays the single serial owner.
 
 Mapping (balancer w/ position-hold; turning not available yet):
   Left stick up/down -> drive the position target (push = move, release = hold)
-  Cross (X)          -> toggle balance (polrun 1 + en 1  /  en 0)
-  Circle (O)         -> emergency stop (en 0)
+  Triangle           -> legs EXTEND (body up), stepped, firmware clamps to servo limits
+  Cross (X)          -> legs RETRACT (body down), stepped, firmware clamps to servo limits
+  Circle (O)         -> toggle balance (polrun 1 + en 1 / en 0); off = stop (no separate e-stop)
   Square (#)         -> zero the distance frame (poszero) without dropping balance
 
 Run normally:  /home/pi/xgovenv/bin/python rider_controller.py
@@ -34,10 +35,12 @@ TOPIC_CMD, TOPIC_STATUS = "rider/control/line", "rider/status"
 # --- mapping (verify indices with --test, then adjust) ---
 AXIS_DRIVE = 1       # left stick Y (stick up = negative)
 AXIS_TURN = 3        # right stick X (verify with --test)
-BTN_BALANCE = 0      # Cross (X)
-BTN_ESTOP = 1        # Circle (O)
-BTN_DISTZERO = 3     # Square -- verified via --test 2026-06-16 (Cross=0,Circle=1,Triangle=2,Square=3); sends 'poszero'
-BTN_MODE = 9         # Start/Options -- toggles joystick<->computer drive. VERIFY index with --test (DS4 Options often 9)
+BTN_BALANCE     = 1  # Circle (O)  -- toggle balance (moved here from Cross 2026-06-24; off = stop)
+BTN_LEG_EXTEND  = 2  # Triangle    -- legs extend (body up)
+BTN_LEG_RETRACT = 0  # Cross (X)   -- legs retract (body down)
+BTN_DISTZERO    = 3  # Square       -- poszero (Cross=0,Circle=1,Triangle=2,Square=3 verified --test 2026-06-16)
+BTN_MODE        = 9  # Start/Options -- toggles joystick<->computer drive
+LEG_STEP        = 10 # encoder counts per Triangle/Cross press (leg-goal nudge; firmware clamps to servo limits)
 DEADZONE = 0.12
 MAX_SPEED = 0.25     # m/s at full stick. ->0.25 (2026-06-19, LQR): matches firmware gPosVmax now that the dv-advance
                      # fix + LQR drive the robot at real speed. Drive authority tops ~0.15 m/s; cap leaves headroom.
@@ -168,15 +171,17 @@ def main():
             cur = buttons[idx] if idx < len(buttons) else 0
             return cur and not prev_btn.get(idx, 0)
 
-        if edge(BTN_BALANCE):
+        if edge(BTN_BALANCE):                  # Circle: balance on/off (toggling off = stop)
             if state["en"]:
                 send("en 0")
             else:
                 send("polrun 1"); send("en 1")     # firmware homes the target on enable
-        if edge(BTN_ESTOP):
-            send("en 0")
-        if edge(BTN_DISTZERO):
-            send("poszero")                    # re-zero distance, balance stays on
+        if edge(BTN_LEG_EXTEND):               # Triangle: legs extend (body up)
+            send("legstep %d" % LEG_STEP)
+        if edge(BTN_LEG_RETRACT):              # Cross: legs retract (body down)
+            send("legstep %d" % -LEG_STEP)
+        if edge(BTN_DISTZERO):                 # Square: re-zero distance, balance stays on
+            send("poszero")
         if edge(BTN_MODE):                     # Start/Options toggles drive source
             drive_mode = "computer" if drive_mode == "joystick" else "joystick"
             send("dv 0"); send("turnrate 0")   # clear any stick command on the switch

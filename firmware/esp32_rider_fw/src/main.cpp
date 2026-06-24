@@ -204,6 +204,27 @@ volatile float tJp=0,tJyr=0,tJaL=0,tJaR=0;  // Stage-1 turn-policy diagnostics (
 volatile float tPoseX=0, tPoseY=0;        // world-frame dead-reckoned pose (m): fwd distance projected through heading (tYaw)
 volatile bool  gOdoReset=true;            // 'odoreset' + each gyro-cal -> loop zeros pose & resyncs prev wheel_x (init true: clean first-loop sync)
 volatile bool  gPosZeroReq=false;         // 'poszero' (controller button) -> loop re-zeros the distance frame WITHOUT dropping balance
+// ---- leg height control (controller Triangle=extend / Cross=retract via 'legstep') ----
+// Mirrored body raise/lower, clamped to the per-leg servo limits, serviced in-loop on an idle bus.
+// Legs energize lazily on first 'legstep' (SAFE-ENERGIZE: seed goal 0x1E = present pos BEFORE torque
+// 0x18=1, so it HOLDS, no snap) and go LIMP on a fall/disable. Feasible now that the dead-encoder
+// ID22 (the old mid-control leg-write -> ID21-dropout cause) is replaced. See docs/servo_registers.md.
+#define LEG_L_MIN 865
+#define LEG_L_MAX 975
+#define LEG_R_MIN 425
+#define LEG_R_MAX 535
+#define LEG_SPEED 100                      // leg move speed (reg 0x20); ~slow/gentle
+#define LEG_NONE  (-32768)                 // sentinel: no target / leg inactive
+#define LEG_SETTLE 3                        // control cycles to wait after torque-on before writing the goal:
+                                            // the servo DROPS a goal write fired right after 0x18=1, so defer it.
+volatile int  gLegStepReq=0;              // pending mirrored step (BOTH legs, body raise/lower); 'legstep'
+volatile int  gLegAbsL=LEG_NONE, gLegAbsR=LEG_NONE; // pending PER-LEG absolute target; 'legL'/'legR' (leg-leveling foundation)
+static int    gLegTgtL=LEG_NONE, gLegTgtR=LEG_NONE; // target goal per leg (LEG_NONE = inactive/limp)
+static bool   gLegEnerL=false,   gLegEnerR=false;   // leg torque on?
+static int    gLegWroteL=0,      gLegWroteR=0;      // last goal written to the servo (skip redundant writes)
+static int    gLegSetlL=0,       gLegSetlR=0;       // post-torque-on settle countdown
+static int    gLegStepL=0,       gLegStepR=0;       // per-leg accumulated pending step (shared 'legstep' distributed here)
+static uint8_t gLegTurn=0;                           // alternate which leg gets the bus each cycle (NO same-cycle contention)
 // --- drive-capture: high-rate commanded-vs-actual wheel velocity + pitch, WHILE balancing/driving ---
 // (the sim can't model the real servo under load; this catches commanded(u) vs actual(encoder v) divergence)
 #define DCAP_N 600                        // ~3.7s @ ~163Hz: enough for a full enable->balance->fall episode
@@ -365,6 +386,63 @@ static bool wheelRead(uint8_t id, int* pos, int* vel){
     }
   }
   return false;
+}
+// ---- leg servos (RC08P, IDs 12/22): 2-byte reg write + present-position read ----
+// Legs use the verified RC08P map: goal 0x1E, speed 0x20, torque 0x18, hard limits 0x06/0x08.
+static void legSetReg2(uint8_t id, uint8_t reg, uint16_t val){   // addressed 2-byte write (e.g. goal 0x1E)
+  while(Serial2.available()) Serial2.read();
+  uint8_t lo=val&0xFF, hi=(val>>8)&0xFF;
+  uint8_t ck = ~(id + 0x05 + 0x03 + reg + lo + hi);
+  uint8_t buf[9] = {0xFF,0xFF,id,0x05,0x03,reg,lo,hi,ck};
+  Serial2.write(buf,9); busSettle();
+}
+// Read leg present position (reg 0x24). Legs reply with a STANDARD frame (unlike the wheels'
+// non-standard one), so pos sits right after ERR. Skip the half-duplex echo (LEN==0x04 = our request).
+static bool legReadPos(uint8_t id, int* pos){
+  uint8_t ck = ~(id + 0x04 + 0x02 + 0x24 + 0x06);
+  uint8_t req[8] = {0xFF,0xFF,id,0x04,0x02,0x24,0x06, ck};
+  while(Serial2.available()) Serial2.read();
+  Serial2.write(req,8); Serial2.flush();
+  uint8_t buf[48]; int n=0; uint32_t t0=micros();
+  while(micros()-t0 < 2000 && n < 48){
+    while(Serial2.available() && n < 48) buf[n++]=Serial2.read();
+    if(n >= 20) break;
+  }
+  for(int i=0;i+6 < n;i++){
+    if(buf[i]==0xFF && buf[i+1]==0xFF && buf[i+2]==id){
+      int LEN = buf[i+3];
+      if(LEN==0x04) continue;                 // echoed request -> skip (reply LEN is 0x08 for a 6-byte read)
+      int cks = i+LEN+3;
+      if(cks >= n) continue;                   // frame incomplete
+      uint8_t sum=0; for(int j=i+2;j<cks;j++) sum+=buf[j];
+      if((uint8_t)~sum != buf[cks]) continue;  // bad checksum -> ignore
+      *pos = (buf[i+5] | (buf[i+6]<<8)) & 0x3FF;   // present position (head data, 10-bit)
+      return true;
+    }
+  }
+  return false;
+}
+// Drive ONE leg toward its target with safe-energize + post-torque-on settle. The servo DROPS a goal
+// write fired in the same instant as torque-on (0x18=1), so we energize first (seed goal=present, no
+// snap), wait LEG_SETTLE cycles, then write the real target once. reqAbs=LEG_NONE/reqStep=0 -> no new
+// request (just continue any deferred write). Pointers = this leg's persistent state.
+static void legService(uint8_t id, int* tgt, bool* ener, int* wrote, int* setl, int reqAbs, int reqStep, int lo, int hi){
+  int nt = *tgt;
+  if(reqAbs != LEG_NONE) nt = reqAbs;                              // absolute request (legL/legR)
+  else if(reqStep != 0){                                          // relative request (legstep)
+    int base = LEG_NONE;
+    if(*ener) base = *tgt; else { int p; if(legReadPos(id,&p)) base = p; }
+    if(base != LEG_NONE) nt = base + reqStep;
+  }
+  if(nt != LEG_NONE){ if(nt<lo) nt=lo; else if(nt>hi) nt=hi; }     // clamp to this leg's limits
+  *tgt = nt;
+  if(*tgt == LEG_NONE) return;                                    // leg inactive -> nothing on the bus
+  if(!*ener){                                                     // SAFE-ENERGIZE (seed=present, torque on); defer target
+    int p;
+    if(legReadPos(id,&p)){ legSetReg2(id,0x1E,p); legSetReg2(id,0x20,LEG_SPEED); wheelSetReg(id,0x18,1);
+                           *ener=true; *wrote=p; *setl=LEG_SETTLE; }
+  } else if(*setl > 0){ (*setl)--; }                              // wait out the torque-enable settle
+  else if(*tgt != *wrote){ legSetReg2(id,0x1E,*tgt); *wrote=*tgt; } // write the target goal (lands now)
 }
 static inline float clampf(float v,float lo,float hi){return v<lo?lo:(v>hi?hi:v);}
 
@@ -936,8 +1014,30 @@ static void balanceTask(void*){
       // case a frame is dropped) BEFORE releasing torque, so the wheels stop dead.
       for(int i=0;i<5;i++){ wheelTorque(0,0); }
       wheelTorqueEnAll(0);                                  // disable both (broadcast, no collision)
+      if(gLegEnerL || gLegEnerR){ legTorqueOff(LEFT_LEG); legTorqueOff(RIGHT_LEG);   // legs LIMP on fall/disable
+        gLegEnerL=gLegEnerR=false; gLegTgtL=gLegTgtR=LEG_NONE; gLegWroteL=gLegWroteR=0; }  // re-arm clean on next leg cmd
     }
     wasDriving = driving;
+
+    // ---- leg control (serviced HERE, on the IDLE bus after the wheel output stage -> avoids the
+    // wheel-read collision that once dropped ID21; safe now that ID22 is replaced). Called every cycle
+    // (cheap -- only touches the bus when a leg is active) so the deferred post-energize goal write lands.
+    //   'legstep n'  -> BOTH legs mirrored (body raise/lower; extend = R+n / L-n)
+    //   'legR pos' / 'legL pos' -> ONE leg to an absolute position (per-leg; leg-leveling foundation)
+    {
+      // Distribute a shared 'legstep' to per-leg pending (mirrored), then service exactly ONE leg
+      // this cycle (alternating). Servicing BOTH in one cycle collided on the bus -> one leg stayed
+      // unenergized (which one was timing-dependent). One-leg-per-cycle = ~83Hz/leg, plenty fast.
+      if(gLegStepReq){ gLegStepR += gLegStepReq; gLegStepL -= gLegStepReq; gLegStepReq = 0; }
+      gLegTurn ^= 1;
+      if(gLegTurn){
+        legService(RIGHT_LEG, &gLegTgtR, &gLegEnerR, &gLegWroteR, &gLegSetlR, gLegAbsR, gLegStepR, LEG_R_MIN, LEG_R_MAX);
+        gLegAbsR = LEG_NONE; gLegStepR = 0;
+      } else {
+        legService(LEFT_LEG,  &gLegTgtL, &gLegEnerL, &gLegWroteL, &gLegSetlL, gLegAbsL, gLegStepL, LEG_L_MIN, LEG_L_MAX);
+        gLegAbsL = LEG_NONE; gLegStepL = 0;
+      }
+    }
 
     // dead-reckoned pose: project the change in fused forward distance through the
     // current heading (tYaw). gyro gives rotation, wheels give translation -- the right
@@ -958,9 +1058,10 @@ static void balanceTask(void*){
     }
 
     n++;
-    // NOTE: legs are untorqued ONCE at startup (setup); we no longer write to them
-    // mid-control. Repeated writes to the dead-encoder right leg (ID22) were a prime
-    // suspect for knocking its bus-neighbor right wheel (ID21) offline under load.
+    // NOTE: legs are untorqued at startup and stay limp until a 'legstep' (Triangle/Cross)
+    // energizes them; leg writes happen ONLY on a pending step, on the idle bus AFTER the wheel
+    // output stage (above). The old "never write legs mid-control" rule existed because writing
+    // the DEAD ID22 encoder knocked ID21 offline -- that servo is replaced now, so it's safe.
     // pace the loop to the factory period so per-sample constants match in time
     { float pms=(micros()-tpost0)*1e-3f; if(pms>postMaxAcc) postMaxAcc=pms; }   // INSTRUMENT: post-read work ms
     uint32_t spent = micros() - now;                 // 'now' = cycle start (dt block)
@@ -1086,6 +1187,9 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"dv"))      gDriveVel=v;          // velocity-drive command (m/s); 0 = release -> latch home + hold
   else if (!strcmp(s,"odoreset")) gOdoReset=true;      // zero dead-reckoned pose (px,py); heading zero is via gyro-cal
   else if (!strcmp(s,"poszero"))  gPosZeroReq=true;    // re-zero the distance frame (odometer+target) mid-balance, no drop
+  else if (!strcmp(s,"legstep"))  gLegStepReq += (int)v; // BOTH legs mirrored (body raise/lower); +extend / -retract; clamped, in-loop
+  else if (!strcmp(s,"legR"))     gLegAbsR = (int)v;     // RIGHT leg -> absolute position (clamped); per-leg, for test + leveling
+  else if (!strcmp(s,"legL"))     gLegAbsL = (int)v;     // LEFT  leg -> absolute position (clamped); per-leg, for test + leveling
   else if (!strcmp(s,"polj"))     gPolJoint=(v!=0.0f); // use Stage-1 balance+turn policy on/off (gated)
   else if (!strcmp(s,"posaware")) gPosAware=(v!=0.0f); // position-aware policy on/off (set while DISABLED; takes effect on enable)
   else if (!strcmp(s,"yawobssign")) gYawObsSign=(v<0?-1.0f:1.0f);  // sim yaw-rate obs sign
