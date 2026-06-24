@@ -26,21 +26,64 @@ ESP32 firmware over the 1 Mbps half-duplex bus. This is the layer `cfgdump <id>`
 | `0x11` | **operating mode** — `0` = velocity-open-loop (wheel) mode | 1 | RIG `SetVelOpenloop` writes `0x11=0`; **hardware-verified** | **Wheels MUST be 0.** `0x11=1` → wheels don't track the velocity command → policy saturates, robot falls. Persistent EEPROM. Firmware re-asserts 0 at boot. See `wmode`. |
 | `0x18` | **torque enable (broadcast limp)** — `0` = limp/free | 1 | our fw `wheelTorqueEnAll`; hardware-verified | `0x18=0` LIMPS the wheel (only effective when `0x1E` is not being driven). |
 | `0x1E` | **drive command** (velocity/torque field) | 2 | RIG `WritePos_Sync_kp`; hardware-verified | Driven via SYNC_WRITE (`0x83`), 4 bytes/servo `[pos=0, pos=0, val_lo, val_hi]`. `0x1E=0` HOLDS zero = torque-locked (resists back-drive). |
-| `0x24` | **present position** (read); present velocity adjacent | 2 | RIG `ReadWheelState`; hardware-verified | Only updates when the motor is **energized** — a freewheeling/torque-off wheel reads frozen. |
+| `0x24` | **present position** (read); present velocity adjacent | 2 | RIG `ReadWheelState`; hardware-verified | **Reads correctly even FREEWHEELING (torque off)** — verified 2026-06-24 by hand-spinning ID21: tracked the full 0–1023 range + multi-rev odometry. (Earlier "only updates when energized" was wrong.) **Wheels: must use the RAW read protocol — see below.** |
 | `0x28` | **torque enable** (per-servo) | 1 | tools/servo, CLAUDE.md | Distinct path from `0x18`; relationship between the two not fully pinned (see UNSURE). |
 | `0x1F` | **encoder offset** | 2 | tools/servo cal, CLAUDE.md | **Writes here do NOT persist** — persistence is via SPIFFS (`0x290000+0x080000`), see `project_xgo_rider_cal_storage`. |
 | `0x37` | **lock** (EEPROM write-lock flag) | 1 | tools/servo `servo_status.py` | |
 | `0x2A` | **goal position** | 2 | tools/servo `servo_status.py` | |
 
-### Legs (ID 12 / 22) — non-standard, our-hardware-verified
-| reg | name / meaning | source | notes |
-|-----|----------------|--------|-------|
-| `0x06` | **leg goal position** (2 bytes) — NON-STANDARD | our hardware (empirical) | `0x35` and `0x2A` did nothing; only `0x06` moved the leg. **Note `0x06` is ALSO `SET_ORIGIN` in xgolib — different layer.** |
-| `0x18` | leg torque enable (write 1 on / 0 off; factory default 1) | our hardware | |
-| `0x24` | leg present position (also mirrored at `0x1E`) | our hardware | leg-limit captures: ID12 ~863–974, ID22 ~30–135 (mirrored) |
+### ⚠️ Reading wheel encoders (IDs 11/21) — RAW protocol only, NOT scservo
 
-### Vendor functions touching other regs (for reference, not our wheels/legs)
-- `0x35` — `WriteByte_P_V` (pos+vel), used by RIG for the **head servo ID3**.
+**`scservo_sdk` register reads (`read1ByteTxRx`/`read2ByteTxRx`/`readTxRx`) DO NOT WORK on the
+wheels — they return a fixed `516` (`0x0204`) to *every* address.** The wheel FOC controller
+(K-power 4012) replies with a **non-standard 11-byte frame** that scservo can't parse; the `516`
+is just the request header (`0x04 0x02`) echoing back. (Cost ~3 failed attempts 2026-06-24 before
+realizing it was the harness, not the wheel.)
+
+**Correct method — raw serial** (see `tools/wheel/wheel_encoder_monitor.py`):
+```
+Request : FF FF ID 04 02 24 06 CK      (read 6 from reg 0x24)
+Response: FF FF ID 0B ERR ...payload... CK   (LEN=0x0B = 11 bytes)
+  pos = resp[LEN-3] | resp[LEN-2]<<8     (10-bit, 0..1023, wraps)
+  vel = resp[LEN-1] | resp[LEN]<<8       (signed; sign = direction)
+```
+Odometry accumulates pos deltas with a ±800 wrap threshold over span 1024. **Verified 2026-06-24**:
+hand-spun ID21 ±3 revs each way, full 0–1023 coverage, clean multi-wrap accumulation. The physical
+encoder is 14-bit but the **bus reports 10-bit** — odometry is 10-bit/1024-wrap. Legs use scservo
+fine; only the wheels need the raw path.
+
+### Legs (ID 12 / 22) — **K-power RC08P** servo map, FULLY VERIFIED 2026-06-24
+
+The leg servos are **NBD-branded, customized from the K-power RC08P** (per Luwu source). They
+speak the FeeTech SCS *protocol* (header `0xFF 0xFF`, `PacketHandler(0)`) but use **K-power's
+register map shifted +6 in the RAM block** vs K-power's generic table. Resolution is **0–1023**
+(10-bit), 200° travel. The +6 shift is anchored by present-position landing on `0x24`. Map
+confirmed by driving a disconnected ID22 into each register (K-power protocol guide:
+`kpower.com/insight_gearbox/7335.html`).
+
+| reg | name / meaning | bytes | notes (all hardware-verified on disconnected ID22) |
+|-----|----------------|-------|------|
+| `0x06` | **MIN angle limit** | 2 | EEPROM hard clamp. Raising it **drags the shaft UP** to the new min (this is the "snap"); lowering it doesn't command motion. Set to leg-min. |
+| `0x08` | **MAX angle limit** | 2 | EEPROM hard clamp. Lowering it **drives the shaft DOWN** to the new max. Set to leg-max. min≤max enforced (min>max rejected). |
+| `0x18` | **torque enable** (1=on, 0=limp) | 1 | On enable, servo drives to the goal in `0x1E`. **SAFE ENERGIZE: write `0x1E`=present-pos (`0x24`) FIRST, then `0x18=1`** → holds, no snap. |
+| `0x1E` | **GOAL position** | 2 | The real position command — smooth, speed-controlled. Writing it (torque on) glides the shaft to target. Wheels sync-write here too (vendor `WritePos_Sync_kp`). |
+| `0x20` | **MOVING speed** | 2 | Speed for the `0x1E` move (≈0–1023). Set before/with the goal for smooth motion. |
+| `0x24` | **present position** | 2 | Live feedback (read). Hand-movement reads here ignore limits; under torque the shaft obeys `0x06`/`0x08`. |
+
+**Leg travel ranges (hand-swept both stops 2026-06-24, NEW right + original left):**
+**ID12 (L) 863–977, ID22 (R) 467–578** (mirrored; short = ID12≈975 / ID22≈467). NOTE: the
+right horn was rotated while disconnected — **re-measure ID22's range after the leg is
+reattached** before trusting these for the right leg.
+
+**Dead ends (do NOT retry — verified ignored by the leg servos):** `0x2A` (reads garbage ~8530),
+`0x35` pos+vel (that's RIG's **head** servo ID3 command — legs ignore it).
+
+**Persistence:** angle-limit writes (`0x06`/`0x08`) **DO persist across power-cycle** — verified
+2026-06-24 (both legs' limits survived a reboot). Unlike the `0x1F` encoder offset, which does NOT
+persist (SPIFFS-only). Legs also boot **torque-OFF** (`0x18`=0) — no power-up snap.
+
+### Vendor functions touching other regs (for reference)
+- `0x35` — `WriteByte_P_V` (pos+vel), used by RIG for the **head servo ID3** (not the legs).
 - `0x48` — `ReadMotorState` block read (RIG).
 
 ---

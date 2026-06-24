@@ -1,5 +1,8 @@
 # Rider-PC-Client — Claude notes
 
+> **Hardware inventory: [`docs/HARDWARE.md`](docs/HARDWARE.md)** — servo IDs↔roles↔models,
+> firmware states, Pi/camera/controller. Read it first; **update it on any hardware change.**
+
 ## Hardware / firmware state lives outside the repo
 
 The XGO Rider's controller is an **ESP32** flashed via USB-C (CH340). Two firmwares matter:
