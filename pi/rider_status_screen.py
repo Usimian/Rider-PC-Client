@@ -327,9 +327,14 @@ def render():
     d.text((188, 14), state, fill=col, font=f_m)
 
     th = tel.get("th", 0.0); roll = tel.get("roll", 0.0); yaw = tel.get("yaw", 0.0)
+    lev_on = int(tel.get("lev", 0))
     for x, lbl, val in ((10, "tilt", th), (112, "roll", roll), (214, "yaw", yaw)):
         d.text((x, 52), lbl, fill=(150, 165, 205), font=f_s)
-        d.text((x, 70), "%+.1f°" % val, fill=(255, 255, 255), font=f_m)
+        # roll-leveling active: highlight the roll value green + a LVL tag by its header
+        rcol = (0, 255, 140) if (lbl == "roll" and lev_on) else (255, 255, 255)
+        d.text((x, 70), "%+.1f°" % val, fill=rcol, font=f_m)
+    if lev_on:
+        d.text((112 + _text_w(d, "roll", f_s) + 6, 52), "LVL", fill=(0, 255, 140), font=f_s)
 
     wp1 = tel.get("wp1", 0.0); wp2 = tel.get("wp2", 0.0)
     wx = tel.get("wx", 0.0); tg = tel.get("ptgt", 0.0); err = wx - tg

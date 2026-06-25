@@ -225,6 +225,27 @@ static int    gLegWroteL=0,      gLegWroteR=0;      // last goal written to the 
 static int    gLegSetlL=0,       gLegSetlR=0;       // post-torque-on settle countdown
 static int    gLegStepL=0,       gLegStepR=0;       // per-leg accumulated pending step (shared 'legstep' distributed here)
 static uint8_t gLegTurn=0;                           // alternate which leg gets the bus each cycle (NO same-cycle contention)
+// ---- leg LEVELING: keep the body level laterally by a SAME-SIGN differential on the legs ----
+// Height (legstep) is the common-mode (R+/L-); leveling is the orthogonal mode (R+c/L+c) -> tilts the
+// body without changing average height. Negative feedback on the IMU roll (tRoll): c = -sign*Kp*(roll-set).
+// 'level 1' captures the current leg height as the anchor and holds the body level around it; legstep then
+// moves that anchor. Edge case (Marc): when one leg hits its servo limit, the leftover correction SPILLS to
+// the other leg, so the body keeps leveling (at the cost of some height) instead of giving up. Legs have hard
+// limits (0x06/0x08) -> safe on the stand, no wheels involved.
+#define LEV_DB 2                              // leveling deadband (counts): don't rewrite the goal for sub-DB roll jitter
+// Factory-matched law (decompiled XGO R-1.1.x roll-balance, FUN_400d4514): a GENTLE proportional
+// roll->leg map with a per-cycle SLEW-RATE LIMIT and a hard authority clamp, in command space. The
+// factory implements it as a Kd-dominant accumulator (Kd=0.02, per-cycle D-clamp 0.8, total clamp
+// +-20deg, then IK to leg angle) -- mathematically a slew-limited proportional controller. Our high-gain
+// direct-encoder PD rang because it chased; this SLEWS toward the target so it can't overshoot.
+volatile bool  gLevelOn  = false;            // 'level 1/0' -- IMU-roll body leveling via differential legs
+volatile float gLevelKp  = 2.0f;             // proportional gain: leg counts per degree of roll error ('levkp'). 2.0 = bench-confirmed stable on the floor while balancing (kp3/slew0.5 rang at ~2Hz; kp2/slew0.2 flat over 20s, 2026-06-25)
+volatile float gLevelSet  = 0.0f;            // target body roll (deg); 0 = level ('levset')
+volatile float gLevelSlew = 0.2f;            // slew limit: max change in the leg command per control cycle (counts) ('levslew'). 0.2 keeps the leg loop below the body's ~2Hz roll resonance
+volatile int   gLevelMax = 40;               // max |differential| authority (counts) ('levmax')
+volatile int   gLevelSign= -1;               // correction sign ('levsign'); -1 per geometry, flip if it tilts the wrong way
+static float   gLevCmd   = 0.0f;             // slew-limited leg differential command (counts); slews toward the proportional target
+static int     gLevAnchR=LEG_NONE, gLevAnchL=LEG_NONE; // leg height anchor captured when leveling is enabled
 // --- drive-capture: high-rate commanded-vs-actual wheel velocity + pitch, WHILE balancing/driving ---
 // (the sim can't model the real servo under load; this catches commanded(u) vs actual(encoder v) divergence)
 #define DCAP_N 600                        // ~3.7s @ ~163Hz: enough for a full enable->balance->fall episode
@@ -1028,7 +1049,36 @@ static void balanceTask(void*){
       // Distribute a shared 'legstep' to per-leg pending (mirrored), then service exactly ONE leg
       // this cycle (alternating). Servicing BOTH in one cycle collided on the bus -> one leg stayed
       // unenergized (which one was timing-dependent). One-leg-per-cycle = ~83Hz/leg, plenty fast.
-      if(gLegStepReq){ gLegStepR += gLegStepReq; gLegStepL -= gLegStepReq; gLegStepReq = 0; }
+      // leveling on: legstep moves the height ANCHOR (mirror); off: it feeds the per-leg step path as before
+      static bool levPrev=false;
+      if(gLevelOn && !levPrev){                                   // rising edge: capture current height as the anchor
+        int p;
+        if(gLegEnerR && gLegTgtR!=LEG_NONE) gLevAnchR=gLegTgtR; else if(legReadPos(RIGHT_LEG,&p)) gLevAnchR=p; else gLevAnchR=(LEG_R_MIN+LEG_R_MAX)/2;
+        if(gLegEnerL && gLegTgtL!=LEG_NONE) gLevAnchL=gLegTgtL; else if(legReadPos(LEFT_LEG,&p)) gLevAnchL=p; else gLevAnchL=(LEG_L_MIN+LEG_L_MAX)/2;
+        gLevCmd = 0.0f;                                           // start with no correction; slew toward the target from here
+      }
+      levPrev=gLevelOn;
+      if(gLegStepReq){
+        if(gLevelOn){ gLevAnchR += gLegStepReq; gLevAnchL -= gLegStepReq; gLegStepReq=0; } // move the level anchor (mirror)
+        else { gLegStepR += gLegStepReq; gLegStepL -= gLegStepReq; gLegStepReq = 0; }
+      }
+      if(gLevelOn){
+        // proportional target (counts) clamped to the authority; the command SLEWS toward it (can't chase/ring)
+        float target = gLevelSign * gLevelKp * (tRoll - gLevelSet);
+        if(target >  (float)gLevelMax) target =  (float)gLevelMax; else if(target < -(float)gLevelMax) target = -(float)gLevelMax;
+        float d = target - gLevCmd;                              // per-cycle slew-rate limit toward the target
+        if(d >  gLevelSlew) d =  gLevelSlew; else if(d < -gLevelSlew) d = -gLevelSlew;
+        gLevCmd += d;
+        int c = (int)lroundf(gLevCmd);                           // differential correction (same sign on both legs)
+        int desR=gLevAnchR+c, desL=gLevAnchL+c;                   // desired (pre-clamp) per-leg goals
+        int tR=desR; if(tR<LEG_R_MIN) tR=LEG_R_MIN; else if(tR>LEG_R_MAX) tR=LEG_R_MAX;
+        int tL=desL; if(tL<LEG_L_MIN) tL=LEG_L_MIN; else if(tL>LEG_L_MAX) tL=LEG_L_MAX;
+        int spillR=desR-tR, spillL=desL-tL;                       // what a clamped leg couldn't absorb -> spill to the other (same sign)
+        tL+=spillR; if(tL<LEG_L_MIN) tL=LEG_L_MIN; else if(tL>LEG_L_MAX) tL=LEG_L_MAX;
+        tR+=spillL; if(tR<LEG_R_MIN) tR=LEG_R_MIN; else if(tR>LEG_R_MAX) tR=LEG_R_MAX;
+        if(gLegTgtR==LEG_NONE || abs(tR-gLegTgtR)>=LEV_DB) gLegAbsR=tR;   // deadband: skip sub-DB rewrites (bus + jitter)
+        if(gLegTgtL==LEG_NONE || abs(tL-gLegTgtL)>=LEV_DB) gLegAbsL=tL;
+      }
       gLegTurn ^= 1;
       if(gLegTurn){
         legService(RIGHT_LEG, &gLegTgtR, &gLegEnerR, &gLegWroteR, &gLegSetlR, gLegAbsR, gLegStepR, LEG_R_MIN, LEG_R_MAX);
@@ -1190,6 +1240,12 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"legstep"))  gLegStepReq += (int)v; // BOTH legs mirrored (body raise/lower); +extend / -retract; clamped, in-loop
   else if (!strcmp(s,"legR"))     gLegAbsR = (int)v;     // RIGHT leg -> absolute position (clamped); per-leg, for test + leveling
   else if (!strcmp(s,"legL"))     gLegAbsL = (int)v;     // LEFT  leg -> absolute position (clamped); per-leg, for test + leveling
+  else if (!strcmp(s,"level"))    gLevelOn = (v!=0);     // IMU-roll body leveling on/off (differential legs)
+  else if (!strcmp(s,"levkp"))    gLevelKp = v;          // leveling proportional gain: leg counts per deg roll error
+  else if (!strcmp(s,"levslew"))  gLevelSlew = v;        // leveling slew limit: max leg-counts change per control cycle
+  else if (!strcmp(s,"levset"))   gLevelSet = v;         // leveling roll setpoint (deg); 0 = level
+  else if (!strcmp(s,"levmax"))   gLevelMax = (int)v;    // leveling max |differential| authority (counts)
+  else if (!strcmp(s,"levsign"))  gLevelSign = (v<0)?-1:1; // leveling correction sign (flip if it tilts the wrong way)
   else if (!strcmp(s,"polj"))     gPolJoint=(v!=0.0f); // use Stage-1 balance+turn policy on/off (gated)
   else if (!strcmp(s,"posaware")) gPosAware=(v!=0.0f); // position-aware policy on/off (set while DISABLED; takes effect on enable)
   else if (!strcmp(s,"yawobssign")) gYawObsSign=(v<0?-1.0f:1.0f);  // sim yaw-rate obs sign
@@ -1256,8 +1312,8 @@ void loop(){
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
     char b[640];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f\n",
-      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, CTRL_NAME, gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest);
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lev=%d\n",
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, CTRL_NAME, gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, gLevelOn);
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     if(gPolJoint && k>0){                        // Stage-1 turn-policy diagnostics (obs + outputs)
       k--;                                       // drop trailing '\n'
