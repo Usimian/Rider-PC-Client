@@ -45,7 +45,7 @@ ser = serial.Serial(PORT, 115200, timeout=0.1)
 # physical buttons on the XGO 2-inch board (active-low, pull-up). Mapped BY POSITION
 # on 2026-06-14 (GPIOs from the XGO CM4 key.py; labels A/B/C/D, but position is what we use):
 #   upper-left  = GPIO17 (C)  -> balance start/stop toggle (next to the RIDER text)
-#   upper-right = GPIO22 (D)  -> tap = STOP (en 0) to the ESP32
+#   upper-right = GPIO22 (D)  -> tap = STOP (en 0 + leglimp: balance off + legs torque-off) to the ESP32
 #   lower-left  = GPIO23 (B)  -> hold ~1.5s = sudo poweroff
 #   lower-right = GPIO24 (A)  -> tap = reset distance frame ('poszero'; odometer + target -> 0)
 BTN_BALANCE = 17                # upper-left  (C)
@@ -432,12 +432,14 @@ while True:
             ser.write(b"poszero\n")
             print("DIST RESET requested (poszero)", flush=True)
         reset_prev = glvl
-        # STOP button (upper-right, GPIO22): tap -> immediate 'en 0' to the ESP32 (estop)
+        # STOP button (upper-right, GPIO22): tap -> immediate 'en 0' to the ESP32 (estop) +
+        # 'leglimp' so the legs go torque-OFF too (the robot settles fully limp, not held).
         slvl = lgpio.gpio_read(_chip, BTN_STOP)
         if stop_prev == 1 and slvl == 0 and tnow - stop_last > 0.4:   # falling edge + debounce
             stop_last = tnow
             ser.write(b"en 0\n")
-            print("STOP requested (en 0)", flush=True)
+            ser.write(b"leglimp\n")
+            print("STOP requested (en 0 + leglimp)", flush=True)
         stop_prev = slvl
     now = time.time()
     if now - last_render >= 0.2:        # LCD ~5 Hz
