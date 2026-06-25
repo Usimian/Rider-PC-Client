@@ -44,6 +44,10 @@ BTN_LEVEL       = 3  # Square       -- toggle roll-leveling (IMU-roll differenti
 BTN_MODE        = 9  # Start/Options -- toggles joystick<->computer drive
 LEG_STEP        = 10 # encoder counts per Triangle/Cross press (leg-goal nudge; firmware clamps to servo limits)
 DEADZONE = 0.12
+TURN_DEADZONE = 0.40  # right stick (turn) resting offset has DRIFTED to ~0.32 (worn stick), past the old 0.30
+                      # deadzone -> it kept commanding turnrate 0.03 and, with no heartbeat to refresh it, that
+                      # value LATCHED in the firmware (robot turned on a centered stick). Widened to 0.40 to
+                      # reject the worn-stick rest; the turn heartbeat below now clears/refreshes like drive.
 MAX_SPEED = 0.25     # m/s at full stick. ->0.25 (2026-06-19, LQR): matches firmware gPosVmax now that the dv-advance
                      # fix + LQR drive the robot at real speed. Drive authority tops ~0.15 m/s; cap leaves headroom.
 MAX_YAW_RATE = 1.0   # rad/s commanded at full right-stick (firmware closes the loop on the gyro)
@@ -135,10 +139,10 @@ def main():
     period = 1.0 / LOOP_HZ
     send_period = 1.0 / SEND_HZ
 
-    def dz(v):                       # deadzone + rescale to full range
-        if abs(v) < DEADZONE:
+    def dz(v, deadzone=DEADZONE):    # deadzone + rescale to full range
+        if abs(v) < deadzone:
             return 0.0
-        return (v - (DEADZONE if v > 0 else -DEADZONE)) / (1 - DEADZONE)
+        return (v - (deadzone if v > 0 else -deadzone)) / (1 - deadzone)
 
     time.sleep(0.5); pub_mode(drive_mode)   # boot in computer mode -> tell the LCD
 
@@ -212,9 +216,13 @@ def main():
                 last_vel = vel
                 send("dv %.3f" % vel)
             # turn: right stick X -> commanded yaw rate (rad/s); send on change incl. return to 0
-            tn = dz(axes[AXIS_TURN]) if AXIS_TURN < len(axes) else 0.0
+            tn = dz(axes[AXIS_TURN], TURN_DEADZONE) if AXIS_TURN < len(axes) else 0.0
             yaw_cmd = TURN_SIGN * tn * MAX_YAW_RATE
-            if (last_turn is None or abs(yaw_cmd - last_turn) > 0.05) and now - last_turn_send >= send_period:
+            # send on meaningful change (incl. all the way to 0) OR a 0.5s heartbeat -- the SAME logic as
+            # drive above. The old change>0.05-only rule with no heartbeat let a small turn value LATCH in
+            # the firmware and never clear -> the robot turned on its own with the stick centered.
+            if ((last_turn is None or abs(yaw_cmd - last_turn) > 0.01) or
+                    (now - last_turn_send >= 0.5)) and now - last_turn_send >= send_period:
                 last_turn_send = now
                 last_turn = yaw_cmd
                 send("turnrate %.2f" % yaw_cmd)

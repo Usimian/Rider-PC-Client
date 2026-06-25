@@ -217,8 +217,8 @@ volatile bool  gPosZeroReq=false;         // 'poszero' (controller button) -> lo
 // 0x18=1, so it HOLDS, no snap) and go LIMP on a fall/disable. Feasible now that the dead-encoder
 // ID22 (the old mid-control leg-write -> ID21-dropout cause) is replaced. See docs/servo_registers.md.
 #define LEG_L_MIN 865
-#define LEG_L_MAX 975
-#define LEG_R_MIN 425
+#define LEG_L_MAX 960              // lowered 975->960: lowest-body floor so the wheels can't rub the frame (bench 2026-06-25)
+#define LEG_R_MIN 440              // raised 425->440: same floor, mirror leg (body down = R toward MIN, L toward MAX)
 #define LEG_R_MAX 535
 #define LEG_SPEED 100                      // leg move speed (reg 0x20); ~slow/gentle
 #define LEG_NONE  (-32768)                 // sentinel: no target / leg inactive
@@ -239,7 +239,6 @@ static uint8_t gLegTurn=0;                           // alternate which leg gets
 // moves that anchor. Edge case (Marc): when one leg hits its servo limit, the leftover correction SPILLS to
 // the other leg, so the body keeps leveling (at the cost of some height) instead of giving up. Legs have hard
 // limits (0x06/0x08) -> safe on the stand, no wheels involved.
-#define LEV_DB 2                              // leveling deadband (counts): don't rewrite the goal for sub-DB roll jitter
 // Factory-matched law (decompiled XGO R-1.1.x roll-balance, FUN_400d4514): the factory ACCUMULATES the
 // controller output into the body-roll command each cycle (out_c += output), clamps it, and drives the
 // legs differentially. That accumulation is integral action -> it drives roll to ZERO. Our first try was
@@ -257,10 +256,12 @@ static int     gLevAnchR=LEG_NONE, gLevAnchL=LEG_NONE; // leg height anchor capt
 // ---- leg state machine: balance-ON -> slew both legs to MID (slow); balance-OFF -> roll-level off +
 // equalize legs (remove the roll differential, keep height) and HOLD torqued; leveling-OFF while balancing
 // -> same equalize (return to neutral). 'Slowly' = a per-cycle slew on the leg command.
-#define LEG_R_MID ((LEG_R_MIN+LEG_R_MAX)/2)        // 480
-#define LEG_L_MID ((LEG_L_MIN+LEG_L_MAX)/2)        // 920
+#define LEG_R_MID 480                              // ride height PINNED (was midpoint of MIN/MAX) so tightening the
+#define LEG_L_MID 920                              // low-height floor doesn't shift the default balancing height
 #define LEG_EQUAL_SUM (LEG_R_MID+LEG_L_MID)        // R+L when the two legs are equal length (differential = 0)
 volatile float gLegHomeSlew = 0.3f;          // home/equalize slew (counts/cycle) = 'slowly' ('leghomeslew')
+volatile bool  gLegLimpReq = false;          // 'leglimp' (STOP button) -> torque-OFF both legs and stay limp
+static bool    gLegLimped  = false;          // legs held limp (suppresses the balance-off equalize) until next balance-on
 static bool    gLegHoming = false;           // slewing legs to a home/equalized destination, then hold
 static float   gLegHomeR=0, gLegHomeL=0;     // slewing command (float for fractional slew)
 static int     gLegDestR=0, gLegDestL=0;     // destination (mid, or equalized), counts
@@ -435,6 +436,18 @@ static void legSetReg2(uint8_t id, uint8_t reg, uint16_t val){   // addressed 2-
   uint8_t buf[9] = {0xFF,0xFF,id,0x05,0x03,reg,lo,hi,ck};
   Serial2.write(buf,9); busSettle();
 }
+// SYNC_WRITE the goal (reg 0x1E, 2 bytes) to BOTH leg servos in ONE broadcast packet, so they move
+// SIMULTANEOUSLY -- no alternating-cycle stagger (~6ms apart) that made roll leveling jerky. Broadcast
+// (0xFE) gets NO reply, so unlike two addressed writes there's no half-duplex collision to dodge.
+static void legGoalSync(int16_t goalR, int16_t goalL){
+  uint8_t buf[14];
+  buf[0]=0xFF;buf[1]=0xFF;buf[2]=0xFE;buf[3]=4+3*2;buf[4]=0x83;buf[5]=0x1E;buf[6]=0x02;
+  buf[7]=RIGHT_LEG; buf[8]=goalR&0xFF; buf[9]=(goalR>>8)&0xFF;
+  buf[10]=LEFT_LEG; buf[11]=goalL&0xFF; buf[12]=(goalL>>8)&0xFF;
+  uint8_t chk=0; for(int i=2;i<13;i++) chk+=buf[i]; buf[13]=~chk;
+  while(Serial2.available()) Serial2.read();
+  Serial2.write(buf,14); busSettle();
+}
 // Read leg present position (reg 0x24). Legs reply with a STANDARD frame (unlike the wheels'
 // non-standard one), so pos sits right after ERR. Skip the half-duplex echo (LEN==0x04 = our request).
 static bool legReadPos(uint8_t id, int* pos){
@@ -461,10 +474,11 @@ static bool legReadPos(uint8_t id, int* pos){
   }
   return false;
 }
-// Drive ONE leg toward its target with safe-energize + post-torque-on settle. The servo DROPS a goal
-// write fired in the same instant as torque-on (0x18=1), so we energize first (seed goal=present, no
-// snap), wait LEG_SETTLE cycles, then write the real target once. reqAbs=LEG_NONE/reqStep=0 -> no new
-// request (just continue any deferred write). Pointers = this leg's persistent state.
+// Drive ONE leg toward its target with energize + post-torque-on settle. Energize is WRITE-ONLY: seed
+// the goal to the TARGET, then torque on -- the servo slews there at LEG_SPEED (gentle, no snap). It does
+// NOT read present position first: a dropped read on the busy bus used to leave the leg permanently limp
+// (energize was gated on the read). reqAbs=LEG_NONE/reqStep=0 -> no new request (continue any deferred
+// write). Pointers = this leg's persistent state.
 static void legService(uint8_t id, int* tgt, bool* ener, int* wrote, int* setl, int reqAbs, int reqStep, int lo, int hi){
   int nt = *tgt;
   if(reqAbs != LEG_NONE) nt = reqAbs;                              // absolute request (legL/legR)
@@ -476,11 +490,10 @@ static void legService(uint8_t id, int* tgt, bool* ener, int* wrote, int* setl, 
   if(nt != LEG_NONE){ if(nt<lo) nt=lo; else if(nt>hi) nt=hi; }     // clamp to this leg's limits
   *tgt = nt;
   if(*tgt == LEG_NONE) return;                                    // leg inactive -> nothing on the bus
-  if(!*ener){                                                     // SAFE-ENERGIZE (seed=present, torque on); defer target
-    int p;
-    if(legReadPos(id,&p)){ legSetReg2(id,0x1E,p); legSetReg2(id,0x20,LEG_SPEED); wheelSetReg(id,0x18,1);
-                           *ener=true; *wrote=p; *setl=LEG_SETTLE; }
-  } else if(*setl > 0){ (*setl)--; }                              // wait out the torque-enable settle
+  if(!*ener){                                                     // ENERGIZE write-only (NO read-gate): seed goal=TARGET,
+    legSetReg2(id,0x1E,*tgt); legSetReg2(id,0x20,LEG_SPEED); wheelSetReg(id,0x18,1);  // speed, torque on -> servo slews
+    *ener=true; *wrote=*tgt; *setl=LEG_SETTLE;                    // to *tgt at LEG_SPEED. torque-on is a write (no reply
+  } else if(*setl > 0){ (*setl)--; }                              // needed) -> a dropped read can't leave the leg limp.
   else if(*tgt != *wrote){ legSetReg2(id,0x1E,*tgt); *wrote=*tgt; } // write the target goal (lands now)
 }
 static inline float clampf(float v,float lo,float hi){return v<lo?lo:(v>hi?hi:v);}
@@ -761,9 +774,8 @@ static void balanceTask(void*){
         rawTurn = gYawFF*gYawRateCmd + gYawKp*yawErr;                 // FF (firm) + FB (trim)
         gHdgTarget = wheel1_x - wheel2_x;     // track heading while turning -> latches the NEW heading on release
       } else {
-        // HEADING LOCK: PD on the wheel-encoder differential (w1-w2) -> hold heading. Pure
-        // encoder-based (no gyro-bias dependence). A rotation moves the wheels off their
-        // individual targets -> differential error -> corrected back.
+        // HEADING LOCK: PD on the wheel-encoder differential (w1-w2) -> hold heading. Pure encoder-based
+        // (no gyro yaw-bias dependence). Verified on-robot 2026-06-15.
         float d     = wheel1_x   - wheel2_x;
         float dRate = wheel1_vel - wheel2_vel;
         rawTurn = gHdgSign * (gHdgKp*(gHdgTarget - d) - gHdgKd*dRate);
@@ -1079,6 +1091,28 @@ static void balanceTask(void*){
       // ===== leg state machine =====
       static bool drvPrev=false, levPrev=false;
       int hp;
+      // STOP-button limp ('leglimp'): torque-OFF both legs and stay limp until the next balance-on.
+      if(gLegLimpReq){
+        // robust torque-OFF: SPACE the writes (the busy bus drops back-to-back writes -- the startup loops
+        // space them too) and VERIFY via a reg 0x18 read-back; re-send until each leg confirms limp. Balance
+        // is off when this fires (STOP sends 'en 0' first), so the brief per-leg stall is harmless.
+        for(int leg=0; leg<2; leg++){
+          uint8_t id = leg ? RIGHT_LEG : LEFT_LEG;
+          for(int t=0; t<4; t++){
+            legTorqueOff(id); vTaskDelay(2);                     // write, then let the bus settle
+            uint8_t tq; if(servoReadN(id,0x18,1,&tq) && tq==0) break;   // confirmed limp -> next leg
+          }
+        }
+        gLegTgtR=gLegTgtL=LEG_NONE; gLegEnerR=gLegEnerL=false;    // legs forget they were energized
+        gLegAbsR=gLegAbsL=LEG_NONE; gLegStepR=gLegStepL=0;        // clear PENDING per-leg targets/steps: a stale gLegAbs
+                                                                 // left by the balance-off equalize would otherwise
+                                                                 // re-energize that leg in the dispatch below (the
+                                                                 // one-leg-not-limp bug -- only one leg serviced/cycle)
+        gLegHoming=false; gLegStepReq=0; gLegLimped=true; gLegLimpReq=false;
+      }
+      if(driving && !drvPrev) gLegLimped=false;                  // re-enabling balance un-limps the legs
+      if(gLegLimped){ drvPrev=driving; levPrev=gLevelOn; }        // stay limp: skip the machine, just track the edges
+      else {
       if(driving && !drvPrev){                                    // balance ON -> slew both legs to MID, slowly
         gLegHomeR = (gLegEnerR&&gLegTgtR!=LEG_NONE)?gLegTgtR:(legReadPos(RIGHT_LEG,&hp)?hp:LEG_R_MID);
         gLegHomeL = (gLegEnerL&&gLegTgtL!=LEG_NONE)?gLegTgtL:(legReadPos(LEFT_LEG,&hp)?hp:LEG_L_MID);
@@ -1125,16 +1159,27 @@ static void balanceTask(void*){
         if(inc >  gLevelSlew) inc =  gLevelSlew; else if(inc < -gLevelSlew) inc = -gLevelSlew;
         gLevCmd += inc;
         if(gLevCmd >  (float)gLevelMax) gLevCmd =  (float)gLevelMax; else if(gLevCmd < -(float)gLevelMax) gLevCmd = -(float)gLevelMax;
-        int c = (int)lroundf(gLevCmd);                           // differential correction (same sign on both legs)
-        int desR=gLevAnchR+c, desL=gLevAnchL+c;                   // desired (pre-clamp) per-leg goals
+        // RESOLUTION: split the tilt between the legs at single-leg-count granularity. The old code put
+        // the same +c on BOTH legs -> roll could only step in 2s. t = total tilt (counts); even t splits
+        // evenly, odd t puts the extra count on ONE leg -> a tiny roll correction moves a single leg.
+        int t = (int)lroundf(2.0f * gLevCmd);
+        int cR = t / 2, cL = t - cR;                             // |t|==1 -> one leg moves, the other holds
+        int desR=gLevAnchR+cR, desL=gLevAnchL+cL;                // desired (pre-clamp) per-leg goals
         int tR=desR; if(tR<LEG_R_MIN) tR=LEG_R_MIN; else if(tR>LEG_R_MAX) tR=LEG_R_MAX;
         int tL=desL; if(tL<LEG_L_MIN) tL=LEG_L_MIN; else if(tL>LEG_L_MAX) tL=LEG_L_MAX;
-        int spillR=desR-tR, spillL=desL-tL;                       // what a clamped leg couldn't absorb -> spill to the other (same sign)
+        int spillR=desR-tR, spillL=desL-tL;                       // a clamped leg's leftover -> spill to the other
         tL+=spillR; if(tL<LEG_L_MIN) tL=LEG_L_MIN; else if(tL>LEG_L_MAX) tL=LEG_L_MAX;
         tR+=spillL; if(tR<LEG_R_MIN) tR=LEG_R_MIN; else if(tR>LEG_R_MAX) tR=LEG_R_MAX;
-        if(gLegTgtR==LEG_NONE || abs(tR-gLegTgtR)>=LEV_DB) gLegAbsR=tR;   // deadband: skip sub-DB rewrites (bus + jitter)
-        if(gLegTgtL==LEG_NONE || abs(tL-gLegTgtL)>=LEV_DB) gLegAbsL=tL;
+        // write BOTH legs in ONE sync packet (simultaneous = smooth) once both are energized+settled;
+        // until then fall back to the per-leg dispatch (gLegAbs) for the lazy safe-energize.
+        if(gLegEnerR && gLegEnerL && gLegSetlR==0 && gLegSetlL==0){
+          if(tR!=gLegTgtR || tL!=gLegTgtL){ legGoalSync((int16_t)tR,(int16_t)tL); gLegTgtR=gLegWroteR=tR; gLegTgtL=gLegWroteL=tL; }
+        } else {
+          if(gLegTgtR==LEG_NONE || tR!=gLegTgtR) gLegAbsR=tR;
+          if(gLegTgtL==LEG_NONE || tL!=gLegTgtL) gLegAbsL=tL;
+        }
       }
+      }  // end !gLegLimped
       gLegTurn ^= 1;
       if(gLegTurn){
         legService(RIGHT_LEG, &gLegTgtR, &gLegEnerR, &gLegWroteR, &gLegSetlR, gLegAbsR, gLegStepR, LEG_R_MIN, LEG_R_MAX);
@@ -1306,6 +1351,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"levsign"))  gLevelSign = (v<0)?-1:1; // leveling correction sign (flip if it tilts the wrong way)
   else if (!strcmp(s,"rollgsign")) gRollGyroSign = (v<0)?-1.0f:1.0f; // roll gyro-fusion sign (flip if fused roll diverges)
   else if (!strcmp(s,"leghomeslew")) gLegHomeSlew = v;   // leg home/equalize slew (counts/cycle) = how 'slowly' the legs move on balance on/off
+  else if (!strcmp(s,"leglimp"))  gLegLimpReq = true;    // STOP button: torque-OFF both legs, stay limp until next balance-on
   else if (!strcmp(s,"polj"))     gPolJoint=(v!=0.0f); // use Stage-1 balance+turn policy on/off (gated)
   else if (!strcmp(s,"posaware")) gPosAware=(v!=0.0f); // position-aware policy on/off (set while DISABLED; takes effect on enable)
   else if (!strcmp(s,"yawobssign")) gYawObsSign=(v<0?-1.0f:1.0f);  // sim yaw-rate obs sign
