@@ -61,14 +61,30 @@ class ActuatorModel:
         if self._buf is not None:                      # pure latency
             self._buf.append(cmd)
             cmd = self._buf[0]
-        db = self.p.deadband_frac                      # STICTION breakaway (measured ~0.09, bench command-ladder)
-        if db > 0.0:
-            if abs(cmd) < db:
-                cmd = 0.0                              # below breakaway: STUCK
+        if getattr(self.p, "stick_slip", False):
+            # LOADED hysteretic stick-slip, gated on ACTUAL wheel motion (self.state from the prev step),
+            # NOT the instantaneous command -> a spinning wheel rides through zero-crossings in the
+            # KINETIC regime (momentum) and only re-sticks once it has genuinely stopped. From rest it
+            # needs the HIGH static breakaway, then jumps discontinuously onto the kinetic line. This is
+            # faithful to the loaded bench AND balanceable: hold = stick/slip pulses, drive = smooth.
+            ds = self.p.stiction_static_frac
+            dk = self.p.stiction_kinetic_frac
+            a = abs(cmd); sgn = 1.0 if cmd >= 0.0 else -1.0
+            if abs(self.state) > 0.5:                              # rad/s: wheel still spinning -> kinetic
+                cmd = sgn * max(0.0, a - dk) / (1.0 - dk)          # no static wall while in motion
+            elif a < ds:
+                cmd = 0.0                                          # at rest, below static breakaway -> stuck
             else:
-                # deadband + linear: 0 at breakaway, linear to full. NO creep-jump -- the bench
-                # ladder (replay_actuator.py) shows a smooth line from breakaway, not a stick-slip step.
-                cmd = np.sign(cmd) * (abs(cmd) - db) / (1.0 - db)
+                cmd = sgn * (a - dk) / (1.0 - dk)                  # break free from rest -> jump onto kinetic line
+        else:
+            db = self.p.deadband_frac                  # STICTION breakaway (measured ~0.09, bench command-ladder)
+            if db > 0.0:
+                if abs(cmd) < db:
+                    cmd = 0.0                          # below breakaway: STUCK
+                else:
+                    # deadband + linear: 0 at breakaway, linear to full. NO creep-jump -- the UNLOADED bench
+                    # ladder (replay_actuator.py) shows a smooth line from breakaway, not a stick-slip step.
+                    cmd = np.sign(cmd) * (abs(cmd) - db) / (1.0 - db)
         target = cmd * self.p.vel_max_rad_s            # velocity setpoint (rad/s)
         if self.p.actuator_tau_s > 0.0:                # first-order tracking lag
             a = self.dt / (self.p.actuator_tau_s + self.dt)

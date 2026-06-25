@@ -46,6 +46,17 @@ class RiderParams:
                                            # velocity smooth like the real geared servo -- was the key fidelity fix
     torque_max_Nm: float = 0.5             # (unused in velocity mode; kept for reference)
 
+    # ---------- loaded stick-slip (BENCH 2026-06-25, sim/actuator_bench_lqr_loaded.csv) ----------
+    # Under the robot's WEIGHT the wheel is not a clean deadband: it sticks until a HIGH static
+    # breakaway (loaded sweep: dead through firmware-cmd ~60, clean slip at ~70 / full-scale 233),
+    # slips with a discontinuous jump, then re-sticks below a LOWER kinetic floor (~cmd 30) =
+    # hysteresis. That near-zero-speed stick-slip is the residual hold-hunt limit cycle. The clean
+    # deadband above is the UNLOADED fit; this is the loaded reality. Off by default (v2 trained on
+    # the clean model); the v5 experiment turns it on to see if the policy learns to break stiction.
+    stick_slip: bool = False               # use the hysteretic stick-slip actuator instead of the clean deadband
+    stiction_static_frac: float = 0.25     # BENCH  loaded breakaway from rest (norm cmd; ~60-70/233)
+    stiction_kinetic_frac: float = 0.12    # BENCH  kinetic floor / re-stick threshold once moving (~30/233)
+
     # ---------- sensing noise (ESTIMATED: for domain randomization) ----------
     gyro_noise_dps: float = 1.0            # ESTIMATED  gyro white-noise std
     gyro_bias_drift_dps: float = 0.3       # ESTIMATED  residual bias after gcal

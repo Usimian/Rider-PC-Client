@@ -33,6 +33,10 @@ DR_RANGES = {
     "wheel_friction": (0.6, 1.5),
     "yaw_rate_bias":  (-0.20, 0.20),   # constant gyro-Z zero-rate bias (rad/s, ~+/-11 deg/s) added to the
                                        # yaw-rate OBS -> policy must stay stable without per-boot gyro recal
+    # loaded stick-slip DR (only used when stick_slip=True): per-wheel hysteresis thresholds spanning
+    # the loaded bench (kinetic ~30/233, static ~60-70/233). static = kinetic + extra (always > kinetic).
+    "stiction_kinetic_frac": (0.07, 0.15),
+    "stiction_static_extra": (0.06, 0.18),
 }
 
 CMD_FWD_MAX = 0.30     # m/s forward command at full
@@ -45,9 +49,12 @@ class RiderDiffDriveEnv(gym.Env):
 
     def __init__(self, params: RiderParams = None, render_mode=None, max_seconds: float = 10.0,
                  add_noise: bool = True, domain_rand: bool = True, frame_stack: int = 2,
-                 mirror_aug: bool = True):
+                 mirror_aug: bool = True, stick_slip: bool = False):
         super().__init__()
         self.p = params or DEFAULT
+        self.stick_slip = stick_slip
+        if stick_slip:
+            self.p = replace(self.p, stick_slip=True)   # nominal (DR-off) actuator uses the loaded stick-slip
         self.frame_stack = frame_stack
         self.mirror_aug = mirror_aug
         self.mirror = 1.0
@@ -144,11 +151,15 @@ class RiderDiffDriveEnv(gym.Env):
         self.model.geom_friction[self._wR, 0] = u(*DR_RANGES["wheel_friction"])
 
         def wheel_params():
-            return replace(self.p,
-                           vel_max_rad_s=self.p.vel_max_rad_s * u(*DR_RANGES["vel_gain"]),
-                           actuator_tau_s=u(*DR_RANGES["actuator_tau_s"]),
-                           latency_s=u(*DR_RANGES["latency_s"]),
-                           deadband_frac=u(*DR_RANGES["stiction_frac"]))
+            kw = dict(vel_max_rad_s=self.p.vel_max_rad_s * u(*DR_RANGES["vel_gain"]),
+                      actuator_tau_s=u(*DR_RANGES["actuator_tau_s"]),
+                      latency_s=u(*DR_RANGES["latency_s"]),
+                      deadband_frac=u(*DR_RANGES["stiction_frac"]))
+            if self.stick_slip:                                    # per-wheel loaded stick-slip thresholds
+                dk = u(*DR_RANGES["stiction_kinetic_frac"])
+                ds = dk + u(*DR_RANGES["stiction_static_extra"])   # static strictly above kinetic
+                kw.update(stick_slip=True, stiction_kinetic_frac=dk, stiction_static_frac=ds)
+            return replace(self.p, **kw)
         self.actL = ActuatorModel(wheel_params(), self.ctrl_dt)   # independent per wheel
         self.actR = ActuatorModel(wheel_params(), self.ctrl_dt)   # -> asymmetric (sticky side)
 
