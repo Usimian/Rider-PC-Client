@@ -32,6 +32,7 @@ def _shutdown(*_a):
 
 BROKER, PORT = "localhost", 1883
 TOPIC_CMD, TOPIC_STATUS = "rider/control/line", "rider/status"
+TOPIC_FWDLIMIT = "rider/safety/fwd_limit"  # ToF safety governor -> forward-speed factor (rider_tof_safety.py)
 
 # --- mapping (verify indices with --test, then adjust) ---
 AXIS_DRIVE = 1       # left stick Y (stick up = negative)
@@ -69,13 +70,19 @@ def beep(n):
             time.sleep(0.18)
     threading.Thread(target=_play, daemon=True).start()
 
-state = {"en": 0, "pos": 0.0}
+state = {"en": 0, "pos": 0.0, "fwd_factor": 1.0}  # fwd_factor: ToF safety cap (1=clear..0=stop)
 
 
 def on_message(client, userdata, msg):
     try:
         p = json.loads(msg.payload.decode())
     except Exception:
+        return
+    if msg.topic == TOPIC_FWDLIMIT:                 # ToF governor: forward-speed factor
+        try:
+            state["fwd_factor"] = max(0.0, min(1.0, float(p["factor"])))
+        except Exception:
+            pass
         return
     if "roll_balance_enabled" in p:
         state["en"] = 1 if p["roll_balance_enabled"] else 0
@@ -98,6 +105,7 @@ def main():
     # dropped by the broker -> state["en"] stuck 0 -> drive/turn silently suppressed.
     def _on_connect(c, u, flags, rc, properties=None):
         c.subscribe(TOPIC_STATUS)
+        c.subscribe(TOPIC_FWDLIMIT)
     mqc.on_connect = _on_connect
     mqc.reconnect_delay_set(min_delay=1, max_delay=10)
     mqc.connect(BROKER, PORT, keepalive=30)
@@ -209,6 +217,8 @@ def main():
             # go, no windup/overshoot). 'ptgt' position moves are still honored separately.
             d = dz(-axes[AXIS_DRIVE]) if AXIS_DRIVE < len(axes) else 0.0   # stick up = forward
             vel = d * MAX_SPEED
+            if vel > 0.0:                       # ToF safety governor: cap FORWARD only (reverse = escape)
+                vel *= state["fwd_factor"]
             # send on meaningful change (incl. return to 0) OR as a periodic heartbeat
             if ((last_vel is None or abs(vel - last_vel) > 0.01) or
                     (now - last_send >= 0.5)) and now - last_send >= send_period:
