@@ -75,3 +75,27 @@ position at rest — the fault only showed mid-range under motion, so a static r
 - **CSI camera** OV5647 via picamera2 (`pi/rider_camera.py`).
 - **DS4** PS4 controller over BT on the Pi (`/dev/input/js0`, pygame; ERTM left at default,
   kernel pinned 6.12.47 — memory `project_xgo_rider_controller`).
+
+## I²C sensors (Pi — bus 1)
+- Pi I²C **bus 1** = GPIO2 (SDA) / GPIO3 (SCL). The carrier's **WM8960 audio codec** lives here at
+  **0x1A** (shows `UU` = kernel-driver-bound) — a handy "bus-alive" reference.
+- **Scan:** `ssh rider 'export PATH=$PATH:/usr/sbin; i2cdetect -y -r 1'`. Two gotchas: the `i2cdetect`
+  binary is in `/usr/sbin` (NOT on the non-interactive `ssh` PATH), and a bare *read* probe misses the
+  WM8960 because Wolfson codecs are **write-only** over I²C — use `i2cdetect`, not a read-scan.
+- **VL53L5CX ToF** (8×8 multizone ranging) — added 2026-06-26, ✅ **ranging confirmed** (62/64 zones
+  valid @ ~1.8 m). Survived an accidental 5 V on VDDA (below) with no damage.
+  - **Wiring:** 4 wires — VCC, GND, SDA, SCL. SDA/SCL tapped onto the **WM8960's SDIN (=SDA) /
+    SCLK (=SCL)** pins: the CM5 exposes **no GPIO pads** (all I/O via the board-to-board connectors) and
+    the carrier header is too fine-pitch, so flexible small-gauge wire soldered **to the traces** +
+    **superglue strain relief**. Same bus as GPIO2/3.
+  - **Power: 3.3 V (VDDA + VDDIO).** ⚠️ VDDA is a SEPARATE analog rail. Feeding it **5 V** (the carrier
+    4-pin connector's power pin) lets the sensor enumerate, load firmware, and report `is_alive` — but it
+    returns **0 ranges / status 255**: over-spec analog can't fire the VCSEL. **Diagnostic rule: talks +
+    loads firmware + alive but no ranging ⇒ analog supply (VDDA) wrong.** Fix = VDDA on 3.3 V.
+  - **3.3 V source:** the **WM8960** is a 3.3 V part — its 3.3 V pins are **DBVDD (pin 10)** and **AVDD
+    (pin 32)**; AVOID **SPKVDD1 (26)/SPKVDD2 (21)** (can be 5 V) and **DCVDD (8)** (1.8 V). Tap the
+    decoupling cap beside the pin (bigger pad); meter 3.3 V first.
+  - **LPn** high enables I²C (pulled to VCC on the breakout → the single VCC feed handles it).
+  - **Driver/test:** Pimoroni `vl53l5cx-ctypes` in venv **`~/tofvenv`** on the Pi (builds ST's ULD +
+    bundles the ~84 KB firmware). Ranging test: **`~/tofvenv/bin/python ~/tof_test.py`**.
+  - **Gotcha:** cyanoacrylate outgassing **fogs the ToF cover glass** — keep fresh CA off the sensor window.
