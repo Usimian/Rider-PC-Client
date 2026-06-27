@@ -74,6 +74,8 @@ stop_last = 0.0                 # stop last-press time (debounce)
 
 tel = {}
 cmd_q = queue.Queue()           # inbound MQTT -> ESP32 line commands
+# forward safety governor state (rider/safety/fwd_limit): obstacle/edge distance ahead
+g_safety = {"reason": "clear", "mm": -1, "factor": 1.0, "t": 0.0}
 
 
 g_ctrl = "?"                    # active controller from telemetry: POL (policy) or LQR
@@ -161,7 +163,8 @@ g_drivemode = "computer"   # joystick / computer -- boot default is computer; co
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
     for t in ("rider/control/line", "rider/control/system",
-              "rider/control/movement", "rider/control/settings", "rider/control/drivemode"):
+              "rider/control/movement", "rider/control/settings", "rider/control/drivemode",
+              "rider/safety/fwd_limit"):
         client.subscribe(t)
 
 
@@ -171,6 +174,12 @@ def on_message(client, userdata, msg):
     except Exception:
         p = {}
     t = msg.topic
+    if t == "rider/safety/fwd_limit":
+        g_safety["reason"] = str(p.get("reason", "clear"))
+        g_safety["mm"] = int(p.get("min_mm", -1))
+        g_safety["factor"] = float(p.get("factor", 1.0))
+        g_safety["t"] = time.time()
+        return
     if t == "rider/control/drivemode":
         global g_drivemode
         m = (p.get("mode") or "").lower()
@@ -335,6 +344,21 @@ def render():
         d.text((x, 70), "%+.1f°" % val, fill=rcol, font=f_m)
     if lev_on:
         d.text((112 + _text_w(d, "roll", f_s) + 6, 52), "LVL", fill=(0, 255, 140), font=f_s)
+
+    # forward path (ToF governor): OBSTACLE/EDGE distance ahead, or CLEAR. Red = stopped
+    # (factor 0, <=~20cm), amber = slowing, green = clear, grey = governor offline (stale).
+    sf = g_safety
+    if time.time() - sf["t"] > 3.0:
+        s_txt, s_col = "FWD --", (110, 110, 110)                            # governor offline
+    elif sf["reason"] in ("obstacle", "cliff") and sf["mm"] >= 0:
+        kind = "OBSTACLE" if sf["reason"] == "obstacle" else "EDGE"
+        # green = clear ahead, amber = slowing, red = stopped (<=~20cm)
+        s_col = (255, 90, 90) if sf["factor"] <= 0.001 else \
+                (255, 170, 60) if sf["factor"] < 0.999 else (0, 255, 140)
+        s_txt = "%s %dcm" % (kind, round(sf["mm"] / 10.0))
+    else:
+        s_txt, s_col = "---", (110, 110, 110)                               # nothing within range
+    d.text((10, 90), s_txt, fill=s_col, font=f_m)
 
     wp1 = tel.get("wp1", 0.0); wp2 = tel.get("wp2", 0.0)
     wx = tel.get("wx", 0.0); tg = tel.get("ptgt", 0.0); err = wx - tg

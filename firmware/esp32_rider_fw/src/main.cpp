@@ -813,6 +813,7 @@ static void balanceTask(void*){
     float pitch = theta - gSetpoint;                 // tilt error fed to the controllers (deg)
     float qErr  = pitch - gImuZero;                  // for fall/telemetry (lean error from base)
     static bool  polInit=false;          // neural-policy episode state (reset on disable)
+    static bool  lqrInit=false;          // LQR drive-state init on enable; declared here (not in the LQR block) so the runaway cutout's posRef can read it
     static float polIpitch=0,polPrevX=0,polPrevFrame[7]={0},posErrInt=0,xvelF=0,xvelP=0,uF=0,gPosTargetEff=0,vdesS=0;
     static float posXInt=0;             // position-aware policy x_err integral (sim _x_int; clamp +/-2.0 m*s)
     static bool  wasVelDrive=false;     // edge-detect velocity-drive -> release, to latch the home cleanly
@@ -821,12 +822,12 @@ static void balanceTask(void*){
     // position-runaway cutout: in policy mode measure from the SLEWED target gPosTargetEff
     // (what the wheels actually track) -- a joystick that jumps gPosTarget far ahead slews
     // in gradually at posvmax, so driving never trips the guard; only a genuine track loss
-    // (wheel_x lags the slewed target by >gMaxPosErr) does. Before policy init (fresh enable)
-    // reference current position so the in-branch homing isn't locked out. Non-policy: enable home.
+    // (wheel_x lags the slewed target by >gMaxPosErr) does. Before policy/LQR init (fresh enable)
+    // reference current position so the in-branch homing isn't locked out.
 #if POLICY_BUILD
     float posRef = polInit ? gPosTargetEff : wheel_x;   // policy: measure runaway from the slewed target
 #else
-    float posRef = stable_pos;                          // LQR: home position
+    float posRef = lqrInit ? gPosTargetEff : stable_pos;  // LQR: SAME -- runaway from the slewed target, not the frozen enable home (else any >gMaxPosErr drive trips the cutout & zeroes u)
 #endif
     bool fallen = (fabsf(qErr) > gFallDeg) || (fabsf(wheel_x - posRef) > gMaxPosErr);
     gFallen = fallen;                          // expose to the LED status (loop() reads it)
@@ -967,7 +968,7 @@ static void balanceTask(void*){
     }
 #else
     // ===== LQR full-state controller -- ONLY in the -DCONTROLLER_LQR build =====
-    static bool lqrInit=false;          // drive-state init on enable (mirrors the policy's polInit)
+    // (lqrInit declared up top alongside polInit so the position-runaway cutout's posRef can read it)
     static float obsX=0, obsV=0; static bool obsInit=false;   // velocity-observer state (alpha-beta on wheel_x)
     static float lqrIx=0;                                     // position-error integral accumulator (m*s); homes steady-state pos error to 0
     if(gEnabled && !fallen){
@@ -1416,10 +1417,11 @@ void loop(){
     vbatF = 0.95f*vbatF + 0.05f*vb; tVbat=vbatF;              // heavy LP (battery is slow)
     int bpct = (int)clampf((tVbat-VBAT_EMPTY)/(VBAT_FULL-VBAT_EMPTY)*100.0f, 0.0f, 100.0f);
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
-    char b[640];
+    char b[704];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lev=%d racc=%.2f gturn=%.1f htg=%.3f yrc=%.3f\n",
-      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, CTRL_NAME, gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, gLevelOn, tRollAcc, gTurn, gHdgTarget, gYawRateCmd);
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lev=%d racc=%.2f gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d\n",
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, CTRL_NAME, gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, gLevelOn, tRollAcc, gTurn, gHdgTarget, gYawRateCmd,
+      (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID));
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     if(gPolJoint && k>0){                        // Stage-1 turn-policy diagnostics (obs + outputs)
       k--;                                       // drop trailing '\n'
