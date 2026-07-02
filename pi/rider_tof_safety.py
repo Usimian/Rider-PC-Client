@@ -42,7 +42,9 @@ LEG_IDX_DEFAULT = -441                  # mid ride height, until leg telem arriv
 
 # --- drive corridor + obstacle band ---
 COLS = (2, 3, 4, 5)        # center columns = path straight ahead
-OBS_Z_MIN = 0.07           # m above floor: ignore floor itself (and near-floor pitch noise) below this
+OBS_Z_MIN = 0.05           # m above floor: obstacle floor. MUST equal FLOOR_TOL (below) -- anything the
+                           # floor-detector rejects as "too high to be floor" in the corridor is an obstacle.
+                           # A gap here (OBS_Z_MIN > FLOOR_TOL) makes short objects (that band tall) invisible.
 OBS_Z_MAX = 0.50           # m above floor: ignore stuff overhead
 STOP_FWD = 0.20            # m forward: full stop at/under this
 SLOW_FWD = 0.80            # m forward: full speed beyond; linear taper between

@@ -82,7 +82,7 @@ g_ctrl = "?"                    # active controller from telemetry: POL (policy)
 
 
 def parse(line):
-    for k, v in re.findall(r"(\w+)=(-?[\d.]+)", line):
+    for k, v in re.findall(r"(\w+)=(-?\d+(?:\.\d+)?)", line):   # strict float token: no '1.2.3' / '.' that would crash float()
         tel[k] = float(v)
     m = re.search(r"\bctrl=(\w+)", line)     # string field, skipped by the numeric regex above
     if m:
@@ -175,10 +175,13 @@ def on_message(client, userdata, msg):
         p = {}
     t = msg.topic
     if t == "rider/safety/fwd_limit":
-        g_safety["reason"] = str(p.get("reason", "clear"))
-        g_safety["mm"] = int(p.get("min_mm", -1))
-        g_safety["factor"] = float(p.get("factor", 1.0))
-        g_safety["t"] = time.time()
+        try:                                             # tolerate a malformed/null field w/o dropping the whole msg
+            g_safety["reason"] = str(p.get("reason", "clear"))
+            g_safety["mm"] = int(p.get("min_mm", -1))
+            g_safety["factor"] = float(p.get("factor", 1.0))
+            g_safety["t"] = time.time()
+        except (TypeError, ValueError):
+            pass
         return
     if t == "rider/control/drivemode":
         global g_drivemode
@@ -392,34 +395,26 @@ def render():
 
 
 last_render = 0.0
+def mqtt_forward(topic, line):
+    """Republish a raw ESP32 serial line to MQTT so it's reachable while the robot
+    drives untethered (USB-C unplugged). Best-effort: a broker hiccup never stalls the bridge."""
+    if mqc is not None:
+        try:
+            mqc.publish(topic, line)
+        except Exception:
+            pass
+
 last_pub = 0.0
 psutil.cpu_percent()  # prime
 while True:
     line = ser.readline().decode(errors="replace").strip()
     if line.startswith("th="):
         parse(line)
-        # high-rate raw-telemetry republish for untethered diagnostics (~ESP32 rate)
-        if mqc is not None:
-            try:
-                mqc.publish("rider/debug/telem", line)
-            except Exception:
-                pass
+        mqtt_forward("rider/debug/telem", line)   # high-rate raw telemetry (~ESP32 rate)
     elif line.startswith("# dcap"):
-        # forward the firmware's drive-capture dump (commanded-vs-actual wheel vel)
-        # so it's reachable over MQTT while the robot drives untethered (USB-C unplugged).
-        if mqc is not None:
-            try:
-                mqc.publish("rider/debug/dcap", line)
-            except Exception:
-                pass
+        mqtt_forward("rider/debug/dcap", line)     # drive-capture dump (commanded-vs-actual wheel vel)
     elif line.startswith("# cfg"):
-        # forward the firmware's servo config-register dump ('cfgdump <id>') over MQTT
-        # so wheel-servo registers can be inspected/compared without USB-C / passthrough fw.
-        if mqc is not None:
-            try:
-                mqc.publish("rider/debug/cfg", line)
-            except Exception:
-                pass
+        mqtt_forward("rider/debug/cfg", line)      # servo config-register dump ('cfgdump <id>')
     # relay any queued commands to the ESP32
     while not cmd_q.empty():
         try:

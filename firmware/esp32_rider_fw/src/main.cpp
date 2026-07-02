@@ -544,7 +544,6 @@ static float wheel1_vel=0, wheel2_vel=0;   // filtered scaled velocity
 static int   last11=-1, last21=-1;
 static float wheel_x=0, wheel_vx=0;        // fused: meters, scaled vel
 static float gHdgTarget=0;                 // heading-lock target = (wheel1_x - wheel2_x) to hold
-static float stable_pos=0;                 // home position (m), captured on enable
 
 static void odomUpdate(uint8_t id, int pos, int vel){
   if(id==LEFT_W){
@@ -807,9 +806,6 @@ static void balanceTask(void*){
       k+=snprintf(b+k,sizeof(b)-k,"\n"); emit(b,k); gDumpRead=false;
     }
 
-    // while disabled, keep home = current position so 'enable' locks here
-    if(!gEnabled) stable_pos = wheel_x;
-
     float pitch = theta - gSetpoint;                 // tilt error fed to the controllers (deg)
     float qErr  = pitch - gImuZero;                  // for fall/telemetry (lean error from base)
     static bool  polInit=false;          // neural-policy episode state (reset on disable)
@@ -827,13 +823,13 @@ static void balanceTask(void*){
 #if POLICY_BUILD
     float posRef = polInit ? gPosTargetEff : wheel_x;   // policy: measure runaway from the slewed target
 #else
-    float posRef = lqrInit ? gPosTargetEff : stable_pos;  // LQR: SAME -- runaway from the slewed target, not the frozen enable home (else any >gMaxPosErr drive trips the cutout & zeroes u)
+    float posRef = lqrInit ? gPosTargetEff : wheel_x;   // LQR: runaway from the slewed target while balancing; when NOT balancing (fresh enable OR post-fall) reference wheel_x so the position term contributes 0 -- else a fall AFTER driving >gMaxPosErr from home latches 'fallen' forever (wheels are off here anyway, so runaway protection is unaffected). Matches the policy build above.
 #endif
     bool fallen = (fabsf(qErr) > gFallDeg) || (fabsf(wheel_x - posRef) > gMaxPosErr);
     gFallen = fallen;                          // expose to the LED status (loop() reads it)
     if(gPosZeroReq){                           // re-zero the distance frame mid-balance: odometer + target + slew
       wheel1_x = 0; wheel2_x = 0; wheel_x = 0; //   are zeroed TOGETHER so posErr stays 0 -> no jolt, balance holds
-      stable_pos = 0; gHdgTarget = 0;
+      gHdgTarget = 0;
       gPosTarget = 0; gPosTargetEff = 0; posErrInt = 0; vdesS = 0; polPrevX = 0;
       gOdoReset = true;                        // dead-reckoned pose origin too
       gPosZeroReq = false;
@@ -1266,7 +1262,7 @@ static void applyCmd(char* s){
   char* sp=s; while(*sp && *sp!=' ') sp++;
   float v=0;
   if(*sp){ *sp=0; v=atof(sp+1); }
-  if      (!strcmp(s,"en"))  { gEnabled=(v!=0.0f); gTurn=0.0f; gYawRateCmd=0.0f; gDriveVel=0.0f; if(gEnabled){ gWheelFault=0; wheel1_x=0; wheel2_x=0; wheel_x=0; stable_pos=0.0f; gPosTarget=0.0f; gHdgTarget=0.0f; gOdoReset=true; dcIdx=0; gDcReady=false; gDcArm=true; } else { gDcArm=false; gDcReady=true; } }  // enable: clear fault + ZERO the position frame (wheel odometer + PID home + target + dead-reckoned pose) so current pos and target both start at 0; stable_pos MUST zero with wheel_x or PID-mode posErr = -(old home) trips the runaway cutout on re-enable; zero any turn
+  if      (!strcmp(s,"en"))  { gEnabled=(v!=0.0f); gTurn=0.0f; gYawRateCmd=0.0f; gDriveVel=0.0f; if(gEnabled){ gWheelFault=0; wheel1_x=0; wheel2_x=0; wheel_x=0; gPosTarget=0.0f; gHdgTarget=0.0f; gOdoReset=true; dcIdx=0; gDcReady=false; gDcArm=true; } else { gDcArm=false; gDcReady=true; } }  // enable: clear fault + ZERO the position frame (wheel odometer + target + dead-reckoned pose) so current pos and target both start at 0; zero any turn
   else if (!strcmp(s,"d"))     gEnabled=false;
   else if (!strcmp(s,"izero")) gImuZero=v;
   else if (!strcmp(s,"dqmax")) gDqUMax=v;
@@ -1287,7 +1283,6 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"obsb"))  gObsB=clampf(v,0.0f,1.0f);   // vel-observer beta
   else if (!strcmp(s,"driveff")) gDriveFF=v;                // drive velocity feedforward (wheel-cmd per m/s; ~-300)
   else if (!strcmp(s,"cap"))   gSetpoint=tTheta;
-  else if (!strcmp(s,"home"))  stable_pos=tWheelX;     // re-home here
   else if (!strcmp(s,"rd")){ gDumpRead=true; return; } // dump next raw read frame
   else if (!strcmp(s,"wt")){ gTestTor=(int)v; }        // stand-only wheel torque test
   else if (!strcmp(s,"wmode")){ wheelSetReg(LEFT_W,0x11,(uint8_t)v); wheelSetReg(RIGHT_W,0x11,(uint8_t)v); } // wheel mode reg 0x11

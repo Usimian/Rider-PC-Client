@@ -17,8 +17,11 @@ Mapping (balancer w/ position-hold; turning not available yet):
 Run normally:  /home/pi/xgovenv/bin/python rider_controller.py
 Verify mapping: /home/pi/xgovenv/bin/python rider_controller.py --test
 """
-import os, sys, time, json, signal, threading
+import os, sys, time, json, signal, subprocess
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+# pygame/SDL can't open this Pi's ALSA "default" device (error 524); we beep via aplay to the wm8960
+# by name instead, and disable pygame audio so it neither errors nor grabs a device.
+os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 os.environ.setdefault("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1")
 import pygame
 import paho.mqtt.client as mqtt
@@ -57,18 +60,15 @@ SEND_HZ = 20
 LOOP_HZ = 50
 
 BEEP_WAV = "/home/pi/beep.wav"
-_beep_snd = None     # pygame.mixer.Sound, loaded in main() after pygame.init() (which opens the audio device)
+# Address the wm8960 by NAME, not card number -- ALSA indices reshuffle across reboots/kernel updates.
+BEEP_DEV = "plughw:CARD=wm8960soundcard,DEV=0"
 def beep(n):
-    """n short beeps, non-blocking: 1 = joystick mode, 2 = computer mode. Plays through pygame's
-    own mixer -- pygame.init() already holds the audio device, so no separate aplay / ALSA card to
-    fight over (the card-number reshuffle that broke the old aplay path can't bite here)."""
-    if _beep_snd is None:
-        return
-    def _play():
-        for _ in range(n):
-            _beep_snd.play()
-            time.sleep(0.18)
-    threading.Thread(target=_play, daemon=True).start()
+    """n short beeps, non-blocking: 1 = joystick mode, 2 = computer mode, 3 = boot ready."""
+    try:
+        subprocess.Popen(" ; sleep 0.03 ; ".join(["aplay -q -D %s %s" % (BEEP_DEV, BEEP_WAV)] * n),
+                         shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 state = {"en": 0, "pos": 0.0, "fwd_factor": 1.0}  # fwd_factor: ToF safety cap (1=clear..0=stop)
 
@@ -119,13 +119,7 @@ def main():
 
     pygame.init()
     pygame.joystick.init()
-    global _beep_snd
-    try:
-        if not pygame.mixer.get_init():
-            pygame.mixer.init()
-        _beep_snd = pygame.mixer.Sound(BEEP_WAV)
-    except Exception as e:
-        print("beep audio unavailable:", e, flush=True)
+    beep(3)          # boot-ready signal: 3 beeps once the controller is up
     js = None
 
     def ensure_js():
