@@ -12,6 +12,9 @@ __pycache__/
 *.bin
 # ...except the known-good prebuilt firmware images, which we keep on purpose
 !firmware/prebuilt/*.bin
+# ...but NOT the balance fw: it changes every firmware commit and is always flashed
+# from source (pio run -t upload), so a snapshot here just goes stale. Build it.
+firmware/prebuilt/rider_balance_fw.bin
 # Diagnostic captures + plots (transient, regenerable from the robot)
 *.csv
 *.png
