@@ -567,9 +567,11 @@ class ImageDisplayPanel:
             self.status_label.config(text=f"❌ {error_msg}")
             self.current_image = None
             self.current_image_data = None
-            return
-        
-        if image_data is None:
+            # NOTE: do NOT return here -- fall through to the reschedule block below, or a
+            # single failed frame during live video kills the loop permanently (video_active
+            # stays True but nothing re-arms _start_video_loop). The image cases are 'elif'.
+
+        elif image_data is None:
             # No image available
             self.image_label.config(
                 image="",

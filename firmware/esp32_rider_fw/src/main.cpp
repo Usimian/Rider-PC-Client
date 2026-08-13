@@ -1043,9 +1043,15 @@ static void balanceTask(void*){
                        torqAcc=0; }                                             // seed accumulator at 0
       float uout = u;
       if(driving && gDither>0){ uout += (float)(gDither*ditherSign); ditherSign = -ditherSign; }  // dither in balance OR stand-test
-      // turn differential: from the Stage-1 policy (turnPol) when active, else the hand-tuned gTurn
+      // turn differential: from the Stage-1 policy (turnPol) when active, else the hand-tuned gTurn.
+      // turnPol is assigned ONLY inside #if POLICY_BUILD; in the LQR build it stays 0, so build-gate
+      // here -- otherwise 'polj 1' on the LQR fw forces tn=clampf(0)=0 and silently kills ALL turning.
+#if POLICY_BUILD
       float tn = gPolJoint ? clampf(turnPol, -(float)gUMax, (float)gUMax)
                            : clampf(gTurn, -gTurnMax, gTurnMax);
+#else
+      float tn = clampf(gTurn, -gTurnMax, gTurnMax);   // LQR build: turning is always the hand-tuned gTurn
+#endif
       if(gPosMode){
         // factory-style: rate-limit + ACCUMULATE the wheel-driving (torque) field.
         // While the lean persists, the command ramps up (+/-gPosClamp/cycle) to a

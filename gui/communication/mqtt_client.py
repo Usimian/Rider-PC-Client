@@ -71,8 +71,14 @@ class MQTTClient:
             )
 
             print(f"Connecting to MQTT broker at {self.broker_host}:{self.broker_port} using MQTT 5.0")
-            self.mqtt_client.connect(self.broker_host, self.broker_port, 60)
+            # loop_start + connect_async so a broker that's DOWN at launch doesn't strand the
+            # UI on "Connecting...": connect_async never raises on an unreachable host, and the
+            # network loop keeps retrying (backoff below) until _on_connect fires. (Was
+            # connect()+loop_start, where a startup ConnectionRefused threw before loop_start
+            # ran, so paho's auto-reconnect never armed and only a manual Reconnect recovered.)
+            self.mqtt_client.reconnect_delay_set(min_delay=1, max_delay=30)
             self.mqtt_client.loop_start()
+            self.mqtt_client.connect_async(self.broker_host, self.broker_port, 60)
             return True
 
         except Exception as e:
