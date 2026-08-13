@@ -3,6 +3,34 @@
 > **Hardware inventory: [`docs/HARDWARE.md`](docs/HARDWARE.md)** — servo IDs↔roles↔models,
 > firmware states, Pi/camera/controller. Read it first; **update it on any hardware change.**
 
+## Working conventions (any Claude session in this repo)
+
+- **Git cadence.** Commit finished, *verified* work at stable checkpoints — **not** after
+  every edit, and not mid-exploration (premature commits get invalidated when the approach
+  changes). Cadence is at your discretion; regular commits are wanted so the repo stays
+  reconstructible. Commit straight to **`main`**, never a feature branch. Verify
+  `git status`/`log` before claiming anything about repo state. Force-push / history
+  rewrites need explicit OK.
+- **Reconstruction from scratch is the bar.** New hardware + this repo must rebuild the whole
+  system. Keep the code, firmware, the six-service deploy (`pi/deploy_bridge.sh`), and the Pi
+  host-state runbook (`docs/PI_HOST_SETUP.md`) current when you change how it's built or run.
+  If a thing can be regenerated on a fresh system, don't commit a binary snapshot of it; if it
+  can't (e.g. the last copy of a stock firmware image), preserve it in `firmware/prebuilt/`.
+- **Secrets.** This repo is **PUBLIC — never commit a secret value.** The one reconstruction
+  secret (WiFi PSK) lives in a gitignored `pi/secrets.env`, from the committed
+  `pi/secrets.env.example` template. (Secrets may be folded in only if a repo is private *and*
+  discloses it — not this one.)
+- **Hosts / IPs.** Reach the Pi with **`ssh rider`**, never a hardcoded IP. Scripts read the
+  broker from `gui/rider_config.ini` (see `tools/diag/mqtt_monitor.py`) or take it as an arg —
+  don't embed `10.0.0.x`.
+- **Code hygiene.** No dead/orphan code — when a firmware command or feature is removed, purge
+  every caller (the `polrun` removal is the reference). Test before claiming it works: real
+  output/behavior, not "it built." Propose substantive changes (new mechanisms, behavior
+  swaps) before making them; a question ("can I…") wants an answer, not an implementation.
+- **Robot safety.** Never arm/drive the wheels on the stand. Power-cycle the ESP32 after every
+  flash. **Ask before flashing** — it overwrites whatever is on the ESP32. State the required
+  physical state (USB-C, power, on-stand vs floor) at each step.
+
 ## Hardware / firmware state lives outside the repo
 
 The XGO Rider's controller is an **ESP32** flashed via USB-C (CH340). Two firmwares matter:
@@ -81,7 +109,3 @@ The root holds only README/CLAUDE/start_gui.sh + the component dirs. Bench scrip
 ## Known firmware bug we worked around
 
 Negative encoder readings on a gear-rotated leg servo caused runaway extension to the mechanical limit (commit `35319b5`). Fix: patch SPIFFS-stored cal offsets directly so commanded encoder positions stay strictly positive across the leg's range. Servo register `0x1F` writes do not persist; SPIFFS at `0x290000+0x080000` (two int16 LE encoder offsets) is authoritative.
-
-## When in doubt
-
-Ask before flashing — overwrites whatever is currently on the ESP32.
