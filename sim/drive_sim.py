@@ -18,11 +18,14 @@ import numpy as np
 from collections import deque
 from rider_env import RiderBalanceEnv
 
-# --- firmware drive gains (main.cpp defaults) ---
-K, KI, KD = 5.0, 2.5, 28.0          # position-hold P / I / velocity-D (deg, deg*s, deg per m/s)
-POSMAX_DEG = 5.0                    # setpoint-bias clamp (deg)
-AMAX = 0.8                          # accel cap (m/s^2)
-VEL_LP = 0.8                        # LP on velocity feeding the D term
+# --- firmware drive gains (main.cpp POLICY defaults, reconciled 2026-08-13) ---
+# WERE STALE (K=5/KI=2.5/KD=28/VEL_LP=0.8) -> tilted the setpoint ~4x too gently, which HID the
+# full-stick forward fall the real robot shows. These now match esp32_rider_fw/src/main.cpp.
+K, KI, KD = 20.0, 1.0, 10.0         # gPosHoldK (poshold) / gPosHoldKi (poshi) / gDriveKd (drivekd, MOVING regime)
+POSMAX_DEG = 5.0                    # gPosHoldMax: setpoint-bias clamp (deg)
+AMAX = 0.8                          # gPosAmax: accel cap (m/s^2)
+VEL_LP = 0.9                        # gPosVelLP: LP on velocity feeding the D term
+INTBAND = 0.15                      # gPosIntBand: integrate only within this of the FINAL target
 DEG2RAD = 0.017453292
 WHEEL_R = 0.03
 
@@ -55,7 +58,7 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=0.0, latency_s=
     pitch, prate, x, x_vel, wheel_vel = env._raw_state()
     x0 = x
     tgt = x0 + direction * 5.0                              # far target => cruise at vmax the whole run
-    tgt_eff = x0; vdes_s = 0.0; xvelF = 0.0; prevX = x0; pint = 0.0
+    tgt_eff = x0; vdes_s = 0.0; xvelF = 0.0; prevX = x0; pint = 0.0; pint_pos = 0.0
     theta_filt = pitch; prev_xv = x_vel                    # complementary-filter state + accel calc
     stack = deque(maxlen=2)
     log = []
@@ -86,7 +89,12 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=0.0, latency_s=
         tgt_eff += vdes_s * dt
         vdes = vdes_s
         pos_err = x - tgt_eff
-        bias_deg = np.clip(K * pos_err + KD * (xvelF - vdes), -POSMAX_DEG, POSMAX_DEG)
+        # position integral -- firmware gates it OFF while slewing to a far target (moving), so it stays
+        # ~0 during a cruise; kept for faithfulness to the close-in hold regime.
+        if tgt_eff == tgt and abs(pos_err) < INTBAND:
+            kiLim = POSMAX_DEG / KI if KI > 0.01 else 1e6
+            pint_pos = float(np.clip(pint_pos + pos_err * dt, -kiLim, kiLim))
+        bias_deg = np.clip(K * pos_err + KI * pint_pos + KD * (xvelF - vdes), -POSMAX_DEG, POSMAX_DEG)
         bias_rad = bias_deg * DEG2RAD
         pr_pitch = pitch_obs + bias_rad                     # setpoint-tilted (possibly accel-corrupted) pitch obs
         pint = float(np.clip(pint + pr_pitch * dt, -1.0, 1.0))

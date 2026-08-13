@@ -39,7 +39,11 @@ class RiderParams:
                                            # weight on wheel) agrees the breakaway stays ~this, just intermittent
                                            # (-> randomized 0.06-0.20 in DR_RANGES). Earlier 0.18 + creep-jump was a
                                            # coarse-measurement artifact #1 caught against the bench.
-    latency_s: float = 0.003               # MEASURED  ~3 ms command -> response onset
+    latency_s: float = 0.021               # MEASURED on-robot 2026-08-13 (drivecap cross-correlation, fwd drive):
+                                           # TOTAL cmd->wheel-velocity lag ~34 ms = this ~21 ms transport/poll/LP
+                                           # delay + the ~13 ms servo tau below. The old 0.003 was the USB bench
+                                           # step-response ONSET, which missed the closed-loop transport path ->
+                                           # policy trained too aggressive for the real delay = the forward shimmy.
     vel_kv: float = 5.0                    # sim velocity-servo gain (higher overshoots on the tiny wheel inertia)
     vel_forcerange_Nm: float = 1.0         # sim wheel torque cap (the real 13ms tracking lag lives in ActuatorModel)
     wheel_armature: float = 0.003          # reflected motor-rotor inertia on wheel DOF (rotor x gear^2); makes wheel

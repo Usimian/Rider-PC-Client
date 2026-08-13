@@ -23,7 +23,8 @@ from rider_model import build_mjcf
 DR_RANGES = {
     "vel_gain":       (0.85, 1.15),    # cmd->velocity gain (vel_max multiplier)
     "actuator_tau_s": (0.010, 0.018),  # tight around measured 13 ms
-    "latency_s":      (0.002, 0.006),  # tight around measured 3 ms
+    "latency_s":      (0.015, 0.028),  # around measured-on-robot ~21 ms transport delay (2026-08-13; total lag ~34 ms
+                                       # w/ the 13 ms tau) -> brackets ~25-46 ms effective so the policy learns REAL margin
     "deadband_frac":  (0.06, 0.20),    # breakaway: free-wheel ~0.09 (clean), loaded sweep ~same but intermittent
                                        # -> wide enough to span the real stick-slip variability (2026-06-19 bench)
     "mass_scale":     (0.85, 1.15),    # mass measured -> tighter
@@ -34,12 +35,24 @@ CONTROL_RATE_HZ = (130.0, 260.0)   # per-episode control-rate DR: the real ESP32
                                    # (varies with load) but the policy trained at a fixed 250 -> randomize
                                    # the rate so the policy is rate-ROBUST instead of tuned to one rate.
 
+# --- drive-in-training loop (matches esp32_rider_fw main.cpp + drive_sim.py) ---
+# When drive_train=True, each episode commands a random cruise velocity and runs the firmware's
+# EXACT setpoint-tilt loop, so the policy learns to hold the driving lean at the real 34 ms delay
+# (a pure balance-in-place policy has no forward-drive authority -> falls at full stick).
+DRIVE_K, DRIVE_KI, DRIVE_KD = 20.0, 1.0, 10.0   # gPosHoldK / gPosHoldKi / gDriveKd (MOVING regime)
+DRIVE_POSMAX_DEG = 5.0                           # gPosHoldMax (setpoint-bias clamp, deg)
+DRIVE_AMAX  = 0.8                                 # gPosAmax  (accel cap m/s^2)
+DRIVE_VMAX  = 0.25                                # gPosVmax  (full-stick speed cap m/s)
+DRIVE_VELLP = 0.9                                 # gPosVelLP (LP on velocity feeding the D term)
+_DEG2RAD    = 0.017453292
+
 
 class ActuatorModel:
     """Normalized command [-1, 1] -> wheel VELOCITY setpoint (rad/s).
 
-    Models the measured wheel: a velocity source with ~3 ms pure latency and a
-    ~13 ms first-order tracking lag. The MuJoCo velocity actuator then tracks the
+    Models the measured wheel: a velocity source with ~21 ms pure transport
+    latency and a ~13 ms first-order tracking lag (~34 ms total cmd->velocity,
+    measured on-robot 2026-08-13). The MuJoCo velocity actuator then tracks the
     setpoint this returns.
     """
 
@@ -101,8 +114,13 @@ class RiderBalanceEnv(gym.Env):
                  max_seconds: float = 10.0, target_x: float = 0.0, add_noise: bool = True,
                  domain_rand: bool = False, frame_stack: int = 1, pure_balance: bool = True,
                  mirror_aug: bool = False, vel_pen: float = 0.0, rate_dr: bool = True,
-                 pos_anchor: float = 0.0, pos_weight: float = 0.75, rate_pen: float = 0.30):
+                 pos_anchor: float = 0.0, pos_weight: float = 0.75, rate_pen: float = 0.30,
+                 drive_train: bool = False):
         super().__init__()
+        # drive_train: embed the firmware setpoint-tilt drive loop in training so the policy learns
+        # forward/back drive authority (a balance-in-place policy falls at full-stick forward on HW).
+        self.drive_train = drive_train
+        self._bias_rad = 0.0
         self.rate_pen = rate_pen   # temporal action-rate^2 weight (chatter suppressor); default 0.30 = deployed
         # pos_weight: position-error^2 penalty when NOT pure_balance (position-aware end-to-end policy).
         # The policy SEES x_err/x_int and learns the full position->lean->torque mapping itself, so it
@@ -198,9 +216,32 @@ class RiderBalanceEnv(gym.Env):
         # FIRMWARE low-passes the velocity obs instead (polvlp) to kill the shimmy.
         xerr = 0.0 if self.pure_balance else (x - self.target_x)   # firmware zeros these (pos in code)
         xint = 0.0 if self.pure_balance else self._x_int
-        o = np.array([pitch, pitch_rate, xerr, x_vel, wheel_vel,
+        # drive_train: the pitch obs is setpoint-RELATIVE (pitch + drive-loop bias), exactly like the
+        # firmware feeds pr_pitch = biasDeg - pitch. bias_rad is 0 when not drive_train (pure balance).
+        o = np.array([pitch + self._bias_rad, pitch_rate, xerr, x_vel, wheel_vel,
                       self._pitch_int, xint], np.float32)
         return (self.mirror * o).astype(np.float32)   # all 7 obs are odd under the mirror
+
+    def _drive_bias(self):
+        """Run the firmware setpoint-tilt loop (main.cpp / drive_sim.py) for one control step and
+        store the pitch-obs bias. No-op (bias 0) unless drive_train. Called each step post-physics."""
+        if not self.drive_train:
+            self._bias_rad = 0.0
+            return
+        dt = self.ctrl_dt
+        x = float(self.data.qpos[self.q_x])
+        dv = DRIVE_AMAX * dt                                   # accel-cap the commanded velocity ramp
+        if self._vdes_cmd > self._vdes_s + dv:   self._vdes_s += dv
+        elif self._vdes_cmd < self._vdes_s - dv: self._vdes_s -= dv
+        else:                                    self._vdes_s = self._vdes_cmd
+        self._tgt_eff += self._vdes_s * dt
+        xvel = (x - self._prevX) / dt; self._prevX = x
+        self._xvelF = DRIVE_VELLP * self._xvelF + (1.0 - DRIVE_VELLP) * xvel
+        posErr = x - self._tgt_eff
+        bias_deg = float(np.clip(DRIVE_K * posErr + DRIVE_KI * self._posErrInt
+                                 + DRIVE_KD * (self._xvelF - self._vdes_s),
+                                 -DRIVE_POSMAX_DEG, DRIVE_POSMAX_DEG))
+        self._bias_rad = bias_deg * _DEG2RAD
 
     def _obs(self):
         return np.concatenate(self._stack).astype(np.float32)
@@ -242,6 +283,13 @@ class RiderBalanceEnv(gym.Env):
         self._prev_a = 0.0
         self._pitch_int = 0.0
         self._x_int = 0.0
+        self._bias_rad = 0.0
+        if self.drive_train:
+            # 40% HOLD (vdes=0), 60% DRIVE at a random speed up to full-stick, both signs -- so the
+            # policy learns balance AND driving. The setpoint-tilt loop below turns this into a lean.
+            x0 = float(self.data.qpos[self.q_x])
+            self._vdes_cmd = 0.0 if self.np_random.uniform() < 0.4 else float(self.np_random.uniform(-DRIVE_VMAX, DRIVE_VMAX))
+            self._tgt_eff = x0; self._vdes_s = 0.0; self._xvelF = 0.0; self._prevX = x0; self._posErrInt = 0.0
         self.mirror = (1.0 if self.np_random.uniform() < 0.5 else -1.0) if self.mirror_aug else 1.0
         s = self._single_obs()
         self._stack.clear()
@@ -257,8 +305,9 @@ class RiderBalanceEnv(gym.Env):
             mujoco.mj_step(self.model, self.data)
         self._steps += 1
         pitch, pitch_rate, x, x_vel, wheel_vel = self._raw_state()
-        fell = abs(pitch) > 0.40                       # ~23 deg
-        upright = np.cos(pitch)                        # ~1 upright
+        self._drive_bias()                             # advance the setpoint-tilt loop from the new state
+        fell = abs(pitch) > 0.40                       # ~23 deg (real fall, setpoint-independent)
+        upright = np.cos(pitch + self._bias_rad)       # reward HOLDING the (possibly tilted) drive setpoint
         # pure_balance: NO position objective (code does position). Heavy command-
         # smoothness to kill the on-robot shimmy (jerky velocity cmd = jerky cart accel).
         pos_pen = (self.pos_anchor if self.pure_balance else self.pos_weight) * (x - self.target_x) ** 2
@@ -271,7 +320,7 @@ class RiderBalanceEnv(gym.Env):
         self._prev_a = a
         # accumulate integral state (clamped to prevent windup)
         ci, cx = self._int_clip
-        self._pitch_int = float(np.clip(self._pitch_int + pitch * self.ctrl_dt, -ci, ci))
+        self._pitch_int = float(np.clip(self._pitch_int + (pitch + self._bias_rad) * self.ctrl_dt, -ci, ci))
         self._x_int = float(np.clip(self._x_int + (x - self.target_x) * self.ctrl_dt, -cx, cx))
         terminated = bool(fell)
         truncated = self._steps >= self.max_steps
