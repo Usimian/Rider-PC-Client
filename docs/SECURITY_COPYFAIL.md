@@ -1,8 +1,15 @@
-# Rider Pi — CVE-2026-31431 ("Copy Fail") mitigation
+# Rider Pi — CVE-2026-31431 ("Copy Fail")
 
-Applied 2026-08-13 to the Rider's Raspberry Pi (reach it with `ssh rider`). This is Pi **host
-state**, not code — it lives outside the repo on the SD card, so it is recorded here.
-**If the Pi is ever reimaged, re-apply it** (see [Applying](#applying)).
+**Status (2026-08-13): patched at source.** The Pi now runs kernel **6.18.39+rpt-rpi-2712**,
+which carries the `authencesn` fix, so the CVE is closed by the kernel itself. The
+`algif_aead` module-block described below is **kept as belt-and-braces**, not the primary fix.
+See [The proper fix — done](#the-proper-fix--done) for how the upgrade went.
+
+This began as a *mitigation* while the kernel was held on the vulnerable 6.12.47 (the history
+below is kept because it explains the block that's still in place, and because a reimage may
+land on an old kernel again). Reach the Pi with `ssh rider`. The module-block is Pi **host
+state**, not code — it lives on the SD card outside the repo, so it is recorded here.
+**If the Pi is ever reimaged onto a pre-6.18.33 kernel, re-apply the block** (see [Applying](#applying)).
 
 ## What the vulnerability is
 
@@ -21,9 +28,11 @@ Attack surface is **local only**. On the Rider that means someone who already ha
 shell on the Pi — the SSH account or the MQTT-facing services. Lower risk than a
 multi-tenant host, but not zero, and the fix is free.
 
-## Why the Rider needs a mitigation rather than the patch
+## Why a mitigation was needed first (historical)
 
-The Pi's kernel is **deliberately held**:
+> Resolved 2026-08-13 by the kernel upgrade above; kept for context on the block that remains.
+
+The Pi's kernel *was* **deliberately held** on 6.12.47:
 
 ```
 $ apt-mark showhold
@@ -32,14 +41,15 @@ linux-image-6.12.47+rpt-rpi-2712
 
 That hold was placed 2026-06-13 to keep the DualShock 4 controller working, after an
 upgrade to 6.18.33 coincided with the DS4 failing to produce `/dev/input/js0`. A held
-kernel receives no security updates — so the hold that protects the controller also
-froze the Pi on a vulnerable kernel.
+kernel receives no security updates — so the hold that protected the controller also
+froze the Pi on a vulnerable kernel. (The hold has since been released and the DS4 shown
+to work on 6.18.39 — see above — so this is no longer a live constraint.)
 
 The two kernels differ exactly where it matters. From the packaged changelogs:
 
 | Kernel | `crypto: authencesn - reject too-short AAD (assoclen<8)` |
 |---|---|
-| 6.12.47+rpt-rpi-2712 (held, running) | **absent** |
+| 6.12.47+rpt-rpi-2712 (the formerly-held kernel) | **absent** |
 | 6.18.33+rpt-rpi-v8 | **present** |
 
 Both carry three older, unrelated `algif_aead` fixes (`MAY_BACKLOG`, `ctx->more`
@@ -106,40 +116,56 @@ modprobe: ERROR: could not insert 'algif_aead': Invalid argument
 
 and no `algif_aead` line from `lsmod`. Verified in this form on 2026-08-13.
 
-## Retiring it — the proper fix
+## The proper fix — done
 
-The mitigation closes *this* CVE. It does not patch the kernel, and the held kernel
-misses every future fix. The real fix is to retire the hold:
+Applied 2026-08-13 at the bench (robot on the stand, balance stopped, physical access):
 
 ```bash
-sudo apt update
+sudo apt-get update
 sudo apt-mark unhold linux-image-6.12.47+rpt-rpi-2712
-sudo apt install linux-image-rpi-2712        # 6.18.34 at time of writing
-sudo reboot
+sudo apt-get install linux-image-rpi-2712    # pulled 6.18.39+rpt-rpi-2712
+sudo systemctl reboot
 ```
 
-Then verify in order: WiFi came back → `uname -r` shows 6.18.x → press PS on the DS4
-and check `/dev/input/js0` → `rider-joystick.service` active.
+The install was kernel-only (0 packages removed); `6.12.47` stays installed as a rollback.
 
-**The hold may be unnecessary.** The 2026-06-13 rollback changed two things at once —
-the kernel *and* `/etc/modprobe.d/ds4-bluetooth.conf` (which forced `disable_ertm=1`).
-The ERTM setting was the *proven* culprit; the kernel was never tested independently.
-That file is now absent, so **6.18 with ERTM at default has never been tried** — the
-combination most likely to work. Worth an hour at the bench.
+**The DS4 hypothesis was right — the hold was unnecessary.** The 2026-06-13 rollback had
+changed two things at once (the kernel *and* `/etc/modprobe.d/ds4-bluetooth.conf`, which
+forced `disable_ertm=1`). ERTM was the *proven* culprit; the kernel was never tested alone.
+That file is now absent, so this was the first trial of **6.18 with ERTM at default** — and
+the DS4 works: after reboot it paired and produced `/dev/input/js0`, and `rider-joystick`
+read it (`axes 6 buttons 13`, button events flowing). The exact failure the hold guarded
+against (upgrade → no `js0`) does not occur on 6.18.39.
 
-Rollback if the DS4 fails: 6.12.47 remains installed, so re-hold it and reboot.
+### Post-upgrade verification (2026-08-13, all confirmed)
 
-**Keep this blacklist even after moving to 6.18.** It costs nothing and is the same
-belt-and-braces posture Ubuntu ships by default.
+- WiFi returned, `uname -r` = `6.18.39+rpt-rpi-2712`, `algif_aead` still blocked + unloaded.
+- All six services active/enabled; ESP32 telemetry flowing; battery/IMU live.
+- ToF ranging (64/64 zones), safety governor publishing (cliff/obstacle both seen working),
+  camera capture round-trip OK, I²C (WM8960 + ToF), BT controller up, audio card enumerated.
+- **DS4** paired → `js0` present → joystick service reads it. Stick→wheels was **not**
+  exercised: it is gated behind `en=1` (balancing) and additionally forward-capped by the
+  cliff governor, so it cannot be tested on a stand — that is a floor test for later, not a
+  kernel question.
 
-### Two cautions for that session
+**Kept the `algif_aead` block** after the upgrade — costs nothing, same belt-and-braces
+posture Ubuntu ships by default, and it covers a reimage landing on an old kernel.
 
-- **Rebooting this Pi is not free.** 5 GHz boot reliability (`band=a`, set 2026-06-18)
-  was never validated across multiple cold boots. If WiFi doesn't come up you lose
-  SSH — do it with physical access to the robot.
-- **Stop the balance loop first.** The ESP32 balances independently at ~253 Hz. If the
-  Pi disappears mid-reboot while the robot is actively balancing, the ESP32 keeps
-  running with a dead command source. Robot on the stand, balance stopped.
+### Still open
+
+- **Cold-boot WiFi reliability.** Only one *warm* reboot has been done. 5 GHz `band=a`
+  (set 2026-06-18) was never validated across multiple *cold* boots — worth a few power
+  cycles before trusting a headless boot.
+
+### Rollback (if ever needed)
+
+`6.12.47` remains installed. To revert:
+
+```bash
+sudo apt-mark hold linux-image-6.12.47+rpt-rpi-2712   # optional: pin it again
+# set kernel_2712.img back to 6.12.47, or remove the 6.18 image, then:
+sudo systemctl reboot
+```
 
 ## Fleet status (2026-08-13)
 
@@ -147,7 +173,7 @@ belt-and-braces posture Ubuntu ships by default.
 |---|---|---|
 | Workstation (Ubuntu 24.04, 7.0.0-28) | yes | yes (Ubuntu `kmod` 7.2) |
 | Yahboom (Ubuntu 24.04, 6.8.12-tegra) | unconfirmed — L4T kernel, no changelog | yes, verified |
-| Rider Pi (RPi OS trixie, 6.12.47 held) | **no** | yes, verified |
+| Rider Pi (RPi OS trixie, **6.18.39** since 2026-08-13) | **yes** — kernel carries the fix | yes, kept as belt-and-braces |
 | Rider ESP32 | n/a — not Linux | n/a |
 
 The ESP32 is out of scope entirely: no kernel, no page cache, no privilege boundary to
