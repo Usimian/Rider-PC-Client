@@ -8,6 +8,25 @@ repo, and new hardware, the Pi is reconstructible without any external memory.
 *host state underneath them*: kernel, WiFi, kernel modules, groups, venvs, assets, controller
 pairing. Do this first, then run the deploy.
 
+## Required secrets (supply these — not in the repo)
+
+This repo is **public**, so no secret values are committed. Exactly one secret is needed to
+rebuild, and this is the whole list:
+
+| Secret | What it's for | Where used |
+|---|---|---|
+| `NICOU_WIFI_PSK` | the `nicou` 5 GHz WiFi passphrase (WPA2-PSK) | step 5 |
+
+Set it up once, at the start:
+
+```bash
+cp pi/secrets.env.example pi/secrets.env   # pi/secrets.env is gitignored
+$EDITOR pi/secrets.env                      # fill in NICOU_WIFI_PSK
+set -a; . pi/secrets.env; set +a            # export it for the steps below
+```
+
+If `NICOU_WIFI_PSK` is set, nothing else in this runbook needs a value you'd have to remember.
+
 ## Baseline
 
 Start from the **stock XGO Rider Raspberry Pi OS image** (RPi OS trixie, arm64) flashed to the
@@ -68,7 +87,7 @@ sudo nmcli connection modify nicou \
   802-11-wireless.band a \
   802-11-wireless-security.key-mgmt wpa-psk 802-11-wireless-security.proto rsn \
   connection.autoconnect yes
-sudo nmcli connection modify nicou wifi-sec.psk '<the nicou passphrase>'
+sudo nmcli connection modify nicou wifi-sec.psk "$NICOU_WIFI_PSK"   # from pi/secrets.env (see Required secrets)
 # powersave off -- powersave causes RTT spikes that mimic faults
 printf '[connection]\nwifi.powersave = 2\n' | sudo tee /etc/NetworkManager/conf.d/wifi-powersave-off.conf
 sudo systemctl restart NetworkManager

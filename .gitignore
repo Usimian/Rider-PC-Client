@@ -22,4 +22,7 @@ firmware/prebuilt/rider_balance_fw.bin
 *.log
 # PlatformIO build output
 .pio/
+# Local secrets -- real values NEVER committed (this repo is PUBLIC). Fill in a copy of
+# pi/secrets.env.example; see docs/PI_HOST_SETUP.md "Required secrets".
+pi/secrets.env
 
