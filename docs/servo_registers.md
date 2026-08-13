@@ -7,7 +7,7 @@ ESP32 firmware over the 1 Mbps half-duplex bus. This is the layer `cfgdump <id>`
 > - **This file = servo-bus registers** (FeeTech SCS, e.g. `0x11` wheel mode). What the ESP32
 >   writes directly to a servo ID over the SCS bus; what `cfgdump` dumps.
 > - **xgolib `XGOorder`** (`BATTERY 0x01`, `VX 0x30`, `SET_ORIGIN 0x06` …, in
->   `Luwu-OS-2.0.1/libs/xgolib/xgolib_rider.py`) = the **Pi↔ESP32 command protocol**, a
+>   `Luwu-OS-2.0.1/libs/xgolib/xgolib/xgolib_rider.py`) = the **Pi↔ESP32 command protocol**, a
 >   totally separate address space. A number like `0x06` means different things in each layer.
 
 **Confidence legend** — read this before acting on any value:

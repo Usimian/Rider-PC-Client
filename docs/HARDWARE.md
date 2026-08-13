@@ -3,7 +3,7 @@
 Persistent description of the Rider's physical hardware so no session has to re-derive it.
 **Update this file whenever hardware changes** (servo swap, firmware change, Pi swap, etc.).
 Companion docs: `servo_registers.md` (SCS bus register map), `xgo-cm4-pinout.md` (Pi GPIO/LCD),
-`CALIBRATION_GUIDE.md`, `BRIDGE_SETUP.md`.
+`BRIDGE_SETUP.md` (rebuild from scratch), `factory_roll_balance.md` (decompiled stock leveling).
 
 > Confidence: **✅ verified on our hardware** vs **❔ not yet read/recorded**. Don't state a
 > ❔ value as fact — read it and promote it to ✅.
@@ -68,8 +68,9 @@ position at rest — the fault only showed mid-range under motion, so a static r
 ## Raspberry Pi (robot brain)
 - **Compute Module 5** on an `XGO-CM4-V1.1` carrier (CM4 was swapped out). Reach via `ssh rider`
   (alias in `~/.ssh/config`, user `pi`; resolves `raspberrypi.local` via mDNS). Do not hardcode IP.
-- Owns UART `/dev/ttyAMA0` ↔ ESP32 (single serial owner). Services: `mosquitto`, `rider-bridge`,
-  `rider-joystick`, `rider-camera` (see project CLAUDE.md).
+- Owns UART `/dev/ttyAMA0` ↔ ESP32 — **`rider-bridge` is the single serial owner**; every other
+  service talks MQTT. Services: `mosquitto`, `rider-bridge`, `rider-joystick`, `rider-camera`,
+  `rider-tof`, `rider-tof-safety`, `rider-recorder` (see project CLAUDE.md + `BRIDGE_SETUP.md`).
 
 ## Camera / input
 - **CSI camera** OV5647 via picamera2 (`pi/rider_camera.py`).

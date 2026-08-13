@@ -45,6 +45,12 @@ It runs these systemd services (deployed by `pi/deploy_bridge.sh`):
   telemetry → MQTT republish, command relay. It is the **single serial owner** of the Pi↔ESP32 link.
 - **rider-joystick** (`pi/rider_controller.py`) — DS4 → MQTT drive/turn commands.
 - **rider-camera** (`pi/rider_camera.py`) — CSI camera (OV5647/picamera2) → MQTT image responder, on-demand.
+- **rider-tof** (`pi/rider_tof.py`) — VL53L5CX 8×8 ToF frames → `rider/tof`. Runs on the **`tofvenv`**
+  venv (not xgovenv): it needs `vl53l5cx-ctypes` + `smbus2`.
+- **rider-tof-safety** (`pi/rider_tof_safety.py`) — floor-referenced obstacle/cliff governor →
+  `rider/safety/fwd_limit`; the joystick service caps **forward** drive by it (reverse never limited).
+- **rider-recorder** — bare `mosquitto_sub` unit logging `rider/debug/telem` + `rider/debug/dcap`
+  to `/home/pi/riderlog.txt`, always on so no fall/swing is ever missed. Needs `mosquitto-clients`.
 
 Read-only `ssh rider …` commands are auto-allowed (`.claude/settings.json`); changes
 (`sudo`, `systemctl restart`, `scp`, `rm`, …) prompt. LCD button + LED pin map: `docs/xgo-cm4-pinout.md`.
@@ -55,8 +61,8 @@ Read-only `ssh rider …` commands are auto-allowed (`.claude/settings.json`); c
 gui/       workstation GUI: pc_client_standalone.py + core/ ui/ communication/, rider_config.ini, requirements.txt
 pi/        RPi CM5 code: rider_status_screen.py, rider_controller.py, rider_camera.py, *.service, deploy_bridge.sh
 firmware/  ESP32 code: esp32_rider_fw/ (balance fw) + esp32_passthrough/ (servo-bus passthrough fw)
-tools/     servo/ wheel/ balance/ capture/ diag/   bench + diagnostic scripts (need passthrough, or run via MQTT)
-docs/      BRIDGE_SETUP, CALIBRATION_GUIDE, xgo-cm4-pinout, Rider-Pi_SCH.pdf
+tools/     servo/ wheel/ balance/ capture/ diag/ tof/   bench + diagnostic scripts (need passthrough, or run via MQTT)
+docs/      HARDWARE, BRIDGE_SETUP, servo_registers, xgo-cm4-pinout, factory_roll_balance, Rider-Pi_SCH.pdf
 sim/       MuJoCo + SB3 RL sim (separate project)
 README.md, CLAUDE.md, start_gui.sh    at root
 ```

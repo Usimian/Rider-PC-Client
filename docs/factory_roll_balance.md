@@ -2,7 +2,11 @@
 
 Reverse-engineered from the stock app image `xgorider_app_v1.1.6.bin` (matches the `R-1.1.x`
 line) on 2026-06-24, to fix our own leg-leveling loop that oscillated. This is the reference
-our firmware's leveling (`level`/`levkp`/`levslew`/`levmax`/`levset`/`levsign`) is modeled on.
+our firmware's leveling (`level`/`levki`/`levslew`/`levmax`/`levset`/`levsign`) is modeled on.
+
+That app image is preserved in-repo as **`firmware/prebuilt/rider_stock_R-1.1.6_app.bin`**
+(folded in 2026-07-23 from a scratch Downloads folder that has since been deleted) — it is the
+only copy, so the decompile below stays reproducible.
 
 ## TL;DR
 
@@ -61,19 +65,32 @@ and the accumulator is hard-capped (±20°). Gentle gain + slew limit + angle-sp
 
 ## How our firmware maps to it (`firmware/esp32_rider_fw/src/main.cpp`)
 
-We don't have the factory's full IK, so we work directly in leg encoder counts, but keep the three
-properties that matter:
+We don't have the factory's full IK, so we work directly in leg encoder counts, but we now keep the
+factory's **accumulator** structure (see `main.cpp` ~line 1151, the `levRun` branch):
 
-- `target = levsign · levkp · (roll − levset)`, clamped to ±`levmax`  (gentle proportional)
-- the leg command **slews** toward `target`, max `levslew` counts/cycle  (the anti-ring slew limit)
-- the same-sign differential is applied to both legs with **spill-to-the-other-leg** when one hits
-  its servo limit (our edge-case requirement).
+- **integration step** `inc = levsign · levki · (roll − levset)`, in counts/cycle
+- that step is **clamped to ±`levslew`** — the per-cycle rate limit, which is what keeps the leg
+  loop below the body's ~2 Hz roll resonance (this is the anti-ring property)
+- the step accumulates into the leg differential, **hard-clamped to ±`levmax`**
+- the differential is split at **half-count resolution** (`t = round(2·acc)`, `cR = t/2`,
+  `cL = t − cR`) so an odd total moves a single leg — roll can correct in 1-count steps instead of 2
+- **spill-to-the-other-leg** when one leg hits its servo limit (our edge-case requirement)
 
-Defaults: `levkp 3`, `levslew 0.5`, `levmax 40`, `levsign -1`. All live-tunable over MQTT.
+Defaults: `levki 0.14`, `levslew 0.30`, `levmax 50`, `levsign -1`, `levset 0`. All live-tunable
+over MQTT.
+
+> **This replaced an earlier proportional version** (`target = levsign · levkp · (roll − levset)`,
+> gain `levkp`). Proportional **stalls at a non-zero roll offset** — the leg differential needed to
+> hold the body level is exactly where the error term stops growing. Integrating drives roll to
+> zero instead, and as roll → 0 the step shrinks so it still settles. **`levkp` no longer exists;**
+> the gain is `levki` and it has different units (counts accumulated per degree *per cycle*, not
+> counts per degree), so old `levkp` values are not meaningful here.
 
 ## Reproducing the decompile
 
-- Build an Xtensa ELF from the app image with `bin2elf.py` — **key gotcha:** flash-mmap'd segments
+- Build an Xtensa ELF from the app image (`firmware/prebuilt/rider_stock_R-1.1.6_app.bin`) with a
+  `bin2elf.py`-style wrapper. **That script was not kept** — it was a throwaway; rewrite it from the
+  segment addresses below rather than hunting for it. **Key gotcha:** flash-mmap'd segments
   (DROM/IROM) load **8 bytes below** esptool's reported addr (DROM `0x3f400018`, IROM `0x400d0018`),
   or string/literal xrefs won't resolve. IROM addr→file: `file = cpu − 0x400a0000`.
 - Ghidra 12.1.2 has a built-in Xtensa LE module; scripts must be **Java** (PyGhidra not enabled).

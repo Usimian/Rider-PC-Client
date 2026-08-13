@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Deploy the Rider Pi bridge + DS4 controller + camera from the workstation to the robot's Pi.
-# Idempotent + recreate-from-scratch: installs deps, the bridge/controller/camera programs,
-# their systemd autostart units, retires the old rider-controller autostart, and starts them.
+# Deploy the full Rider Pi stack from the workstation to the robot's Pi:
+#   rider-bridge (LCD + serial owner) | rider-joystick (DS4) | rider-camera (CSI)
+#   rider-tof (VL53L5CX publisher)    | rider-tof-safety (forward governor)
+#   rider-recorder (always-on telemetry log -> /home/pi/riderlog.txt)
+# Idempotent + recreate-from-scratch: installs deps, the programs, their systemd autostart
+# units, retires the old rider-controller autostart, and enables + starts them all.
 #
 # Usage (from repo root):  pi/deploy_bridge.sh [host]      e.g.  pi/deploy_bridge.sh rider
 #   default host: pi@10.0.0.95 (prefer the 'rider' ssh-config alias)
@@ -26,6 +29,7 @@ scp "$HERE/rider-joystick.service" "$PI:/tmp/rider-joystick.service"
 scp "$HERE/rider-camera.service"   "$PI:/tmp/rider-camera.service"
 scp "$HERE/rider-tof.service"      "$PI:/tmp/rider-tof.service"
 scp "$HERE/rider-tof-safety.service" "$PI:/tmp/rider-tof-safety.service"
+scp "$HERE/rider-recorder.service" "$PI:/tmp/rider-recorder.service"
 
 echo "==> installing on $PI"
 ssh "$PI" 'bash -s' <<'REMOTE'
@@ -57,24 +61,32 @@ sudo install -m 644 /tmp/rider-joystick.service    /etc/systemd/system/rider-joy
 sudo install -m 644 /tmp/rider-camera.service      /etc/systemd/system/rider-camera.service
 sudo install -m 644 /tmp/rider-tof.service         /etc/systemd/system/rider-tof.service
 sudo install -m 644 /tmp/rider-tof-safety.service  /etc/systemd/system/rider-tof-safety.service
+sudo install -m 644 /tmp/rider-recorder.service    /etc/systemd/system/rider-recorder.service
 rm -f /tmp/rider-bridge.service /tmp/rider-joystick.service /tmp/rider-camera.service \
-      /tmp/rider-tof.service /tmp/rider-tof-safety.service
+      /tmp/rider-tof.service /tmp/rider-tof-safety.service /tmp/rider-recorder.service
 sudo systemctl daemon-reload
 # 4. retire the old (xgolib) controller autostart if present
 if systemctl list-unit-files 2>/dev/null | grep -q '^rider-controller.service'; then
   sudo systemctl disable --now rider-controller.service || true
 fi
 # 5. enable on boot + (re)start now
+# rider-recorder is a bare mosquitto_sub unit -- it needs the mosquitto-clients package, which is
+# separate from the broker. Warn rather than apt-install so a deploy never mutates the Pi's apt state.
+if [ ! -x /usr/bin/mosquitto_sub ]; then
+  echo "  WARN: /usr/bin/mosquitto_sub missing -- rider-recorder.service will fail to start."
+  echo "        Install mosquitto-clients, then re-run this deploy."
+fi
 sudo systemctl enable rider-bridge.service rider-joystick.service rider-camera.service \
-                      rider-tof.service rider-tof-safety.service >/dev/null
+                      rider-tof.service rider-tof-safety.service rider-recorder.service >/dev/null
 sudo systemctl restart rider-bridge.service rider-joystick.service rider-camera.service \
-                       rider-tof.service rider-tof-safety.service
+                       rider-tof.service rider-tof-safety.service rider-recorder.service
 sleep 2
 echo "  bridge  : $(systemctl is-active rider-bridge.service)/$(systemctl is-enabled rider-bridge.service)"
 echo "  joystick: $(systemctl is-active rider-joystick.service)/$(systemctl is-enabled rider-joystick.service)"
 echo "  camera  : $(systemctl is-active rider-camera.service)/$(systemctl is-enabled rider-camera.service)"
 echo "  tof     : $(systemctl is-active rider-tof.service)/$(systemctl is-enabled rider-tof.service)"
 echo "  tof-safe: $(systemctl is-active rider-tof-safety.service)/$(systemctl is-enabled rider-tof-safety.service)"
+echo "  recorder: $(systemctl is-active rider-recorder.service)/$(systemctl is-enabled rider-recorder.service)"
 echo "  old     : rider-controller = $(systemctl is-enabled rider-controller.service 2>&1)"
 REMOTE
 echo "==> done"
