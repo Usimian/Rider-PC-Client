@@ -64,7 +64,8 @@ Flashing overwrites whatever firmware is on the ESP32 — see `docs/HARDWARE.md`
 ## Docs
 
 - [`docs/HARDWARE.md`](docs/HARDWARE.md) — servo IDs ↔ roles ↔ parts, firmware states, Pi, camera, ToF wiring. **Read first; update on any hardware change.**
-- [`docs/BRIDGE_SETUP.md`](docs/BRIDGE_SETUP.md) — rebuild the running robot from scratch.
+- [`docs/PI_HOST_SETUP.md`](docs/PI_HOST_SETUP.md) — rebuild the Pi's host state from bare metal (kernel, WiFi, modules, venvs, DS4 pairing). The burn-down runbook.
+- [`docs/BRIDGE_SETUP.md`](docs/BRIDGE_SETUP.md) — deploy the services + firmware onto a host that's already set up.
 - [`docs/servo_registers.md`](docs/servo_registers.md) — SCS servo-bus register map, confirmed vs unverified.
 - [`docs/xgo-cm4-pinout.md`](docs/xgo-cm4-pinout.md) — Pi GPIO, LCD buttons, ESP32 pins.
 - [`docs/factory_roll_balance.md`](docs/factory_roll_balance.md) — decompiled stock roll-leveling, and how ours maps to it.

@@ -5,6 +5,10 @@ Everything needed to rebuild the running robot from the repo. Two halves: the
 LCD/serial bridge, joystick, camera, ToF publisher, ToF safety governor, recorder).
 The workstation GUI needs no setup beyond `gui/rider_config.ini`.
 
+> This assumes the Pi's **host state** is already in place (kernel, serial, WiFi, kernel
+> modules, venvs, DS4 pairing). To build that from a bare image first, see
+> [`PI_HOST_SETUP.md`](PI_HOST_SETUP.md).
+
 ## Architecture
 
 ```

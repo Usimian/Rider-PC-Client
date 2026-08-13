@@ -3,7 +3,8 @@
 Persistent description of the Rider's physical hardware so no session has to re-derive it.
 **Update this file whenever hardware changes** (servo swap, firmware change, Pi swap, etc.).
 Companion docs: `servo_registers.md` (SCS bus register map), `xgo-cm4-pinout.md` (Pi GPIO/LCD),
-`BRIDGE_SETUP.md` (rebuild from scratch), `factory_roll_balance.md` (decompiled stock leveling).
+`PI_HOST_SETUP.md` (rebuild the Pi host state from bare metal), `BRIDGE_SETUP.md` (deploy the
+services), `factory_roll_balance.md` (decompiled stock leveling).
 
 > Confidence: **✅ verified on our hardware** vs **❔ not yet read/recorded**. Don't state a
 > ❔ value as fact — read it and promote it to ✅.

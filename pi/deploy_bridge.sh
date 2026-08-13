@@ -18,10 +18,11 @@ set -euo pipefail
 PI="${1:-pi@10.0.0.95}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-echo "==> copying bridge + controller + camera + ToF + units to $PI"
+echo "==> copying bridge + controller + camera + ToF + beep + units to $PI"
 scp "$HERE/rider_status_screen.py" "$PI:/home/pi/rider_status_screen.py"
 scp "$HERE/rider_controller.py"    "$PI:/home/pi/rider_controller.py"
 scp "$HERE/rider_camera.py"        "$PI:/home/pi/rider_camera.py"
+scp "$HERE/assets/beep.wav"        "$PI:/home/pi/beep.wav"
 scp "$HERE/rider_tof.py"           "$PI:/home/pi/rider_tof.py"
 scp "$HERE/rider_tof_safety.py"    "$PI:/home/pi/rider_tof_safety.py"
 scp "$HERE/rider-bridge.service"   "$PI:/tmp/rider-bridge.service"
