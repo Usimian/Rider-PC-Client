@@ -10,7 +10,7 @@ Run (robot on):
     /home/marc/.xgo-cal/bin/python pos_console.py --port /dev/ttyAMA0   # on the Pi
 
 Type at the prompt:
-    start           START BALANCING (polrun 1 + en 1, no gyro cal) -- hold upright, let go
+    start           START BALANCING (en 1, no gyro cal) -- hold upright, let go
     stop  (or d)    stop balancing (wheels limp)
     <number>        set position SETPOINT (meters, wheel_x frame)   e.g.  0.30
     r <n>           move setpoint RELATIVE by n meters              e.g.  r 0.1
@@ -62,10 +62,10 @@ try:
             d = dict(latest)
         wx = d.get("wx", float("nan")); tgt = d.get("ptgt", float("nan"))
         th = d.get("th", float("nan")); en = int(d.get("en", 0))
-        pr = int(d.get("polrun", 0)); ph = d.get("poshold", float("nan"))
+        ctrl = d.get("ctrl", "?"); ph = d.get("poshold", float("nan"))
         err = (wx - tgt) if (wx == wx and tgt == tgt) else float("nan")
-        sys.stdout.write("\r pos=%+.3f  target=%+.3f  err=%+.3f m | pitch=%+.2f en=%d polrun=%d poshold=%.1f   "
-                         % (wx, tgt, err, th, en, pr, ph))
+        sys.stdout.write("\r pos=%+.3f  target=%+.3f  err=%+.3f m | pitch=%+.2f en=%d ctrl=%s poshold=%.1f   "
+                         % (wx, tgt, err, th, en, ctrl, ph))
         sys.stdout.flush()
         r, _, _ = select.select([sys.stdin], [], [], 0.25)
         if not r:
@@ -76,7 +76,7 @@ try:
         if line in ("q", "quit", "exit"):
             break
         if line in ("start", "go", "b"):
-            send("polrun 1"); time.sleep(0.05); send("en 1")
+            send("en 1")
             print("\n-> BALANCING (no gcal) -- let go now.  ('stop' or 'd' to stop)")
         elif line in ("stop",):
             send("d"); print("\n-> STOPPED (wheels limp)")

@@ -170,7 +170,8 @@ class ApplicationController:
     def _toggle_roll_balance(self):
         """Toggle balance via raw firmware line commands -- the same path the DS4
         controller and LCD button use. Reads current state to decide direction:
-        enable -> 'polrun 1' + 'en 1' (arm policy + enable); disable -> 'en 0'."""
+        enable -> 'en 1'; disable -> 'en 0'. (The controller is compiled into the
+        firmware -- there is no runtime policy-arm step anymore.)"""
         if not self.mqtt_client.is_connected():
             messagebox.showwarning("Not Connected", "Not connected to robot")
             return
@@ -179,7 +180,6 @@ class ApplicationController:
         if currently_on:
             self.mqtt_client.send_line("en 0")
         else:
-            self.mqtt_client.send_line("polrun 1")
             self.mqtt_client.send_line("en 1")
         if self.debug_mode:
             print(f"[APP] Roll balance toggle -> {'OFF' if currently_on else 'ON'}")

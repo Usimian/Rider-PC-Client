@@ -224,7 +224,7 @@ except Exception as e:
 def publish():
     if mqc is None:
         return
-    en = int(tel.get("en", 0)); pol = int(tel.get("polrun", 0))
+    en = int(tel.get("en", 0))
     th = tel.get("th", 0.0); roll = tel.get("roll", 0.0); yaw = tel.get("yaw", 0.0)
     batt = int(tel.get("batt", 0)); vbat = round(tel.get("vbat", 0.0), 2)
     status = {
@@ -239,7 +239,7 @@ def publish():
         "loop_hz": int(tel.get("lhz", 0)),
         "fault": int(tel.get("fault", 0)),
         "rfail": tel.get("rfail", 0.0),
-        "mode": "policy" if pol else "pid",
+        "mode": g_ctrl,                 # compiled-in controller ("LQR"/"POL"), parsed from telem ctrl=; firmware picks it at build time (was derived from the removed 'polrun')
         "position": tel.get("wx", 0.0),
         "target": tel.get("ptgt", 0.0),
         "wheel_l": tel.get("wp1", 0.0),
@@ -322,7 +322,6 @@ def render():
     img = Image.new("RGB", (320, 240), BG)
     d = ImageDraw.Draw(img)
     en = int(tel.get("en", 0))
-    pol = int(tel.get("polrun", 0))
     mq_ok = mqc is not None and mqc.is_connected()
 
     # title turns blue when a controller (DS4) is connected, white otherwise
@@ -421,7 +420,7 @@ while True:
             ser.write((cmd_q.get_nowait() + "\n").encode())
         except Exception:
             break
-    # C button (upper-left, GPIO17): toggle the balance policy on each press
+    # C button (upper-left, GPIO17): toggle balancing on each press
     if btn_ok:
         lvl = lgpio.gpio_read(_chip, BTN_BALANCE)
         tnow = time.time()
@@ -430,7 +429,7 @@ while True:
             if int(tel.get("en", 0)) == 1:
                 ser.write(b"en 0\n")                                # balancing -> stop
             else:
-                ser.write(b"polrun 1\nen 1\n")                      # idle -> arm policy + enable
+                ser.write(b"en 1\n")                               # idle -> enable (controller is compiled in)
         btn_prev = lvl
         # power button (lower-left, GPIO23): HOLD ~1.5s -> sudo poweroff (hold, not tap,
         # so a stray press can't shut the robot down mid-use).

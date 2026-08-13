@@ -12,7 +12,7 @@ Mapping (balancer w/ position-hold; turning not available yet):
   Cross (X)          -> legs RETRACT (body down), stepped, firmware clamps to servo limits
   Square (#)         -> toggle roll-leveling (IMU-roll differential legs; level 1/0)
   Circle (O)         -> reset position (poszero) without dropping balance
-  Share              -> toggle balance (polrun 1 + en 1 / en 0); off = stop (no separate e-stop)
+  Share              -> toggle balance (en 1 / en 0); off = stop (no separate e-stop)
 
 Run normally:  /home/pi/xgovenv/bin/python rider_controller.py
 Verify mapping: /home/pi/xgovenv/bin/python rider_controller.py --test
@@ -40,7 +40,7 @@ TOPIC_FWDLIMIT = "rider/safety/fwd_limit"  # ToF safety governor -> forward-spee
 # --- mapping (verify indices with --test, then adjust) ---
 AXIS_DRIVE = 1       # left stick Y (stick up = negative)
 AXIS_TURN = 3        # right stick X (verify with --test)
-BTN_BALANCE     = 8  # Share        -- toggle balance (en/polrun); off = stop. (moved to Share 2026-06-24; VERIFY index w/ --test)
+BTN_BALANCE     = 8  # Share        -- toggle balance (en 1/en 0); off = stop. (moved to Share 2026-06-24; VERIFY index w/ --test)
 BTN_LEG_EXTEND  = 2  # Triangle    -- legs extend (body up)
 BTN_LEG_RETRACT = 0  # Cross (X)   -- legs retract (body down)
 BTN_DISTZERO    = 1  # Circle (O)  -- poszero / reset position, balance stays on (Cross=0,Circle=1,Triangle=2,Square=3 verified --test 2026-06-16)
@@ -184,7 +184,7 @@ def main():
             if state["en"]:
                 send("en 0")
             else:
-                send("polrun 1"); send("en 1")     # firmware homes the target on enable
+                send("en 1")                       # firmware homes the target on enable
         if edge(BTN_LEG_EXTEND):               # Triangle: legs extend (body up)
             send("legstep %d" % LEG_STEP)
         if edge(BTN_LEG_RETRACT):              # Cross: legs retract (body down)
