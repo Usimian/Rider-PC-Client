@@ -62,7 +62,8 @@ def screen(name):
             L, fell, dt = ds.simulate(infer, dirn, ds.VMAX, params=p, fw_obs=True)
             s = ds.stats(L, 1.0 / dt)
             rows[plant + "-" + tag] = dict(up=fell is None, fell=fell, rate=s["rate_rms"], freq=s["freq"],
-                                           prom=s["prom"], sat=s["act_sat"], pitch=s["pitch_std"])
+                                           prom=s["prom"], sat=s["act_sat"], pitch=s["pitch_std"],
+                                           travel=abs(s["travel"]))
     L, fell, dt = ds.simulate(infer, +1, 0.0, params=ss, fw_obs=True)
     k = L[:, 0] > 2.0; pr = L[k, 2]
     f, prom = ds.dom_freq(pr, 1.0 / dt, 1.0, 6.0)
@@ -83,6 +84,8 @@ def verdict(m, rows):
         r = rows[t]
         if r["up"] and r["rate"] > 60.0: reasons.append(t + "-rough")
         if r["up"] and 6.0 <= r["freq"] <= 12.0 and r["prom"] > 8: reasons.append(t + "-ring")
+        if r["up"] and r["travel"] < 1.0: reasons.append(t + "-weak")   # full stick should cover ~1.7 m in 7 s
+                                                                       # (ppo_fw_s2 floor: forward 'non-existent')
     h = rows["hold"]
     if h["up"] and h["prom"] > 4.5 and h["freq"] < 3.5: reasons.append("hold-hunt")   # s5-style 2 Hz see-saw
     return "PASS" if not reasons else "fail(" + ",".join(reasons) + ")"

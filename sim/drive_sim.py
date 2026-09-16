@@ -53,11 +53,13 @@ def load_policy(name):
 G = 9.81
 
 
-def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=0.0, latency_s=None, fw_obs=True, params=None):
+def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=0.0, latency_s=None, fw_obs=True, params=None,
+             stick=True):
     """accel_couple: gain on the accelerometer-during-acceleration pitch corruption.
     latency_s: override the actuator pure-delay (default = rider_params, the measured on-robot value).
     fw_obs: firmware sensing path (default) vs clean physics state (legacy).
-    params: full RiderParams override (sweeps); latency_s still applies on top of it."""
+    params: full RiderParams override (sweeps); latency_s still applies on top of it.
+    stick: model the joystick drive (D-only lean, firmware default) vs a 'ptgt' distance move (P-term lean)."""
     p = params or DEFAULT
     if latency_s is not None:
         p = replace(p, latency_s=latency_s)
@@ -102,6 +104,12 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=0.0, latency_s=
         else: vdes_s = vcmd
         tgt_eff += vdes_s * dt
         vdes = vdes_s
+        if stick and vmax > 0.0:
+            # STICK DRIVE (main.cpp): while the stick is held the target tracks wheel_x every cycle
+            # (posErr == 0) and the hold integral is zeroed -> lean = KD*(xvelF - vdes) ONLY (<= 2.5 deg
+            # at full stick). The far-target P-term cruise below (stick=False) is a 'ptgt' distance
+            # move, which leans up to 5 deg -- it hid a policy's command bias (ppo_fw_s2, 2026-09-16).
+            tgt_eff = x; pint_pos = 0.0
         pos_err = x - tgt_eff
         if tgt_eff == tgt and abs(pos_err) < INTBAND:
             kiLim = POSMAX_DEG / KI if KI > 0.01 else 1e6

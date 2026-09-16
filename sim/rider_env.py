@@ -299,7 +299,16 @@ class RiderBalanceEnv(gym.Env):
         xvel = self.sense.xvel_raw if self.fw_obs else (x - self._prevX) / dt
         self._prevX = x
         self._xvelF = DRIVE_VELLP * self._xvelF + (1.0 - DRIVE_VELLP) * xvel
-        posErr = x - self._tgt_eff
+        if abs(self._vdes_cmd) > 0.001:
+            # STICK DRIVE (main.cpp): the target tracks wheel_x every cycle (posErr == 0) and the hold
+            # integral is zeroed, so the lean is the velocity-D term ONLY: KD*(xvelF - vdes), <= 2.5 deg
+            # at full stick. (Before 2026-09-16 the sim let the target run away and leaned up to 5 deg
+            # on the P term -- authority the firmware never gives; it hid a policy's command bias.)
+            self._tgt_eff = x
+            self._posErrInt = 0.0
+            posErr = 0.0
+        else:
+            posErr = x - self._tgt_eff
         bias_deg = float(np.clip(DRIVE_K * posErr + DRIVE_KI * self._posErrInt
                                  + DRIVE_KD * (self._xvelF - self._vdes_s),
                                  -DRIVE_POSMAX_DEG, DRIVE_POSMAX_DEG))
