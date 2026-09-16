@@ -23,17 +23,57 @@ from rider_model import build_mjcf
 DR_RANGES = {
     "vel_gain":       (0.85, 1.15),    # cmd->velocity gain (vel_max multiplier)
     "actuator_tau_s": (0.010, 0.018),  # tight around measured 13 ms
-    "latency_s":      (0.015, 0.028),  # around measured-on-robot ~21 ms transport delay (2026-08-13; total lag ~34 ms
-                                       # w/ the 13 ms tau) -> brackets ~25-46 ms effective so the policy learns REAL margin
+    "latency_s":      (0.000, 0.010),  # 0-2 control steps around the 2026-09-16 calibrated ONE step (sim cross-corr
+                                       # lag == robot's 30-35 ms) -> ~20-40 ms effective so the policy learns real
+                                       # margin. (0.015-0.028 before: double-counted the sim's own ~20 ms -> 64 ms
+                                       # effective and a 4 Hz thrash the robot never shows; see rider_params)
     "deadband_frac":  (0.06, 0.20),    # breakaway: free-wheel ~0.09 (clean), loaded sweep ~same but intermittent
                                        # -> wide enough to span the real stick-slip variability (2026-06-19 bench)
     "mass_scale":     (0.85, 1.15),    # mass measured -> tighter
     "wheel_friction": (0.6, 1.5),      # real-floor traction unknown -> wide
 }
 
-CONTROL_RATE_HZ = (130.0, 260.0)   # per-episode control-rate DR: the real ESP32 loop is ~143-166 Hz
-                                   # (varies with load) but the policy trained at a fixed 250 -> randomize
-                                   # the rate so the policy is rate-ROBUST instead of tuned to one rate.
+CONTROL_RATE_HZ = (180.0, 260.0)   # per-episode control-rate DR. MEASURED 2026-09-16 after the wheel-read
+                                   # timeout fix: 234 Hz idle, ~199 Hz driving (was 143-166 Hz before it).
+                                   # Randomize so the policy is rate-ROBUST instead of tuned to one rate.
+
+
+class FirmwareSensing:
+    """Reproduce what esp32_rider_fw/src/main.cpp actually feeds the policy (2026-09-16 delay budget).
+
+    The old sim gave the policy CLEAN physics state; the firmware gives it:
+      * velocity  = LP(fw_pol_vel_lp) of d(wheel_x)/dt, where wheel_x is the 10-bit ENCODER position
+                    (wheel relative to the body -- NOT ground speed; it omits the r*pitch_rate term)
+      * wheel_vel = that same filtered signal / r  (the firmware feeds xvelP/POL_WHEEL_R)
+      * pitch rate = LP(fw_rate_lp) of the gyro
+    Per-cycle coefficients (they scale with the control rate), exactly as the firmware runs them.
+    All ops are linear or odd-symmetric (round), so mirror_aug stays exact.
+    """
+
+    def __init__(self, p: RiderParams):
+        self.p = p
+        self.q_step = 2.0 * np.pi / p.encoder_counts_per_rev
+        self.reset(0.0)
+
+    def reset(self, wheel_angle: float):
+        self.prev_x = self._enc_x(wheel_angle)
+        self.xvelP = 0.0          # firmware xvelP (polInit zeroes it)
+        self.rate_f = 0.0         # firmware dqf
+        self.xvel_raw = 0.0       # last differenced encoder velocity (drive loop's input)
+
+    def _enc_x(self, wheel_angle: float) -> float:
+        return np.round(wheel_angle / self.q_step) * self.q_step * self.p.wheel_radius_m
+
+    def update(self, wheel_angle: float, gyro_rate: float, dt: float):
+        """Advance one control step. Returns (pitch_rate_obs, x_vel_obs, wheel_vel_obs)."""
+        x = self._enc_x(wheel_angle)
+        self.xvel_raw = (x - self.prev_x) / dt
+        self.prev_x = x
+        lp = self.p.fw_pol_vel_lp
+        self.xvelP = lp * self.xvelP + (1.0 - lp) * self.xvel_raw
+        rl = self.p.fw_rate_lp
+        self.rate_f = rl * self.rate_f + (1.0 - rl) * gyro_rate
+        return self.rate_f, self.xvelP, self.xvelP / self.p.wheel_radius_m
 
 # --- drive-in-training loop (matches esp32_rider_fw main.cpp + drive_sim.py) ---
 # When drive_train=True, each episode commands a random cruise velocity and runs the firmware's
@@ -61,7 +101,10 @@ class ActuatorModel:
         self.dt = dt
         self.state = 0.0
         n_lat = max(0, round(p.latency_s / dt))
-        self._buf = deque([0.0] * n_lat, maxlen=n_lat) if n_lat > 0 else None
+        # A deque of maxlen n returns the value appended n-1 calls ago (append drops the oldest, then
+        # [0] is read) -> maxlen must be n_lat+1 for n_lat steps of delay. Fixed 2026-09-16: every
+        # earlier run got one step LESS pure delay than its latency_s said (0.021 s -> 16 ms, not 20).
+        self._buf = deque([0.0] * (n_lat + 1), maxlen=n_lat + 1) if n_lat > 0 else None
 
     def reset(self):
         self.state = 0.0
@@ -115,8 +158,12 @@ class RiderBalanceEnv(gym.Env):
                  domain_rand: bool = False, frame_stack: int = 1, pure_balance: bool = True,
                  mirror_aug: bool = False, vel_pen: float = 0.0, rate_dr: bool = True,
                  pos_anchor: float = 0.0, pos_weight: float = 0.75, rate_pen: float = 0.30,
-                 drive_train: bool = False):
+                 drive_train: bool = False, fw_obs: bool = True):
         super().__init__()
+        # fw_obs: feed the policy what the FIRMWARE feeds it (FirmwareSensing: encoder-differenced +
+        # low-passed velocity, low-passed pitch rate) instead of clean physics state. Default ON since
+        # 2026-09-16; fw_obs=False reproduces the older recipes (ppo_v_pure ... ppo_drive34_l4).
+        self.fw_obs = fw_obs
         # drive_train: embed the firmware setpoint-tilt drive loop in training so the policy learns
         # forward/back drive authority (a balance-in-place policy falls at full-stick forward on HW).
         self.drive_train = drive_train
@@ -163,6 +210,8 @@ class RiderBalanceEnv(gym.Env):
         self.decim = self.p.control_decimation()
         self.ctrl_dt = self.decim * self.model.opt.timestep
         self.act = ActuatorModel(self.p, self.ctrl_dt)
+        self.sense = FirmwareSensing(self.p)
+        self.last_sensed = (0.0, 0.0, 0.0)   # (pitch_rate_obs, x_vel_obs, wheel_vel_obs) of the latest frame
         self.max_seconds = max_seconds
         self.max_steps = int(max_seconds / self.ctrl_dt)
         self.target_x = target_x
@@ -205,15 +254,25 @@ class RiderBalanceEnv(gym.Env):
         wheel_vel = self.data.qvel[self.d_wheel]
         return pitch, pitch_rate, x, x_vel, wheel_vel
 
-    def _single_obs(self):
+    def _sense(self):
+        """One sensor read per control step, in firmware order: BEFORE the drive loop and the policy
+        obs, which both consume it (the firmware reads the wheels once, then derives xvel for the
+        drive-loop bias and the policy from that same read). Stores (pitch, rate, x_vel, wheel_vel)."""
         pitch, pitch_rate, x, x_vel, wheel_vel = self._raw_state()
         if self.add_noise:
             d2r = np.pi / 180.0
             pitch += np.random.normal(0, self.p.accel_pitch_noise_deg * d2r)
             pitch_rate += np.random.normal(0, self.p.gyro_noise_dps * d2r)
-        # NOTE: training on quantized-encoder velocity (the 'qnoise' experiment) hurt
-        # balance and was abandoned; the deployed policy trains on clean velocity and the
-        # FIRMWARE low-passes the velocity obs instead (polvlp) to kill the shimmy.
+        if self.fw_obs:
+            # What the firmware feeds the policy: encoder-differenced + LP'd velocity, LP'd gyro rate.
+            # (The 2026-06 'qnoise' experiment trained on quantized-but-UNfiltered velocity and hurt
+            # balance; this is the filtered signal the robot really uses -- see docs/loop_delay_budget.md.)
+            pitch_rate, x_vel, wheel_vel = self.sense.update(self.data.qpos[self.q_wheel], pitch_rate, self.ctrl_dt)
+        self.last_sensed = (pitch, pitch_rate, x_vel, wheel_vel)
+
+    def _single_obs(self):
+        pitch, pitch_rate, x_vel, wheel_vel = self.last_sensed
+        x = self.data.qpos[self.q_x]
         xerr = 0.0 if self.pure_balance else (x - self.target_x)   # firmware zeros these (pos in code)
         xint = 0.0 if self.pure_balance else self._x_int
         # drive_train: the pitch obs is setpoint-RELATIVE (pitch + drive-loop bias), exactly like the
@@ -235,7 +294,9 @@ class RiderBalanceEnv(gym.Env):
         elif self._vdes_cmd < self._vdes_s - dv: self._vdes_s -= dv
         else:                                    self._vdes_s = self._vdes_cmd
         self._tgt_eff += self._vdes_s * dt
-        xvel = (x - self._prevX) / dt; self._prevX = x
+        # the firmware's drive loop differences the same ENCODER wheel_x the policy's velocity comes from
+        xvel = self.sense.xvel_raw if self.fw_obs else (x - self._prevX) / dt
+        self._prevX = x
         self._xvelF = DRIVE_VELLP * self._xvelF + (1.0 - DRIVE_VELLP) * xvel
         posErr = x - self._tgt_eff
         bias_deg = float(np.clip(DRIVE_K * posErr + DRIVE_KI * self._posErrInt
@@ -279,6 +340,7 @@ class RiderBalanceEnv(gym.Env):
         self.data.qvel[self.d_pitch] = self.np_random.uniform(-0.20, 0.20)
         mujoco.mj_forward(self.model, self.data)
         self.act.reset()
+        self.sense.reset(float(self.data.qpos[self.q_wheel]))
         self._steps = 0
         self._prev_a = 0.0
         self._pitch_int = 0.0
@@ -291,6 +353,7 @@ class RiderBalanceEnv(gym.Env):
             self._vdes_cmd = 0.0 if self.np_random.uniform() < 0.4 else float(self.np_random.uniform(-DRIVE_VMAX, DRIVE_VMAX))
             self._tgt_eff = x0; self._vdes_s = 0.0; self._xvelF = 0.0; self._prevX = x0; self._posErrInt = 0.0
         self.mirror = (1.0 if self.np_random.uniform() < 0.5 else -1.0) if self.mirror_aug else 1.0
+        self._sense()
         s = self._single_obs()
         self._stack.clear()
         for _ in range(self.frame_stack):
@@ -305,6 +368,7 @@ class RiderBalanceEnv(gym.Env):
             mujoco.mj_step(self.model, self.data)
         self._steps += 1
         pitch, pitch_rate, x, x_vel, wheel_vel = self._raw_state()
+        self._sense()                                  # one sensor read (firmware order: read, then drive loop, then policy)
         self._drive_bias()                             # advance the setpoint-tilt loop from the new state
         fell = abs(pitch) > 0.40                       # ~23 deg (real fall, setpoint-independent)
         upright = np.cos(pitch + self._bias_rad)       # reward HOLDING the (possibly tilted) drive setpoint

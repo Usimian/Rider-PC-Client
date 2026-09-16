@@ -26,7 +26,17 @@ Run: `sim/.venv/bin/python sanity_check.py` (or `train.py`).
 
 ## Parameter provenance — what we trust vs. what we must measure
 
-**KNOWN** (firmware): wheel r=0.03 m, 1024 cnt/rev, gyro 16.4 LSB/°/s, 250 Hz loop.
+**KNOWN** (firmware): wheel r=0.03 m, 1024 cnt/rev, gyro 16.4 LSB/°/s, loop 234 Hz idle / ~199 Hz
+driving (MEASURED 2026-09-16 after the wheel-read fix; training randomizes 180-260 Hz).
+
+**Sensing path (2026-09-16):** the policy is trained on what the firmware feeds it, not clean state --
+`rider_env.FirmwareSensing` reproduces the encoder-differenced + low-passed velocity (`gPolVelLP`
+0.7) and the low-passed pitch rate (`dqf` 0.6). `--legacy_obs` (train.py / drive_sim.py) gives the
+old clean-state sim. The actuator pure delay is calibrated so the sim's command→velocity
+cross-correlation lag matches the robot's measured 30-35 ms (`drive_sim.py`, see
+`docs/loop_delay_budget.md`); the sim reproduces the flashed policy's forward 8.8 Hz ring, its
+quiet reverse, and the delay-retrain's full-stick fall. Not yet reproduced: `ppo_drive34_l4`'s
+on-robot ~2 Hz build-recover hunt (perfectly smooth in sim).
 
 **ESTIMATED** (refine with a scale + ruler — *no robot power needed*):
 - `body_mass_kg`, `wheel_mass_kg` — **weigh the robot** (and a wheel if removable).

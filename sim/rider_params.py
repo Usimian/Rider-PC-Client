@@ -19,7 +19,18 @@ class RiderParams:
     wheel_radius_m: float = 0.03           # KNOWN   6 cm dia wheels (WHEEL_CIRC_M = pi*0.06)
     encoder_counts_per_rev: int = 1024     # KNOWN   odometry scaling
     gyro_lsb_per_dps: float = 16.4         # KNOWN   ICM-42670 gyro scale
-    control_hz: float = 250.0              # KNOWN   measured loop rate (lhz~251, deterministic)
+    control_hz: float = 230.0              # MEASURED 2026-09-16: 234 Hz idle / ~199 Hz driving after the wheel-read
+                                           # timeout fix (commit 44dd034); was 165 Hz before it. Training randomizes
+                                           # the rate (rider_env.CONTROL_RATE_HZ); this nominal is what drive_sim uses.
+
+    # ---------- firmware sensing path (KNOWN: main.cpp, 2026-09-16 delay budget) ----------
+    # The firmware does NOT feed the policy clean state. It differences the ENCODER position (10-bit,
+    # wheel relative to body) at loop rate and low-passes that for the velocity obs, and low-passes
+    # the gyro for the pitch-rate obs. Per-cycle coefficients, so the time constants scale with the
+    # loop rate (~12 ms / ~8 ms at 234 Hz). See docs/loop_delay_budget.md.
+    fw_pol_vel_lp: float = 0.7             # KNOWN  gPolVelLP: xvelP = lp*xvelP + (1-lp)*d(wheel_x)/dt
+    fw_rate_lp: float = 0.6                # KNOWN  dqf = 0.6*dqf + 0.4*gyro_rate
+    fw_drive_vel_lp: float = 0.9           # KNOWN  gPosVelLP: LP on the velocity feeding the drive loop's D term
 
     # ---------- mass / inertia (MEASURED 2026-06-13, except wheel split) ----------
     track_width_m: float = 0.097           # MEASURED  wheel center-to-center (97 mm)
@@ -39,11 +50,16 @@ class RiderParams:
                                            # weight on wheel) agrees the breakaway stays ~this, just intermittent
                                            # (-> randomized 0.06-0.20 in DR_RANGES). Earlier 0.18 + creep-jump was a
                                            # coarse-measurement artifact #1 caught against the bench.
-    latency_s: float = 0.021               # MEASURED on-robot 2026-08-13 (drivecap cross-correlation, fwd drive):
-                                           # TOTAL cmd->wheel-velocity lag ~34 ms = this ~21 ms transport/poll/LP
-                                           # delay + the ~13 ms servo tau below. The old 0.003 was the USB bench
-                                           # step-response ONSET, which missed the closed-loop transport path ->
-                                           # policy trained too aggressive for the real delay = the forward shimmy.
+    latency_s: float = 0.004               # DERIVED 2026-09-16 = ONE control step. Calibrated so the SIM's
+                                           # cmd->wheel-velocity cross-correlation lag (drive_sim, same method as the
+                                           # robot's drivecap) equals the robot's MEASURED 30-35 ms: the sim already
+                                           # carries ~20 ms of its own (ZOH + one-step obs delay + the 13 ms tau), so
+                                           # only ~4 ms of extra pure delay is needed. With this the sim reproduces
+                                           # ppo_mc_l4a's forward ~8.8 Hz ring + quiet reverse, and ppo_delay34_l4's
+                                           # full-stick fall. The 2026-08-13 value 0.021 (robot 34 ms minus tau)
+                                           # double-counted -> 64 ms sim lag and a 4 Hz thrash the robot never shows
+                                           # (and the delay buffer was off by one step, fixed the same day). The
+                                           # 2026-06 value 0.003 was the unloaded USB-bench onset.
     vel_kv: float = 5.0                    # sim velocity-servo gain (higher overshoots on the tiny wheel inertia)
     vel_forcerange_Nm: float = 1.0         # sim wheel torque cap (the real 13ms tracking lag lives in ActuatorModel)
     wheel_armature: float = 0.003          # reflected motor-rotor inertia on wheel DOF (rotor x gear^2); makes wheel

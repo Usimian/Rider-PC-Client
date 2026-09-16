@@ -71,6 +71,34 @@ servo's own inner loop. It does **not** have less delay than we do; it is a deli
 low-bandwidth controller that never asks for the speed that exposes the servo's lag. Our policy
 does the opposite: one-sided gain of 15 into the same lag.
 
+## Sim calibration (same day, `sim/`)
+
+Making the sim carry the filters above exposed two more problems in the sim itself:
+
+1. **The pure delay was double-counted.** `rider_params.latency_s = 0.021` was "robot 34 ms minus
+   the 13 ms tau", but the sim already carries ~20 ms of its own (zero-order hold + one-step
+   observation delay + the tau). Measuring the sim's command→velocity lag by the *same*
+   cross-correlation as the robot's drivecap gave **64 ms** vs the robot's 30–35. At that lag the
+   flashed policy thrashes at 4 Hz with 41 % saturation in *both* directions, which the robot never
+   does.
+2. **The delay buffer was off by one step** (`ActuatorModel`: a deque of maxlen n delays n−1). Every
+   run since June got one step less pure delay than its `latency_s` said.
+
+Both fixed. `latency_s` is now **one control step (0.004 s, DERIVED)**, chosen so the sim's
+cross-corr lag lands in the robot's 30–35 ms. With the firmware sensing path on:
+
+| policy            | robot (floor)                        | sim after calibration                |
+|-------------------|--------------------------------------|--------------------------------------|
+| ppo_mc_l4a fwd    | 8.6 Hz ring, rate std 24–37 °/s, up  | 8.8 Hz ring, rate rms 100 °/s, up    |
+| ppo_mc_l4a rev    | smooth, rate std 8 °/s               | quiet, no saturation                 |
+| ppo_delay34_l4 fwd| falls at full stick                  | falls at 1.7 s                       |
+| ppo_drive34_l4 fwd| ~2 Hz build-recover hunt, falls      | perfectly smooth (**not reproduced**)|
+
+Character, frequency and asymmetry match; the sim's ring amplitude is ~3× the robot's, and the
+drive-aware policy's 2 Hz hunt is an open gap (accelerometer coupling adds only a weak 3 Hz
+component). Sweeps showed the pure delay is the dominant knob; stick-slip, servo tau and deadband
+barely move the ring.
+
 ## What this says about the next policy
 
 - The delay is the plant's; we cannot train it away or tune it away in our loop.

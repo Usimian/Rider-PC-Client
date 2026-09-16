@@ -14,15 +14,16 @@ from caps_ppo import CAPS_PPO       # PPO + spatial action-smoothness (used when
 
 
 def make_env(domain_rand=False, frame_stack=1, vel_pen=0.0, mirror_aug=True, rate_dr=True,
-             pos_anchor=0.0, pure_balance=True, pos_weight=0.75, rate_pen=0.30, drive_train=False):
+             pos_anchor=0.0, pure_balance=True, pos_weight=0.75, rate_pen=0.30, drive_train=False,
+             fw_obs=True):
     return lambda: RiderBalanceEnv(add_noise=True, domain_rand=domain_rand, frame_stack=frame_stack,
                                    mirror_aug=mirror_aug, vel_pen=vel_pen, rate_dr=rate_dr, rate_pen=rate_pen,
                                    pos_anchor=pos_anchor, pure_balance=pure_balance, pos_weight=pos_weight,
-                                   drive_train=drive_train)
+                                   drive_train=drive_train, fw_obs=fw_obs)
 
 
-def evaluate(model, vecnorm, frame_stack=1, n=20):
-    env = RiderBalanceEnv(add_noise=False, frame_stack=frame_stack)
+def evaluate(model, vecnorm, frame_stack=1, n=20, fw_obs=True):
+    env = RiderBalanceEnv(add_noise=False, frame_stack=frame_stack, fw_obs=fw_obs)
     results = []
     for s in range(n):
         obs, _ = env.reset(seed=100 + s)
@@ -69,13 +70,15 @@ if __name__ == "__main__":
     ap.add_argument("--rate_pen", type=float, default=0.30)    # temporal action-rate^2 weight (chatter suppressor)
     ap.add_argument("--drive_train", action="store_true")      # embed the firmware setpoint-tilt DRIVE loop in
                                                                # training -> policy learns forward-drive authority
+    ap.add_argument("--legacy_obs", action="store_true")       # CLEAN physics obs (pre-2026-09-16 recipes). Default
+                                                               # is the firmware sensing path (FirmwareSensing).
     args = ap.parse_args()
 
     venv = make_vec_env(make_env(args.domain_rand, args.frame_stack, args.vel_pen,
                                  mirror_aug=not args.no_mirror, rate_dr=not args.no_rate_dr,
                                  pos_anchor=args.pos_anchor, pure_balance=not args.pos_aware,
                                  pos_weight=args.pos_weight, rate_pen=args.rate_pen,
-                                 drive_train=args.drive_train), n_envs=args.nenv)
+                                 drive_train=args.drive_train, fw_obs=not args.legacy_obs), n_envs=args.nenv)
     venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
     common = dict(verbose=1, device="cpu", n_steps=1024, batch_size=2048, gamma=0.997,
                   gae_lambda=0.95, learning_rate=3e-4, policy_kwargs=dict(net_arch=[64, 64]),
@@ -94,5 +97,5 @@ if __name__ == "__main__":
 
     venv.training = False
     print("eval (deterministic, noise off, 20 seeds):")
-    res = evaluate(model, venv, args.frame_stack)
+    res = evaluate(model, venv, args.frame_stack, fw_obs=not args.legacy_obs)
     summarize(res)
