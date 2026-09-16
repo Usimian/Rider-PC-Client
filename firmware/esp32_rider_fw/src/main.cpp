@@ -405,7 +405,16 @@ static bool wheelRead(uint8_t id, int* pos, int* vel){
   uint8_t buf[48]; int n=0; uint32_t t0=micros();
   while(micros()-t0 < 2000 && n < 48){            // enough for a good reply; fail fast on a miss
     while(Serial2.available() && n < 48) buf[n++]=Serial2.read();
-    if(n >= 20) break;                            // 8-byte echo + 12-byte reply (incl. checksum) -> stop early
+    // Stop as soon as a COMPLETE reply frame is in the buffer (echo 8 + reply LEN+4 bytes).
+    // The wheel reply is LEN=0x0B -> 15 bytes, so echo+reply = 19; the old fixed `n >= 20`
+    // threshold could never be met and EVERY read ran to the 2 ms timeout (2 reads/cycle =
+    // 4.4 ms, measured rdms 4.36) -- the loop ran 165 Hz instead of the coded 333 Hz.
+    // Found 2026-09-16 in the 34 ms loop-delay budget.
+    bool done=false;
+    for(int i=0;i+3 < n;i++){
+      if(buf[i]==0xFF && buf[i+1]==0xFF && buf[i+2]==id && buf[i+3]!=0x04 && n >= i+buf[i+3]+4){ done=true; break; }
+    }
+    if(done) break;
   }
   memcpy(gRaw,buf,n); gRawN=n;   // stash for debug dump
   // Skip the half-duplex echo of our 8-byte request, then parse the reply
