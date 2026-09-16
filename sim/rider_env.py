@@ -21,14 +21,15 @@ from rider_model import build_mjcf
 # is exactly the payoff of the bench characterization. Friction stays wide (real
 # floor traction is still unknown).
 DR_RANGES = {
-    "vel_gain":       (0.85, 1.15),    # cmd->velocity gain (vel_max multiplier)
+    "vel_gain":       (0.85, 1.15),    # cmd->velocity gain (vel_max multiplier) about the LOADED nominal 27 rad/s
+                                       # (2026-09-16 floor drivecap: 0.9x unloaded; unloaded 30 rad/s = 1.11 here)
     "actuator_tau_s": (0.010, 0.018),  # tight around measured 13 ms
     "latency_s":      (0.000, 0.010),  # 0-2 control steps around the 2026-09-16 calibrated ONE step (sim cross-corr
                                        # lag == robot's 30-35 ms) -> ~20-40 ms effective so the policy learns real
                                        # margin. (0.015-0.028 before: double-counted the sim's own ~20 ms -> 64 ms
                                        # effective and a 4 Hz thrash the robot never shows; see rider_params)
-    "deadband_frac":  (0.06, 0.20),    # breakaway: free-wheel ~0.09 (clean), loaded sweep ~same but intermittent
-                                       # -> wide enough to span the real stick-slip variability (2026-06-19 bench)
+    "deadband_frac":  (0.10, 0.22),    # breakaway about the LOADED floor value 0.15 (2026-09-16 drivecap fit
+                                       # v ~= 0.9*(cmd-35)); unloaded bench was 0.09. Wide: stick-slip varies.
     "mass_scale":     (0.85, 1.15),    # mass measured -> tighter
     "wheel_friction": (0.6, 1.5),      # real-floor traction unknown -> wide
 }

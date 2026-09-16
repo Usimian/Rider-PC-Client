@@ -41,9 +41,15 @@ class RiderParams:
 
     # ---------- actuator model (MEASURED 2026-06-13, bench step-response) ----------
     cmd_mode: str = "velocity"             # MEASURED  command is a velocity setpoint (settles, linear in cmd)
-    vel_max_rad_s: float = 30.0            # action=1 -> 30 rad/s (measured 0.129 rad/s per raw cmd unit; cmd 200 -> 22.8)
+    vel_max_rad_s: float = 27.0            # action=1 -> 27 rad/s LOADED (floor drivecap 2026-09-16: v ~= 0.9*(cmd-35)
+                                           # raw, i.e. 0.9x the unloaded bench gain of 1.0*(cmd-21); unloaded: 0.129
+                                           # rad/s per raw cmd unit, cmd 200 -> 22.8 rad/s = 30 rad/s at action 1)
     actuator_tau_s: float = 0.013          # MEASURED  first-order lag, amplitude-independent
-    deadband_frac: float = 0.09            # MEASURED 2026-06-19 (LQR fw, command-ladder stepcap; sweep_actuator.py
+    deadband_frac: float = 0.15            # MEASURED 2026-09-16 LOADED, on the floor (drivecap, 7 drive episodes, both
+                                           # policies): steady v ~= 0.9*(cmd-35) raw -> breakaway 35/232 = 0.15. With
+                                           # this + vel_max 27 the sim REPRODUCES ppo_fw_s8's full-stick forward fall
+                                           # (2.4 s) and ppo_mc_l4a's survival; at the unloaded 0.09 it did not.
+                                           # UNLOADED bench value was 0.09 -- MEASURED 2026-06-19 (LQR fw, command-ladder stepcap; sweep_actuator.py
                                            # -> sim/actuator_bench_lqr.csv, validated by replay_actuator.py): the
                                            # wheel breaks away at firmware-cmd ~21 (action ~0.09) then is LINEAR to
                                            # full -- a simple deadband, NO discrete creep-jump. Loaded sweep (held,
