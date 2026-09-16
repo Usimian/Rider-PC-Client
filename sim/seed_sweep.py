@@ -43,30 +43,48 @@ def export(name):
 
 
 def screen(name):
+    """Offline screen on BOTH loaded plants (2026-09-16 floor lessons):
+      * clean loaded deadband (rider_params nominal): full-stick FWD/REV -- reproduced ppo_fw_s8's fall
+      * loaded STICK-SLIP: full-stick FWD/REV + a 7 s HOLD -- reproduced ppo_fw_s5's ~2 Hz hold hunt
+    A policy must survive all four drives; the hold row ranks the hunt (peak in 1-6 Hz)."""
     sys.path.insert(0, HERE)
+    import numpy as np
     import policy_symmetry as ps
     import drive_sim as ds
+    from dataclasses import replace
+    from rider_params import DEFAULT
     m = ps.metrics(os.path.join(HERE, name + "_export.npz"))
     infer = ds.load_policy(os.path.join(HERE, name))
+    ss = replace(DEFAULT, stick_slip=True)
     rows = {}
-    for dirn, tag in ((+1, "fwd"), (-1, "rev")):
-        L, fell, dt = ds.simulate(infer, dirn, ds.VMAX, fw_obs=True)
-        s = ds.stats(L, 1.0 / dt)
-        rows[tag] = dict(up=fell is None, fell=fell, rate=s["rate_rms"], freq=s["freq"], prom=s["prom"],
-                         sat=s["act_sat"], pitch=s["pitch_std"])
+    for plant, p in (("clean", DEFAULT), ("ss", ss)):
+        for dirn, tag in ((+1, "fwd"), (-1, "rev")):
+            L, fell, dt = ds.simulate(infer, dirn, ds.VMAX, params=p, fw_obs=True)
+            s = ds.stats(L, 1.0 / dt)
+            rows[plant + "-" + tag] = dict(up=fell is None, fell=fell, rate=s["rate_rms"], freq=s["freq"],
+                                           prom=s["prom"], sat=s["act_sat"], pitch=s["pitch_std"])
+    L, fell, dt = ds.simulate(infer, +1, 0.0, params=ss, fw_obs=True)
+    k = L[:, 0] > 2.0; pr = L[k, 2]
+    f, prom = ds.dom_freq(pr, 1.0 / dt, 1.0, 6.0)
+    rows["hold"] = dict(up=fell is None, fell=fell, pitch=np.degrees(L[k, 1].std()),
+                        rate=np.degrees(np.sqrt((pr ** 2).mean())), freq=f, prom=prom)
     return m, rows
 
 
 def verdict(m, rows):
     reasons = []
-    if not (rows["fwd"]["up"] and rows["rev"]["up"]): reasons.append("falls")
+    drives = [k for k in rows if k != "hold"]
+    if not all(rows[k]["up"] for k in drives): reasons.append("falls")
+    if not rows["hold"]["up"]: reasons.append("hold-falls")
     if abs(m["a_op"]) > 0.5: reasons.append("a_op")
     if m["gRatio"] > 2.0: reasons.append("gain-asym")
     if m["sat"] > 0.10: reasons.append("clipped")
-    for t in ("fwd", "rev"):
+    for t in drives:
         r = rows[t]
         if r["up"] and r["rate"] > 60.0: reasons.append(t + "-rough")
         if r["up"] and 6.0 <= r["freq"] <= 12.0 and r["prom"] > 8: reasons.append(t + "-ring")
+    h = rows["hold"]
+    if h["up"] and h["prom"] > 4.5 and h["freq"] < 3.5: reasons.append("hold-hunt")   # s5-style 2 Hz see-saw
     return "PASS" if not reasons else "fail(" + ",".join(reasons) + ")"
 
 
@@ -77,6 +95,8 @@ def main():
     ap.add_argument("--threads", type=int, default=4, help="torch/BLAS threads per run")
     ap.add_argument("--steps", type=int, default=2_500_000)
     ap.add_argument("--tag", default="fw")
+    ap.add_argument("--rescreen", action="store_true", help="skip training; re-screen existing exports")
+    ap.add_argument("--extra", default="", help="comma-separated extra policy names to include in --rescreen")
     args = ap.parse_args()
     os.makedirs(LOGDIR, exist_ok=True)
     seeds = parse_seeds(args.seeds)
@@ -86,10 +106,28 @@ def main():
     def say(s):
         print(s, flush=True); summary.write(s + "\n"); summary.flush()
 
+    def report(n, mins, m, rows):
+        def cell(r):
+            return "%5.1f %s" % (r["rate"], "up" if r["up"] else "F%.1f" % r["fell"])
+        h = rows["hold"]
+        say("%-14s %5.0fm | %+6.2f %5.0f %6.1f | %-22s | %-22s | %-22s | %s" %
+            (n, mins, m["a_op"], 100 * m["sat"], m["gRatio"],
+             cell(rows["clean-fwd"]) + " / " + cell(rows["clean-rev"]),
+             cell(rows["ss-fwd"]) + " / " + cell(rows["ss-rev"]),
+             "%4.2f° %5.1f°/s %3.1fHz x%-3.0f" % (h["pitch"], h["rate"], h["freq"], h["prom"]),
+             verdict(m, rows)))
+
+    header = "%-14s %6s | %6s %5s %6s | %-22s | %-22s | %-22s | %s" % \
+        ("policy", "train", "a_op", "sat%", "gRatio", "clean FWD/REV rateRMS", "stick-slip FWD/REV", "ss HOLD std rate f x", "verdict")
+    if args.rescreen:
+        say("\n=== rescreen %s ===" % time.strftime("%Y-%m-%d %H:%M")); say(header)
+        for n in ([x for x in args.extra.split(",") if x] + names):
+            m, rows = screen(n); report(n, 0, m, rows)
+        return
+
     say("\n=== seed sweep %s  seeds=%s  steps=%d  parallel=%d  recipe=%s ===" %
         (time.strftime("%Y-%m-%d %H:%M"), seeds, args.steps, args.parallel, " ".join(RECIPE)))
-    say("%-14s %6s | %6s %5s %6s | %-28s | %-28s | %s" %
-        ("policy", "train", "a_op", "sat%", "gRatio", "FWD  rateRMS  freq  sat  up", "REV  rateRMS  freq  sat  up", "verdict"))
+    say(header)
     for i in range(0, len(names), args.parallel):
         batch = list(zip(names[i:i + args.parallel], seeds[i:i + args.parallel]))
         t0 = time.time()
@@ -104,12 +142,7 @@ def main():
             if not ok:
                 say("%-14s export MISMATCH: %s" % (n, last)); continue
             m, rows = screen(n)
-            f, r = rows["fwd"], rows["rev"]
-            say("%-14s %5.0fm | %+6.2f %5.0f %6.1f | %6.1f°/s %5.1fHz x%-3.0f %3.0f%% %-4s | %6.1f°/s %5.1fHz x%-3.0f %3.0f%% %-4s | %s" %
-                (n, mins, m["a_op"], 100 * m["sat"], m["gRatio"],
-                 f["rate"], f["freq"], f["prom"], f["sat"], "up" if f["up"] else "%.1fs" % f["fell"],
-                 r["rate"], r["freq"], r["prom"], r["sat"], "up" if r["up"] else "%.1fs" % r["fell"],
-                 verdict(m, rows)))
+            report(n, mins, m, rows)
     say("=== sweep done %s ===" % time.strftime("%H:%M"))
 
 

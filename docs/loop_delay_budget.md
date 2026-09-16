@@ -99,6 +99,33 @@ drive-aware policy's 2 Hz hunt is an open gap (accelerometer coupling adds only 
 component). Sweeps showed the pure delay is the dominant knob; stick-slip, servo tau and deadband
 barely move the ring.
 
+## Floor tests of the first faithful-sim seeds (same afternoon) — two more plant lessons
+
+Ten seeds of the drive-aware recipe were trained in the faithful sim (`sim/seed_sweep.py`, ~3 min
+each) and screened offline; five passed. Two were flashed:
+
+| policy   | offline screen (at the time) | floor                                                        |
+|----------|------------------------------|--------------------------------------------------------------|
+| ppo_fw_s8| best conditioned (a_op +0.03, gain ratio 1.2) | **no shimmy**; leans too far and **falls at full-stick forward**; reverse good |
+| ppo_fw_s5| smoothest drive (0.9 °/s)    | balances, then a **~2 Hz see-saw** (pitch ±2°, cmd ±50) grows and it falls    |
+
+Both failures were then reproduced in sim by fixing the plant, not the policy:
+
+1. **The loaded wheel is weaker than the bench.** Steady wheel velocity on the floor (7 episodes,
+   two policies): **v ≈ 0.9·(cmd − 35)** raw; the unloaded June bench gave 1.0·(cmd − 21). With
+   deadband 0.15 / 27 rad/s as the sim's nominal, s8 falls forward at 2.4 s (floor: same) and
+   mc_l4a survives (floor: same). The two seeds nearest zero at the operating point (s7, s8) are
+   the ones that fall; survivors carry a small positive offset that pre-loads the dead zone.
+2. **The 2 Hz hold hunt is loaded stick-slip + the firmware hold loop.** On the hysteretic
+   stick-slip actuator (June bench: static ~0.25, kinetic ~0.12) with the hold loop running, s5
+   see-saws at 2.0 Hz in sim, drive34 at 3 Hz, s8 only mildly — the floor's ordering. The old
+   clean-deadband sim rated s5 the smoothest of all.
+
+The sweep screen now runs every seed on **both** loaded plants (four full-stick drives) plus a
+stick-slip **hold** test that flags the hunt. It fails s8 (falls) and s5 (hold-hunt) — two
+floor-validated negatives — and passes s2 and s9. The sim's ordering is sensitive to the actuator
+model, so it is a screen, not an oracle: a PASS earns a floor test, nothing more.
+
 ## What this says about the next policy
 
 - The delay is the plant's; we cannot train it away or tune it away in our loop.
