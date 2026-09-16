@@ -72,17 +72,21 @@ if __name__ == "__main__":
                                                                # training -> policy learns forward-drive authority
     ap.add_argument("--legacy_obs", action="store_true")       # CLEAN physics obs (pre-2026-09-16 recipes). Default
                                                                # is the firmware sensing path (FirmwareSensing).
+    ap.add_argument("--seed", type=int, default=None)          # PPO + env + numpy seed (seed sweeps; None = unseeded)
     args = ap.parse_args()
+    if args.seed is not None:
+        np.random.seed(args.seed)                              # env sensor noise uses the global numpy RNG
 
     venv = make_vec_env(make_env(args.domain_rand, args.frame_stack, args.vel_pen,
                                  mirror_aug=not args.no_mirror, rate_dr=not args.no_rate_dr,
                                  pos_anchor=args.pos_anchor, pure_balance=not args.pos_aware,
                                  pos_weight=args.pos_weight, rate_pen=args.rate_pen,
-                                 drive_train=args.drive_train, fw_obs=not args.legacy_obs), n_envs=args.nenv)
+                                 drive_train=args.drive_train, fw_obs=not args.legacy_obs),
+                        n_envs=args.nenv, seed=args.seed)
     venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
     common = dict(verbose=1, device="cpu", n_steps=1024, batch_size=2048, gamma=0.997,
                   gae_lambda=0.95, learning_rate=3e-4, policy_kwargs=dict(net_arch=[64, 64]),
-                  tensorboard_log="./tb")
+                  tensorboard_log="./tb", seed=args.seed)
     if args.caps_lambda > 0.0:
         model = CAPS_PPO("MlpPolicy", venv, caps_lambda=args.caps_lambda, caps_sigma=args.caps_sigma, **common)
         print(f"training CAPS-PPO (lambda={args.caps_lambda}, sigma={args.caps_sigma}): "

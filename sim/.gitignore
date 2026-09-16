@@ -1,6 +1,7 @@
 .venv/
 __pycache__/
 tb/
+logs/
 *.zip
 *.pkl
 *.npz
