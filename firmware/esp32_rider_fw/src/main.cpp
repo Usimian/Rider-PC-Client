@@ -227,6 +227,10 @@ volatile bool  gPosZeroReq=false;         // 'poszero' (controller button) -> lo
 #define LEG_SETTLE 3                        // control cycles to wait after torque-on before writing the goal:
                                             // the servo DROPS a goal write fired right after 0x18=1, so defer it.
 volatile int  gLegStepReq=0;              // pending mirrored step (BOTH legs, body raise/lower); 'legstep'
+volatile float    gLegRate   = 0.0f;      // 'legrate' body-height RATE (leg counts/s, + = up): the DS4 right stick.
+volatile uint32_t gLegRateMs = 0;         //   Integrated every control cycle -> 1-count goal steps = smooth (a 10 Hz
+#define LEG_RATE_TIMEOUT_MS 300           //   'legstep' of ~5 counts made a staircase). Heartbeat-fed: no 'legrate'
+                                          //   for LEG_RATE_TIMEOUT_MS -> rate 0, so a lost link can't keep legs moving.
 volatile int  gLegAbsL=LEG_NONE, gLegAbsR=LEG_NONE; // pending PER-LEG absolute target; 'legL'/'legR' (leg-leveling foundation)
 static int    gLegTgtL=LEG_NONE, gLegTgtR=LEG_NONE; // target goal per leg (LEG_NONE = inactive/limp)
 static bool   gLegEnerL=false,   gLegEnerR=false;   // leg torque on?
@@ -263,6 +267,8 @@ static int     gLevAnchR=LEG_NONE, gLevAnchL=LEG_NONE; // leg height anchor capt
 #define LEG_EQUAL_SUM (LEG_R_MID+LEG_L_MID)        // R+L when the two legs are equal length (differential = 0)
 volatile float gLegHomeSlew = 0.3f;          // home/equalize slew (counts/cycle) = 'slowly' ('leghomeslew')
 volatile bool  gLegLimpReq = false;          // 'leglimp' (STOP button) -> torque-OFF both legs and stay limp
+volatile bool  gLegHomeReq = false;          // 'leghome' (DS4 R3) -> slew both legs back to the ride height (MID),
+                                             // the same slow move balance-on does; works balancing or not
 static bool    gLegLimped  = false;          // legs held limp (suppresses the balance-off equalize) until next balance-on
 static bool    gLegHoming = false;           // slewing legs to a home/equalized destination, then hold
 static float   gLegHomeR=0, gLegHomeL=0;     // slewing command (float for fractional slew)
@@ -1132,9 +1138,11 @@ static void balanceTask(void*){
         gLegHoming=false; gLegStepReq=0; gLegLimped=true; gLegLimpReq=false;
       }
       if(driving && !drvPrev) gLegLimped=false;                  // re-enabling balance un-limps the legs
-      if(gLegLimped){ drvPrev=driving; levPrev=gLevelOn; }        // stay limp: skip the machine, just track the edges
+      if(gLegLimped){ drvPrev=driving; levPrev=gLevelOn; gLegHomeReq=false; }  // stay limp: skip the machine (a 'leghome' while limp is dropped)
       else {
-      if(driving && !drvPrev){                                    // balance ON -> slew both legs to MID, slowly
+      // balance ON, or 'leghome' (DS4 R3) -> slew both legs to the ride height (MID), slowly
+      if((driving && !drvPrev) || gLegHomeReq){
+        gLegHomeReq = false; gLegStepReq = 0;                     // a reset discards any height nudge still pending
         gLegHomeR = (gLegEnerR&&gLegTgtR!=LEG_NONE)?gLegTgtR:(legReadPos(RIGHT_LEG,&hp)?hp:LEG_R_MID);
         gLegHomeL = (gLegEnerL&&gLegTgtL!=LEG_NONE)?gLegTgtL:(legReadPos(LEFT_LEG,&hp)?hp:LEG_L_MID);
         gLegDestR = LEG_R_MID; gLegDestL = LEG_L_MID; gLegHoming = true;
@@ -1158,6 +1166,15 @@ static void balanceTask(void*){
         gLevCmd = 0.0f;
       }
       levRunPrev=levRun;
+      {                                                           // smooth height: integrate 'legrate' into 1-count steps
+        static float legRateAcc = 0.0f;
+        if(millis() - gLegRateMs > LEG_RATE_TIMEOUT_MS) gLegRate = 0.0f;   // heartbeat lost -> stop
+        if(gLegRate != 0.0f && !gLegHoming){
+          legRateAcc += gLegRate * dt;
+          int n = (int)legRateAcc;                                 // whole counts, sign kept
+          if(n){ legRateAcc -= n; gLegStepReq += n; }              // same path as 'legstep' (honours leveling + limits)
+        } else legRateAcc = 0.0f;
+      }
       if(gLegStepReq){
         if(levRun){ gLevAnchR += gLegStepReq; gLevAnchL -= gLegStepReq; gLegStepReq=0; }      // move the level anchor (mirror)
         else if(!gLegHoming){ gLegStepR += gLegStepReq; gLegStepL -= gLegStepReq; gLegStepReq = 0; }  // (ignored mid-home)
@@ -1377,6 +1394,8 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"levsign"))  gLevelSign = (v<0)?-1:1; // leveling correction sign (flip if it tilts the wrong way)
   else if (!strcmp(s,"rollgsign")) gRollGyroSign = (v<0)?-1.0f:1.0f; // roll gyro-fusion sign (flip if fused roll diverges)
   else if (!strcmp(s,"leghomeslew")) gLegHomeSlew = v;   // leg home/equalize slew (counts/cycle) = how 'slowly' the legs move on balance on/off
+  else if (!strcmp(s,"legrate"))  { gLegRate = clampf(v,-200.0f,200.0f); gLegRateMs = millis(); }  // height rate (counts/s, + up); heartbeat
+  else if (!strcmp(s,"leghome"))  gLegHomeReq = true;    // legs -> ride height (MID), slow slew; ignored while limp
   else if (!strcmp(s,"leglimp"))  gLegLimpReq = true;    // STOP button: torque-OFF both legs, stay limp until next balance-on
   else if (!strcmp(s,"polj"))     gPolJoint=(v!=0.0f); // use Stage-1 balance+turn policy on/off (gated)
   else if (!strcmp(s,"posaware")) gPosAware=(v!=0.0f); // position-aware policy on/off (set while DISABLED; takes effect on enable)

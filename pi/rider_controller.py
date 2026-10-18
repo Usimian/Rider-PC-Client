@@ -6,13 +6,19 @@ rider/control/line, which the bridge (rider_status_screen.py) relays to the ESP3
 Kept separate from the bridge so a controller hiccup can't disturb the balance
 serial/telemetry -- the bridge stays the single serial owner.
 
-Mapping (balancer w/ position-hold; turning not available yet):
-  Left stick up/down -> drive the position target (push = move, release = hold)
-  Triangle           -> legs EXTEND (body up), stepped, firmware clamps to servo limits
-  Cross (X)          -> legs RETRACT (body down), stepped, firmware clamps to servo limits
-  Square (#)         -> toggle roll-leveling (IMU-roll differential legs; level 1/0)
-  Circle (O)         -> reset position (poszero) without dropping balance
-  Share              -> toggle balance (en 1 / en 0); off = stop (no separate e-stop)
+Mapping:
+  Left stick up/down  -> drive speed (push = move, release = stop and hold there)
+  Right stick left/right -> turn rate
+  Right stick up/down -> body HEIGHT (legs extend/retract at a rate set by the stick; firmware
+                         clamps to the servo limits). Acts only when the stick is mostly vertical,
+                         so a turn doesn't also change height.
+  R3 (right stick click) -> height back to the normal ride height (firmware 'leghome', slow)
+  Triangle            -> balance controller = RL POLICY  (firmware 'ctrl 0')  } only while balance
+  Cross (X)           -> balance controller = LQR        (firmware 'ctrl 1')  } is OFF; LCD shows it
+  Square (#)          -> toggle roll-leveling (IMU-roll differential legs; level 1/0)
+  Circle (O)          -> reset position (poszero) without dropping balance
+  Share               -> toggle balance (en 1 / en 0); off = stop (no separate e-stop)
+  Options             -> toggle joystick <-> computer drive
 
 Run normally:  /home/pi/xgovenv/bin/python rider_controller.py
 Verify mapping: /home/pi/xgovenv/bin/python rider_controller.py --test
@@ -40,13 +46,20 @@ TOPIC_FWDLIMIT = "rider/safety/fwd_limit"  # ToF safety governor -> forward-spee
 # --- mapping (verify indices with --test, then adjust) ---
 AXIS_DRIVE = 1       # left stick Y (stick up = negative)
 AXIS_TURN = 3        # right stick X (verify with --test)
+AXIS_HEIGHT = 4      # right stick Y (stick up = negative). 6-axis DS4 under hid_playstation: 0 LX, 1 LY,
+                     # 2 L2, 3 RX, 4 RY, 5 R2 (3 = RX verified; 4 = RY verified with --test 2026-10-18)
 BTN_BALANCE     = 8  # Share        -- toggle balance (en 1/en 0); off = stop. (moved to Share 2026-06-24; VERIFY index w/ --test)
-BTN_LEG_EXTEND  = 2  # Triangle    -- legs extend (body up)
-BTN_LEG_RETRACT = 0  # Cross (X)   -- legs retract (body down)
+BTN_CTRL_POLICY = 2  # Triangle    -- balance controller = RL policy ('ctrl 0'); only while balance is off
+BTN_CTRL_LQR    = 0  # Cross (X)   -- balance controller = LQR ('ctrl 1');       only while balance is off
 BTN_DISTZERO    = 1  # Circle (O)  -- poszero / reset position, balance stays on (Cross=0,Circle=1,Triangle=2,Square=3 verified --test 2026-06-16)
 BTN_LEVEL       = 3  # Square       -- toggle roll-leveling (IMU-roll differential legs: level 1/0)
 BTN_MODE        = 9  # Start/Options -- toggles joystick<->computer drive
-LEG_STEP        = 10 # encoder counts per Triangle/Cross press (leg-goal nudge; firmware clamps to servo limits)
+BTN_HEIGHT_HOME = 12 # R3 (right stick click) -- legs back to the normal ride height ('leghome', slow).
+                     # 13-button DS4 under hid_playstation: ... 10 PS, 11 L3, 12 R3 (VERIFY with --test)
+HEIGHT_RATE     = 50.0  # leg encoder counts/s at full right-stick-vertical (leg travel ~95 counts -> ~2 s
+                        # end to end). Sent as 'legrate'; firmware integrates it, clamps to the servo limits.
+HEIGHT_HZ       = 10    # 'legrate' heartbeat while the stick is held (firmware times out after 300 ms)
+HEIGHT_DEADZONE = 0.40  # same as the turn deadzone: the right stick is worn (rest offset ~0.32 on X)
 DEADZONE = 0.12
 TURN_DEADZONE = 0.40  # right stick (turn) resting offset has DRIFTED to ~0.32 (worn stick), past the old 0.30
                       # deadzone -> it kept commanding turnrate 0.03 and, with no heartbeat to refresh it, that
@@ -138,6 +151,8 @@ def main():
     last_turn_send = 0.0
     drive_mode = "computer"   # BOOT in computer mode (safe default). 'joystick' = stick drives; press Start to opt in.
     lev_on = False            # local roll-leveling toggle (firmware has no level-state feedback; track it here)
+    last_height_rate = 0.0    # last height rate sent (counts/s)
+    last_height_send = 0.0
     period = 1.0 / LOOP_HZ
     send_period = 1.0 / SEND_HZ
 
@@ -185,10 +200,15 @@ def main():
                 send("en 0")
             else:
                 send("en 1")                       # firmware homes the target on enable
-        if edge(BTN_LEG_EXTEND):               # Triangle: legs extend (body up)
-            send("legstep %d" % LEG_STEP)
-        if edge(BTN_LEG_RETRACT):              # Cross: legs retract (body down)
-            send("legstep %d" % -LEG_STEP)
+        for btn, c, name in ((BTN_CTRL_POLICY, 0, "POLICY"), (BTN_CTRL_LQR, 1, "LQR")):
+            if edge(btn):                      # Triangle = policy, Cross = LQR
+                if state["en"]:                # the firmware refuses a swap mid-balance; don't even ask
+                    print("ctrl %s ignored: balance is on (Share to stop first)" % name, flush=True)
+                else:
+                    send("ctrl %d" % c)        # LCD shows the active controller from telemetry
+                    print("ctrl -> %s" % name, flush=True)
+        if edge(BTN_HEIGHT_HOME):              # R3: back to the normal ride height, slowly (balancing or not)
+            send("leghome")
         if edge(BTN_DISTZERO):                 # Circle: re-zero distance / reset position, balance stays on
             send("poszero")
         if edge(BTN_LEVEL):                    # Square: toggle IMU-roll leg leveling
@@ -201,6 +221,20 @@ def main():
             pub_mode(drive_mode)               # -> LCD shows the active drive source
             print("drive_mode -> %s" % drive_mode, flush=True)
         prev_btn = {i: buttons[i] for i in range(len(buttons))}
+
+        # body height (right stick Y) = a RATE the firmware integrates every control cycle into 1-count
+        # leg moves (smooth). Any mode/balance state, like the old leg buttons. Only when the stick is
+        # mostly VERTICAL, so a sideways turn push doesn't also move the legs. Sent on change (incl. the
+        # return to 0) plus a heartbeat while moving; the firmware stops the legs if the heartbeat stops.
+        hy = -axes[AXIS_HEIGHT] if AXIS_HEIGHT < len(axes) else 0.0      # stick up = positive = body up
+        hx = axes[AXIS_TURN] if AXIS_TURN < len(axes) else 0.0
+        h = dz(hy, HEIGHT_DEADZONE) if abs(hy) > 1.5 * abs(hx) else 0.0
+        rate = round(h * HEIGHT_RATE, 1)
+        if ((rate != last_height_rate) or (rate != 0.0 and now - last_height_send >= 1.0 / HEIGHT_HZ)) \
+                and now - last_height_send >= send_period:
+            last_height_send = now
+            last_height_rate = rate
+            send("legrate %.1f" % rate)                                 # counts/s: + up / - down
 
         # drive (left stick Y) + turn (right stick X): only while balancing AND in joystick mode.
         # In computer mode the controller stays silent so MQTT/autonomy drive commands aren't stomped.
