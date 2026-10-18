@@ -1,7 +1,8 @@
 # XGO Rider (CM4) — pin & button reference
 
 Sources: `Rider-Pi_SCH.pdf` (ESP32 mainboard schematic, in this folder) + the XGO CM4
-software stack (`key.py`, the WS2812 LED driver) — original at `~/Downloads/RaspberryPi-CM4-main`.
+software stack (`key.py`, the WS2812 LED driver) — in `vendor/RaspberryPi-CM4-main` (untracked
+vendor tree; re-fetch per README "External assets").
 
 ## LCD HAT buttons — Raspberry Pi GPIO (BCM), active-low, internal pull-up
 

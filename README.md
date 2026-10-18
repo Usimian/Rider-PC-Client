@@ -70,6 +70,20 @@ Flashing overwrites whatever firmware is on the ESP32 — see `docs/HARDWARE.md`
 - [`docs/xgo-cm4-pinout.md`](docs/xgo-cm4-pinout.md) — Pi GPIO, LCD buttons, ESP32 pins.
 - [`docs/factory_roll_balance.md`](docs/factory_roll_balance.md) — decompiled stock roll-leveling, and how ours maps to it.
 - [`firmware/prebuilt/README.md`](firmware/prebuilt/README.md) — known-good flashable images.
+- [`docs/loop_delay_budget.md`](docs/loop_delay_budget.md) — the balance-loop delay budget, the sim calibration, and the 2026-09 policy floor tests.
+
+## External assets (not tracked — re-fetch on a fresh clone)
+
+`vendor/` is gitignored: 275 MB of third-party reference code the docs cite, re-fetchable from
+upstream. Put each at the path shown so the doc references resolve.
+
+| path | what | source | version |
+|---|---|---|---|
+| `vendor/Luwu-OS-2.0.1/` | Stock Luwu OS for the Rider's Pi: `libs/xgolib/` (the xgolib serial protocol layer), `HARDWARE_PLAN.md` (CM5 build) | github.com/LuwuDynamics — Luwu-OS, release `2.0.1` (Apache-2.0) | 2.0.1 |
+| `vendor/RaspberryPi-CM4-main/` | Stock XGO CM4 stack: `key.py` (LCD buttons), WS2812 LED driver, demos | github.com/Xgorobot/RaspberryPi-CM4, branch `main`, zip download (no license file; **do not commit**) | main as of 2026-10 |
+
+Neither is needed to build or run anything here; they are the reference the register map and
+pinout docs were derived from.
 
 ## Environment
 

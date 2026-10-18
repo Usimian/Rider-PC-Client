@@ -147,7 +147,8 @@ id 12 (L leg)    r0x00: 0C 00 1C 0C 01 FA 96 03   r0x08: FF 03 00 55 3C BE FF 03
 ## Sources (authoritative → least)
 1. `~/RIG-Omni/main/boards/hover/xgo.cc` + `xgo.h` — ESP32-S3 successor; drives the SAME servos
    directly. **The register Rosetta stone.** (`SetVelOpenloop`, `WritePos_Sync_kp`, `ReadWheelState`.)
-2. `~/Downloads/Luwu-OS-2.0.1/libs/xgolib/` — Pi-side xgolib (**protocol layer**, not servo regs).
+2. `vendor/Luwu-OS-2.0.1/libs/xgolib/` — Pi-side xgolib (**protocol layer**, not servo regs).
+   (untracked vendor tree; re-fetch per README "External assets")
 3. Our hardware-verified findings (memory: `project_xgo_rider_wheel_mode`, `_wheel_stop`,
    `_wheel_odometry`, `_cal_storage`).
 4. FeeTech SCS datasheet — **not yet obtained**; would resolve the UNSURE rows. Get this to close the gap.

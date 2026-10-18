@@ -11,8 +11,8 @@ overrides the repo-wide `*.bin` ignore) so they stay preserved in the repo.
 | `rider_stock_R-1.1.6_app.bin` | Stock **`R-1.1.6`** app partition only (1.1 MB) — a *newer* factory firmware than either full backup | app-slot flash, see below |
 
 The passthrough `_fw.bin` is rebuildable from source; kept here as a known-good snapshot.
-The stock backup is the factory restore image (originally at `~/Downloads/Rider-bins/`,
-a scratch folder retired on 2026-07-23 once everything unique in it lived here).
+The stock backup is the factory restore image. (History: it was first dumped into a scratch
+folder that was retired on 2026-07-23 once everything unique in it lived here.)
 
 The two stock dumps are interchangeable as restore images: their `app0`, `app1`, and
 `spiffs` partitions are byte-identical. They differ only inside `nvs` (`0x9000`–`0xB000`,
@@ -25,9 +25,9 @@ cmp -l rider_stock_R-1.1.3_full_backup.bin rider_stock_R-1.1.3_emergency_backup_
 
 ## Stock `R-1.1.6` (`rider_stock_R-1.1.6_app.bin`)
 
-This is the **only copy that exists** — folded in from the since-retired
-`~/Downloads/Rider-bins/` because nothing else carries `R-1.1.6`. If this file is lost, the
-firmware is gone; there is no upstream download archived anywhere on this machine.
+This is the **only copy that exists** — folded in from a since-retired scratch folder because
+nothing else carries `R-1.1.6`. If this file is lost, the firmware is gone; there is no
+upstream download archived anywhere on this machine.
 Both full backups above are `R-1.1.3`, so this
 is an *upgrade* image, not a restore-to-known-state one. It has never been dumped off a
 running chip here, so there is no `R-1.1.6` nvs/spiffs to pair with it.
