@@ -119,6 +119,10 @@ volatile bool  gPosAware   = false; // 'posaware 1' -> POSITION-AWARE policy (PO
 volatile float gYawObsSign = 1.0f;  // sim yaw-rate OBS sign ('yawobssign'); verify on stand
 volatile float gPolTurnSign= 1.0f;  // turn-output sign ('poljsign'); verify on stand
 volatile float gPolULP   = 0.0f;    // low-pass on the POLICY output cmd (0=off; adds command lag, can destabilize)
+volatile float gPolFF    = 0.0f;    // stiction feed-forward on the POLICY output (raw counts added past +/-gFFband;
+                                    // 0=off). Same mechanism as the LQR build's gFF / the factory boost: keeps the
+                                    // wheel out of the loaded dead zone (~35 raw) that drives the ~1 Hz hold
+                                    // see-saw (ppo_fw_s9, floor 2026-09-16). Live-tune 'polff' (try 20..35).
 volatile float gPolVelLP = 0.7f;    // low-pass on the velocity FED TO THE POLICY (kills quantization shimmy at the input)
 // Code-based position hold: policy stays a PURE balancer (its position obs are
 // neutralized); a simple outer loop biases the balance SETPOINT toward a target
@@ -884,7 +888,13 @@ static void balanceTask(void*){
           // the current spot = the new hold home.
           float vtgt = (gDriveVel < -gPosVmaxBack) ? -gPosVmaxBack : gDriveVel;   // asymmetric: limit backward
           if(vtgt > vdesS + damax) vdesS += damax; else if(vtgt < vdesS - damax) vdesS -= damax; else vdesS = vtgt;
-          gPosTarget = wheel_x; gPosTargetEff = wheel_x; posErrInt = 0.0f;
+          // posErrInt is FROZEN here, not zeroed (2026-09-16): at rest the integrator tilts the
+          // setpoint to cancel the policy's constant command bias (ppo_fw_s2: ~-50 raw -> hold
+          // pitch 5.0 vs setpoint 3.55). Zeroing it on stick touch brought the bias back and ate
+          // one direction's drive authority (s2: forward 'non-existent'; mc_l4a: weak reverse).
+          // Held constant, the cancel carries into the drive. No windup: the target tracks wheel_x
+          // so posErr is 0 all through the drive and the integral gains nothing.
+          gPosTarget = wheel_x; gPosTargetEff = wheel_x;
           wasVelDrive = true;
         } else {
           // ---- POSITION HOLD / COMMANDED MOVE (stick released, or 'ptgt' distance) -----
@@ -966,7 +976,11 @@ static void balanceTask(void*){
       }
       { float ims=(micros()-ti0)*1e-3f; if(ims>inferMaxAcc) inferMaxAcc=ims; }   // INSTRUMENT
       uF = gPolULP*uF + (1.0f-gPolULP)*uraw;   // low-pass the policy command -> kills the cycle-to-cycle shimmy
-      u = clampf(uF, -(float)gUMax, (float)gUMax);
+      float uOut = uF;
+      if(gPolFF > 0.0f){                        // stiction feed-forward: jump past the loaded dead zone ('polff')
+        if(uOut > gFFband) uOut += gPolFF; else if(uOut < -gFFband) uOut -= gPolFF;
+      }
+      u = clampf(uOut, -(float)gUMax, (float)gUMax);
     } else {
       polInit = false;                                          // re-init policy episode on next enable
       if(!gEnabled && gTestTor!=0) u = (float)gTestTor;         // stand-only debug
@@ -1320,6 +1334,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"logdump")){ gLogDump=true; return; }                                // dump the held enable->fall balance log over USB
   // ('polrun' removed: controller is selected at BUILD time now -- see gPolMode at top. No runtime toggle.)
   else if (!strcmp(s,"polsign")) gPolSign=(v<0.0f?-1.0f:1.0f);  // flip action->wheel sign (verify on robot)
+  else if (!strcmp(s,"polff"))   gPolFF=clampf(v,0.0f,100.0f);  // policy-output stiction feed-forward (raw counts past +/-ffband; 0=off)
   else if (!strcmp(s,"polulp"))  gPolULP=clampf(v,0.0f,0.95f);  // policy-output low-pass (0=off..0.95 heavy)
   else if (!strcmp(s,"polvlp"))  gPolVelLP=clampf(v,0.0f,0.97f);// policy velocity-OBS low-pass (kills quantization shimmy)
   else if (!strcmp(s,"vlp"))     LP_VEL=clampf(v,0.0f,0.98f);   // wheel-velocity feedback low-pass (wheel buzz)
