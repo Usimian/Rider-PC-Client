@@ -76,13 +76,14 @@ Flashing overwrites whatever firmware is on the ESP32 — see `docs/HARDWARE.md`
 
 ## External assets (not tracked — re-fetch on a fresh clone)
 
-`vendor/` is gitignored: 275 MB of third-party reference code the docs cite, re-fetchable from
+`vendor/` is gitignored: ~390 MB of third-party reference code and CAD the docs cite, re-fetchable from
 upstream. Put each at the path shown so the doc references resolve.
 
 | path | what | source | version |
 |---|---|---|---|
 | `vendor/Luwu-OS-2.0.1/` | Stock Luwu OS for the Rider's Pi: `libs/xgolib/` (the xgolib serial protocol layer), `HARDWARE_PLAN.md` (CM5 build) | github.com/LuwuDynamics — Luwu-OS, release `2.0.1` (Apache-2.0) | 2.0.1 |
 | `vendor/RaspberryPi-CM4-main/` | Stock XGO CM4 stack: `key.py` (LCD buttons), WS2812 LED driver, demos | github.com/Xgorobot/RaspberryPi-CM4, branch `main`, zip download (no license file; **do not commit**) | main as of 2026-10 |
+| `vendor/xgo-cad/` | STEP models: `XGO-Rider.STEP` (full mechanical assembly, 847 solids, AP203), `XGO-Rider-V1.3.step` (ESP32 mainboard PCB), `XGO-CarrierBoard-V1.3.step` (Pi carrier PCB). 115 MB. | vendor CAD supplied by Marc 2026-10-18; upstream download location not recorded (no license; **do not commit**) | Rider assembly "_0624"; boards V1.3 |
 
 Neither is needed to build or run anything here; they are the reference the register map and
 pinout docs were derived from.

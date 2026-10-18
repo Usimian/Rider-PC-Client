@@ -6,7 +6,7 @@ __pycache__/
 
 # Large model files - see README "External assets"
 *.pt
-# Vendor reference trees (stock Luwu OS, stock XGO CM4 stack) -- 275 MB of third-party code,
+# Vendor reference material (stock Luwu OS, stock XGO CM4 stack, XGO STEP CAD) -- ~390 MB of third-party files,
 # re-fetchable from upstream; see README "External assets" for source + version. NOT tracked:
 # this repo is PUBLIC and the CM4 repo carries no license file.
 /vendor/
