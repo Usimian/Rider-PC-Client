@@ -51,4 +51,4 @@ Partition layout is identical between `R-1.1.3` and `R-1.1.6`, so the offsets ho
 
 The self-balance firmware is **not** snapshotted here — it changes every firmware
 commit, so build + flash it from source: `cd firmware/esp32_rider_fw && pio run -t upload`
-(default env `esp32_lqr`, or `-e esp32` for the policy build).
+(one binary; pick the controller at runtime with `ctrl 0` policy / `ctrl 1` LQR).

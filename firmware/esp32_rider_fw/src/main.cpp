@@ -101,16 +101,14 @@ volatile float gDriveFF = 0.0f;     // lean-FF: deg of setpoint tilt per m/s com
 // ---- neural-policy control. 'pol 1' to enable. ----
 // SIM-TRAINED, NOT YET HW-VERIFIED. Obs/action signs almost certainly need an
 // on-robot check (flip with 'polsign', and watch the obs match the sim's SI units).
-// Controller is chosen at BUILD time, not runtime. The control loop is split by #ifdef so each
-// binary contains EXACTLY ONE controller -- there is no runtime mode flag to drop or mis-set.
-// Default build = POLICY; the LQR controller lives ONLY in the -DCONTROLLER_LQR build (env:esp32_lqr).
-#ifdef CONTROLLER_LQR
-#define POLICY_BUILD 0
-#define CTRL_NAME "LQR"
-#else
-#define POLICY_BUILD 1
-#define CTRL_NAME "POL"
-#endif
+// ---- controller selection: RUNTIME, one binary carries both (2026-10-18) ----
+// Was a compile-time #ifdef split (env esp32 = policy, env esp32_lqr = LQR) so the wrong one
+// could never be armed by accident. The runtime switch keeps that guarantee a different way:
+// 'ctrl 0|1' is ACCEPTED ONLY WHILE DISABLED (en=0), and the active controller is reported in
+// every telemetry line (ctrl=POL|LQR -> LCD + GUI). Not persisted: boots as CTRL_POL.
+enum { CTRL_POL = 0, CTRL_LQR = 1 };
+volatile int gCtrl = CTRL_POL;
+static const char* ctrlName(){ return gCtrl == CTRL_LQR ? "LQR" : "POL"; }
 volatile float gPolSign  = 1.0f;    // action->wheel-command sign (verify on robot)
 volatile bool  gPolJoint   = false; // use Stage-1 balance+turn policy ('polj'); 0 = legacy 1-output balancer
 volatile bool  gPosAware   = false; // 'posaware 1' -> POSITION-AWARE policy (POA_*): real x_err/x_int in obs, NO
@@ -833,11 +831,12 @@ static void balanceTask(void*){
     // in gradually at posvmax, so driving never trips the guard; only a genuine track loss
     // (wheel_x lags the slewed target by >gMaxPosErr) does. Before policy/LQR init (fresh enable)
     // reference current position so the in-branch homing isn't locked out.
-#if POLICY_BUILD
-    float posRef = polInit ? gPosTargetEff : wheel_x;   // policy: measure runaway from the slewed target
-#else
-    float posRef = lqrInit ? gPosTargetEff : wheel_x;   // LQR: runaway from the slewed target while balancing; when NOT balancing (fresh enable OR post-fall) reference wheel_x so the position term contributes 0 -- else a fall AFTER driving >gMaxPosErr from home latches 'fallen' forever (wheels are off here anyway, so runaway protection is unaffected). Matches the policy build above.
-#endif
+    // Both controllers: runaway is measured from the slewed target while balancing; when NOT
+    // balancing (fresh enable OR post-fall) reference wheel_x so the position term contributes 0 --
+    // else a fall AFTER driving >gMaxPosErr from home latches 'fallen' forever (wheels are off
+    // here anyway, so runaway protection is unaffected).
+    bool ctrlInit = (gCtrl == CTRL_POL) ? polInit : lqrInit;
+    float posRef = ctrlInit ? gPosTargetEff : wheel_x;
     bool fallen = (fabsf(qErr) > gFallDeg) || (fabsf(wheel_x - posRef) > gMaxPosErr);
     gFallen = fallen;                          // expose to the LED status (loop() reads it)
     if(gPosZeroReq){                           // re-zero the distance frame mid-balance: odometer + target + slew
@@ -849,8 +848,8 @@ static void balanceTask(void*){
     }
     float u = 0.0f;
     float turnPol = 0.0f;          // Stage-1 turn-policy turn output (raw wheel cmd); used by the output stage
-#if POLICY_BUILD
-    // ===== POLICY controller -- the ONLY controller in the default build =====
+    if(gCtrl == CTRL_POL){
+    // ===== POLICY controller =====
     if(gEnabled && !fallen){
       // ---- neural-policy control: PURE balancer + code-based position hold ----
       // Pitch sign flipped to the sim frame (MEASURED: forward lean -> th DECREASES,
@@ -985,8 +984,8 @@ static void balanceTask(void*){
       polInit = false;                                          // re-init policy episode on next enable
       if(!gEnabled && gTestTor!=0) u = (float)gTestTor;         // stand-only debug
     }
-#else
-    // ===== LQR full-state controller -- ONLY in the -DCONTROLLER_LQR build =====
+    } else {
+    // ===== LQR full-state controller =====
     // (lqrInit declared up top alongside polInit so the position-runaway cutout's posRef can read it)
     static float obsX=0, obsV=0; static bool obsInit=false;   // velocity-observer state (alpha-beta on wheel_x)
     static float lqrIx=0;                                     // position-error integral accumulator (m*s); homes steady-state pos error to 0
@@ -1054,7 +1053,7 @@ static void balanceTask(void*){
       uF = 0.0f; lqrInit=false; obsInit=false; lqrIx=0.0f;      // reset output-LP + drive + observer + pos-integral for next enable
       if(!gEnabled && gTestTor!=0) u = (float)gTestTor;          // stand-only debug
     }
-#endif
+    }  // end controller select (gCtrl)
     // Output: drive wheels only when actively balancing (or stand-test). When idle,
     // DISABLE wheel torque (reg 0x18=0) so the wheels go limp instead of holding pos-0.
     static int8_t ditherSign = 1;
@@ -1067,14 +1066,10 @@ static void balanceTask(void*){
       float uout = u;
       if(driving && gDither>0){ uout += (float)(gDither*ditherSign); ditherSign = -ditherSign; }  // dither in balance OR stand-test
       // turn differential: from the Stage-1 policy (turnPol) when active, else the hand-tuned gTurn.
-      // turnPol is assigned ONLY inside #if POLICY_BUILD; in the LQR build it stays 0, so build-gate
-      // here -- otherwise 'polj 1' on the LQR fw forces tn=clampf(0)=0 and silently kills ALL turning.
-#if POLICY_BUILD
-      float tn = gPolJoint ? clampf(turnPol, -(float)gUMax, (float)gUMax)
-                           : clampf(gTurn, -gTurnMax, gTurnMax);
-#else
-      float tn = clampf(gTurn, -gTurnMax, gTurnMax);   // LQR build: turning is always the hand-tuned gTurn
-#endif
+      // turnPol is assigned ONLY by the policy controller; under LQR it stays 0, so gate on gCtrl
+      // here -- otherwise 'polj 1' under LQR forces tn=clampf(0)=0 and silently kills ALL turning.
+      float tn = (gCtrl == CTRL_POL && gPolJoint) ? clampf(turnPol, -(float)gUMax, (float)gUMax)
+                                                  : clampf(gTurn, -gTurnMax, gTurnMax);
       if(gPosMode){
         // factory-style: rate-limit + ACCUMULATE the wheel-driving (torque) field.
         // While the lean persists, the command ramps up (+/-gPosClamp/cycle) to a
@@ -1295,6 +1290,11 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"d"))     gEnabled=false;
   else if (!strcmp(s,"izero")) gImuZero=v;
   else if (!strcmp(s,"dqmax")) gDqUMax=v;
+  else if (!strcmp(s,"ctrl")){                                   // controller select: 0=POL (policy), 1=LQR
+    if(gEnabled){ emit("# ctrl REFUSED: disable first (en 0)\n", 37); return; }   // never swap mid-balance
+    gCtrl = (v != 0.0f) ? CTRL_LQR : CTRL_POL;
+    char cb[40]; int ck=snprintf(cb,sizeof(cb),"# ctrl=%s\n",ctrlName()); emit(cb,ck); return;
+  }
   else if (!strcmp(s,"posmode")) gPosMode=(v!=0.0f);            // factory position-goal wheel cmd on/off
   else if (!strcmp(s,"torlim"))  gTorLim=(int)v;               // torque-limit field (position mode)
   else if (!strcmp(s,"posclamp"))gPosClamp=(int)v;             // per-cycle goal delta clamp
@@ -1445,7 +1445,7 @@ void loop(){
     char b[704];
     int k=snprintf(b,sizeof(b),
       "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lev=%d racc=%.2f gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d\n",
-      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, CTRL_NAME, gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, gLevelOn, tRollAcc, gTurn, gHdgTarget, gYawRateCmd,
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, gLevelOn, tRollAcc, gTurn, gHdgTarget, gYawRateCmd,
       (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID));
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     if(gPolJoint && k>0){                        // Stage-1 turn-policy diagnostics (obs + outputs)

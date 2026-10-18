@@ -13,6 +13,20 @@ Read at session start. Facts live in the repo (`docs/loop_delay_budget.md`, comm
 - **Not yet observed on the floor:** the integrator-freeze build, and `polff` at any value
   (plan was 20 then 35 raw, set live over `rider/control/line` while balancing).
 
+## Done 2026-10-18: single binary, runtime controller switch (floor-verified)
+
+`ctrl 0` policy / `ctrl 1` LQR, refused while `en 1` (verified: sent mid-balance, stayed LQR,
+no disturbance); boots as the policy. Floor, same session, at hold: policy pitch std 1.8–2.0°,
+1.2 Hz see-saw (= s9 in September); **LQR pitch std 0.82°, rate std 5.7 °/s, pos std 28 mm,
+0.5 Hz** — calmer than the policy but looser than its June record (0.3°, 14 mm). Likely cause
+(UNTESTED): the September read fix raised the loop 163 → 234 Hz and the LQR's per-cycle
+filters/gains were tuned at 163 — try `loopus 6000` first. Also: LQR drive lags its target by
+15–20 cm (pos err −222 mm fwd / +148 mm rev).
+
+Marc's recollection of the factory firmware (for step 3 below): full-stick forward had a
+**slow start, then reached a decent speed** — consistent with its heavy input filter and
+rate-limited accumulating wheel command. That ramp is the target feel.
+
 ## Open list, in order
 
 1. Floor test the flashed build: hold see-saw unchanged with `polff 0`? forward vs reverse

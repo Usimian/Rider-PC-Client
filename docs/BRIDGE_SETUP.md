@@ -39,15 +39,20 @@ From the workstation, ESP32 USB-C connected (`/dev/ttyUSB0`):
 
 ```bash
 cd firmware/esp32_rider_fw
-/home/marc/.xgo-cal/bin/pio run -t upload          # default env: esp32_lqr
+/home/marc/.xgo-cal/bin/pio run -t upload
 ```
 
-Two build envs from one source, selected by a compile-time flag:
+One binary carries both balance controllers, selected at runtime by a firmware command. The
+switch is accepted **only while balancing is disabled** (`en 0`); while balancing it is refused.
+Not persisted: the ESP32 boots with the policy.
 
-| env | flag | controller | telemetry `ctrl=` |
-|---|---|---|---|
-| `esp32_lqr` (**default**) | `-DCONTROLLER_LQR` | LQR full-state, torque-direct | `LQR` |
-| `esp32` (`pio run -e esp32 -t upload`) | — | RL policy | `POL` |
+| command | controller | telemetry `ctrl=` |
+|---|---|---|
+| `ctrl 0` (boot default) | RL policy (`src/rider_policy.h`) | `POL` |
+| `ctrl 1` | LQR full-state, torque-direct | `LQR` |
+
+Send it like any firmware line, e.g. over MQTT `rider/control/line` `{"line": "ctrl 1"}`.
+(Before 2026-10-18 these were two compile-time builds, `esp32` and `esp32_lqr`.)
 
 Provides balance + telemetry: `roll` (accel), `yaw` (gyro-Z integrated),
 `vbat`/`batt` (GPIO33 divider, ratio 3.0 from schematic R8 20K / R7 10K, 2S 8.4 V).
