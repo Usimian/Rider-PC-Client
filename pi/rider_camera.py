@@ -27,6 +27,7 @@ import paho.mqtt.client as mqtt
 from picamera2 import Picamera2
 
 BROKER, PORT = "localhost", 1883
+TUNING_FILE = "ov5647_noir.json"   # libcamera's NoIR tuning (camera has no IR-cut filter; see docs/HARDWARE.md)
 TOPIC_REQ = "rider/control/image_capture"
 TOPIC_RESP = "rider/response/image_capture"
 
@@ -44,7 +45,9 @@ def _ensure_started():
     cv2.imencode wants -> correct colors with no channel swap."""
     global _picam
     if _picam is None:
-        p = Picamera2()
+        # NoIR module (no IR-cut filter, verified 2026-10-19 with a TV remote): the stock ov5647 tuning
+        # turns shadows magenta and daylight cyan; the NoIR tuning ships with libcamera.
+        p = Picamera2(tuning=Picamera2.load_tuning_file(TUNING_FILE))
         p.configure(p.create_video_configuration(main={"size": (640, 480), "format": "RGB888"}))
         p.start()
         time.sleep(0.35)   # let AE/AWB settle before the first frame

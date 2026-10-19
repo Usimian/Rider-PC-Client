@@ -74,7 +74,10 @@ position at rest — the fault only showed mid-range under motion, so a static r
   `rider-tof`, `rider-tof-safety`, `rider-recorder` (see project CLAUDE.md + `BRIDGE_SETUP.md`).
 
 ## Camera / input
-- **CSI camera** OV5647 via picamera2 (`pi/rider_camera.py`).
+- **CSI camera** OV5647 via picamera2 (`pi/rider_camera.py`). **NoIR module — no infrared-cut filter**
+  (verified 2026-10-19: a TV remote's IR LED shows bright in the live feed). With the stock
+  `ov5647.json` tuning, shadows go magenta and daylight cyan; the matching tuning
+  `ov5647_noir.json` ships with the Pi's libcamera (`/usr/share/libcamera/ipa/rpi/pisp/`).
 - **DS4** PS4 controller over BT on the Pi (`/dev/input/js0`, pygame; ERTM left at default,
   kernel pinned 6.12.47 — memory `project_xgo_rider_controller`).
 
