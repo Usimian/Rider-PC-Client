@@ -73,6 +73,7 @@ Flashing overwrites whatever firmware is on the ESP32 — see `docs/HARDWARE.md`
 - [`docs/factory_roll_balance.md`](docs/factory_roll_balance.md) — decompiled stock roll-leveling, and how ours maps to it.
 - [`firmware/prebuilt/README.md`](firmware/prebuilt/README.md) — known-good flashable images.
 - [`docs/loop_delay_budget.md`](docs/loop_delay_budget.md) — the balance-loop delay budget, the sim calibration, and the 2026-09 policy floor tests.
+- [`docs/WEB_UI_DESIGN.md`](docs/WEB_UI_DESIGN.md) — design (not built yet) for a browser control page served by the Rider, replacing the Tk GUI; optional no-WiFi hotspot mode.
 
 ## External assets (not tracked — re-fetch on a fresh clone)
 

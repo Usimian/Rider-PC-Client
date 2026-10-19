@@ -215,7 +215,11 @@ pi/deploy_bridge.sh rider
 ```
 
 It installs the six units (`rider-bridge`, `-joystick`, `-camera`, `-tof`, `-tof-safety`,
-`-recorder`), copies `beep.wav`, and enables + starts everything. Full service description:
+`-recorder`), copies `beep.wav`, and enables + starts everything. It also installs the **broker
+config** `pi/mosquitto-rider.conf` → `/etc/mosquitto/conf.d/rider.conf` (1883 open to the LAN —
+a stock Mosquitto 2.x is localhost-only, so without it nothing off the Pi can connect — and 9001
+for the browser page) and the **web page** `pi/web/` → `/srv/rider-web/`, then restarts the
+broker. Deploy with the robot disabled. Page: `http://raspberrypi.local:9001/`. Full service description:
 [`BRIDGE_SETUP.md`](BRIDGE_SETUP.md).
 
 **Local deviation (2026-10-18, Marc):** `rider-tof-safety` was stopped and disabled at boot — it

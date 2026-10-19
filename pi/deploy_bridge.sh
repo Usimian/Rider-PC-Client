@@ -15,10 +15,13 @@
 # (serial console disabled), the pi user in the gpio+dialout groups, and a
 # running mosquitto broker. Firmware is flashed separately (see ../docs/BRIDGE_SETUP.md).
 set -euo pipefail
-PI="${1:-pi@10.0.0.95}"
+PI="${1:-rider}"                     # ssh-config alias (never a hardcoded IP)
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-echo "==> copying bridge + controller + camera + ToF + beep + units to $PI"
+echo "==> copying bridge + controller + camera + ToF + beep + units + broker conf + web page to $PI"
+scp "$HERE/mosquitto-rider.conf"   "$PI:/tmp/mosquitto-rider.conf"
+ssh "$PI" 'rm -rf /tmp/rider-web && mkdir -p /tmp/rider-web'
+scp "$HERE"/web/*                  "$PI:/tmp/rider-web/"
 scp "$HERE/rider_status_screen.py" "$PI:/home/pi/rider_status_screen.py"
 scp "$HERE/rider_controller.py"    "$PI:/home/pi/rider_controller.py"
 scp "$HERE/rider_camera.py"        "$PI:/home/pi/rider_camera.py"
@@ -47,8 +50,16 @@ else
   echo "  WARN: /home/pi/tofvenv missing -- rider-tof.service (sensor publisher) will not start."
   echo "        Create it with vl53l5cx-ctypes + smbus2 + paho-mqtt, then re-run this deploy."
 fi
-# 2. ensure the broker is up
-sudo systemctl enable --now mosquitto >/dev/null 2>&1 || true
+# 2. broker: our listeners (1883 LAN MQTT + 9001 browser page/WebSockets) and the web page, then
+#    (re)start it. The old hand-made conf.d/local.conf held only the 1883 lines -- now in rider.conf.
+#    A broker restart drops every client for ~1 s; the Pi services resubscribe on reconnect.
+#    Deploy with the robot DISABLED (a drive command in flight could otherwise stay latched).
+sudo install -m 644 /tmp/mosquitto-rider.conf /etc/mosquitto/conf.d/rider.conf
+sudo rm -f /etc/mosquitto/conf.d/local.conf
+sudo install -d -m 755 /srv/rider-web
+sudo install -m 644 /tmp/rider-web/* /srv/rider-web/
+sudo systemctl enable mosquitto >/dev/null 2>&1 || true
+sudo systemctl restart mosquitto
 # 2b. boot-speed: mask NetworkManager-wait-online. It burns ~6s waiting for full WiFi
 #     connectivity, which gated the whole boot (mosquitto Wants=network-online.target, and
 #     rider-bridge/rider-joystick order after mosquitto). The broker + our services only
