@@ -227,6 +227,9 @@ volatile int   gWheelFault = 0;     // 0=ok; else ID of a wheel that dropped off
 // telemetry (written by task, read by loop)
 volatile float tTheta=0, tRate=0, tU=0, tWheelX=0, tWheelVx=0;
 volatile float tPacc=0, tPraw=0;    // accel-pitch: comp-corrected vs raw (lever-arm comp verify)
+// drivecap extras (2026-10-19, turning-shimmy hunt): what the POLICY is fed this cycle (0 under LQR), both
+// wheels' FINAL commands (after the turn differential), and the right wheel's reported speed.
+static float tPolPP=0, tPolPR=0, tPolXV=0, tPolPI=0, tPolBias=0, tCmdL=0, tCmdR=0; static int tVR=0;
 volatile float tVest=0;             // velocity-observer estimate (vs raw wv) -- observer verify
 volatile float tLqrInQ=0;           // pitch as the LQR sees it after the factory input filter ('lqrin')
 volatile float tRoll=0;                  // lateral tilt (deg), GYRO-FUSED (low-lag) -- feeds leg leveling
@@ -308,6 +311,8 @@ volatile bool gDcReady=false;             // capture stopped/full -> data HELD u
 volatile bool gLogDump=false;             // 'logdump' -> loop() emits the held balance log over USB
 static uint32_t dcT[DCAP_N]; static int16_t dcCmd[DCAP_N]; static int16_t dcV[DCAP_N];
 static uint8_t  dcWid[DCAP_N]; static int16_t dcP[DCAP_N]; static int16_t dcR[DCAP_N]; static int dcIdx=0;
+// extras (2026-10-19): final wheel cmds L/R, right-wheel speed, and the policy's inputs (0 under LQR)
+static int16_t dcL[DCAP_N], dcRc[DCAP_N], dcVR[DCAP_N], dcPP[DCAP_N], dcPR[DCAP_N], dcXV[DCAP_N], dcPI[DCAP_N], dcB[DCAP_N];
 volatile float gYawBias=0.0f;             // gyro-Z zero-rate bias (deg/s), from calibrateGyro
 volatile float gVbatK=3.0f;              // GPIO33 divider ratio: pack = pin*K. Schematic R8=20K(top)/R7=10K(bot) => x3.0
 // 2S pack (net VCC8.4V): 8.4V full, 6.0V empty -> linear % for display.
@@ -783,7 +788,7 @@ static void balanceTask(void*){
     }
     if(pollBoth || gPollLock==RIGHT_W){
       int pR=0,vR=0; bool okR=wheelRead(RIGHT_W,&pR,&vR);
-      if(okR){ odomUpdate(RIGHT_W,pR,vR); failR=0; } else { hzFail++; failR++; }
+      if(okR){ odomUpdate(RIGHT_W,pR,vR); failR=0; tVR=vR; } else { hzFail++; failR++; }
       if(gPollLock==RIGHT_W){ rdWid=RIGHT_W; p=pR; v=vR; ok=okR; }
     }
     { float rdms=(micros()-trd0)*1e-3f; if(rdms>rdMaxAcc) rdMaxAcc=rdms; }   // INSTRUMENT: read-block ms
@@ -995,6 +1000,7 @@ static void balanceTask(void*){
       float pr_pitch = (biasDeg - pitch) * POL_DEG2RAD;   // = -(theta-(setpoint+bias)) in rad
       float pr_rate  = -dqf * POL_DEG2RAD;                // pitch rate (rad/s), sim frame
       if(polInit) polIpitch = clampf(polIpitch + pr_pitch*dt, -1.0f, 1.0f);
+      tPolPP = pr_pitch; tPolPR = pr_rate; tPolXV = xvelP; tPolPI = polIpitch; tPolBias = biasDeg;   // drivecap
       // x_int for the position-aware obs: integral of x_err (= posErr), clamped to sim's +/-2.0 m*s,
       // accumulated EVERY step (matches sim's unconditional integrator -- NOT posErrInt's gated one).
       if(polInit && gPosAware) posXInt = clampf(posXInt + posErr*dt, -2.0f, 2.0f);
@@ -1178,6 +1184,7 @@ static void balanceTask(void*){
         torqAcc += d;
         if(torqAcc>gTorLim) torqAcc=gTorLim; else if(torqAcc<-gTorLim) torqAcc=-gTorLim;
         wheelTorque((int16_t)(torqAcc + tn), (int16_t)(-torqAcc + tn)); // + yaw differential
+        tCmdL = torqAcc + tn; tCmdR = -torqAcc + tn;
       } else {
         float L = uout + tn, R = -uout + tn;                        // mirrored L:+u/R:-u + yaw differential
         // during a commanded turn, keep neither wheel in the stiction band -> both wheels
@@ -1187,6 +1194,7 @@ static void balanceTask(void*){
           if(R > 0.0f && R < gWheelDZ) R = gWheelDZ; else if(R < 0.0f && R > -gWheelDZ) R = -gWheelDZ;
         }
         wheelTorque((int16_t)L, (int16_t)R);
+        tCmdL = L; tCmdR = R;
       }
     } else if(wasDriving){
       // Falling edge (disable / fall / Ctrl-C): the servos latch the last velocity
@@ -1342,7 +1350,15 @@ static void balanceTask(void*){
     // drive-capture sample (commanded u vs actual encoder v, per wheel, + pitch) at loop rate
     if(gDcArm && dcIdx<DCAP_N){
       dcT[dcIdx]=micros(); dcCmd[dcIdx]=(int16_t)u; dcV[dcIdx]=(int16_t)v;
-      dcWid[dcIdx]=rdWid; dcP[dcIdx]=(int16_t)(theta*100.0f); dcR[dcIdx]=(int16_t)(rate*10.0f); dcIdx++;
+      dcWid[dcIdx]=rdWid; dcP[dcIdx]=(int16_t)(theta*100.0f); dcR[dcIdx]=(int16_t)(rate*10.0f);
+      bool pol = (gCtrl == CTRL_POL);
+      dcL[dcIdx]=(int16_t)tCmdL; dcRc[dcIdx]=(int16_t)tCmdR; dcVR[dcIdx]=(int16_t)tVR;
+      dcPP[dcIdx]=pol ? (int16_t)(tPolPP*57.2958f*100.0f) : 0;   // fed pitch, deg x100 (sim frame, incl. bias)
+      dcPR[dcIdx]=pol ? (int16_t)(tPolPR*57.2958f*10.0f)  : 0;   // fed pitch rate, deg/s x10 (sim frame)
+      dcXV[dcIdx]=pol ? (int16_t)(tPolXV*1000.0f)         : 0;   // fed velocity, mm/s
+      dcPI[dcIdx]=pol ? (int16_t)(tPolPI*1000.0f)         : 0;   // pitch integral, mrad*s
+      dcB[dcIdx] =pol ? (int16_t)(tPolBias*100.0f)        : 0;   // drive-loop bias, deg x100
+      dcIdx++;
       if(dcIdx>=DCAP_N){ gDcArm=false; gDcReady=true; }
     }
 
@@ -1591,12 +1607,20 @@ void loop(){
   // control task keeps balancing while we stream ~256 lines. Yield periodically (WDT + control).
   if(gLogDump){
     int n = (dcIdx>DCAP_N)?DCAP_N:dcIdx;                 // captured sample count, held since 'en 1'
-    { char h[56]; int hk=snprintf(h,sizeof(h),"# dcap n=%d cols: i t_us u wid v th_x100 rate_x10\n",n); emit(h,hk); }
+    { char h[192]; int hk=snprintf(h,sizeof(h),"# dcap n=%d cols: i t_us u wid v th_x100 rate_x10 cmdL cmdR vR "
+                                   "pol_pitch_x100 pol_rate_x10 pol_xvel_mm pol_int_m pol_bias_x100\n",n); emit(h,hk); }
     for(int i=0;i<n;i++){
-      char b[72]; int k=snprintf(b,sizeof(b),"# dcap %d %lu %d %d %d %d %d\n",
-                                 i,(unsigned long)dcT[i],(int)dcCmd[i],(int)dcWid[i],(int)dcV[i],(int)dcP[i],(int)dcR[i]);
+      char b[128]; int k=snprintf(b,sizeof(b),"# dcap %d %lu %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+                                 i,(unsigned long)dcT[i],(int)dcCmd[i],(int)dcWid[i],(int)dcV[i],(int)dcP[i],(int)dcR[i],
+                                 (int)dcL[i],(int)dcRc[i],(int)dcVR[i],(int)dcPP[i],(int)dcPR[i],(int)dcXV[i],(int)dcPI[i],
+                                 (int)dcB[i]);
       emit(b,k);
-      if((i & 15)==0) delay(1);
+      if((i & 15)==0){
+        delay(1);
+        // keep reading commands while the ~4 s dump streams: before 2026-10-19 they waited until it ended, so
+        // a stick release (or a stop) arrived seconds late -- a floor spin kept turning ~half a turn
+        pump(Serial, b0, n0); pump(Serial1, b1, n1);
+      }
     }
     { char d[16]; int dk=snprintf(d,sizeof(d),"# dcap done\n"); emit(d,dk); }
     gLogDump=false;
