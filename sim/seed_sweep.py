@@ -18,7 +18,12 @@ import argparse, os, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = os.path.join(HERE, ".venv", "bin", "python")
 LOGDIR = os.path.join(HERE, "logs", "seed_sweep")
-RECIPE = ["--domain_rand", "--frame_stack", "2", "--drive_train", "--caps_lambda", "4", "--drive_lead", "--pitch_dis"]
+RECIPE = ["--domain_rand", "--frame_stack", "2", "--drive_train", "--caps_lambda", "4", "--drive_lead", "--pitch_dis",
+          "--spin_prob", "0.3"]
+# two-wheel spins/turns (rider_env_twowheel, sensor noise on, turnrate 1.0 = full stick). Floor: ld8_s6 spins at
+# 16-22 deg/s (two-wheel sim 5-7), LQR 2.6-3 (sim 1.4-1.9) -> a policy must spin within ~2x the sim LQR.
+TURNS = [("spin+", dict(yaw_cmd=1.0)), ("spin-", dict(yaw_cmd=-1.0)), ("turn-drive", dict(yaw_cmd=1.0, v=0.30))]
+SPIN_RATE_MAX = 3.5     # deg/s pitch-rate RMS while spinning in place
 DRIVE = "lead"          # the stick-drive structure the screen runs (must match the recipe: --drive_lead -> 'lead')
 
 
@@ -80,14 +85,23 @@ def screen(name):
     f, prom = ds.dom_freq(pr, 1.0 / dt, 1.0, 6.0)
     rows["hold"] = dict(up=fell is None, fell=fell, pitch=np.degrees(L[k, 1].std()),
                         rate=np.degrees(np.sqrt((pr ** 2).mean())), freq=f, prom=prom)
+    for tag, kw in TURNS:
+        kw = dict(kw); v = kw.pop("v", 0.0)
+        L, fell, dt = ds.simulate(infer, +1, v, T=8.0, fw_obs=True, drive=DRIVE, twowheel=True, noise=True, **kw)
+        k = L[:, 0] > 3.0
+        pr = L[k, 2] if k.sum() > 32 else L[:, 2]
+        rows[tag] = dict(up=fell is None, fell=fell, rate=np.degrees(np.sqrt((pr ** 2).mean())))
     return m, rows
 
 
 def verdict(m, rows):
     reasons = []
-    drives = [k for k in rows if k != "hold"]
-    falls = [k for k in drives if not rows[k]["up"]]
+    turns = [t for t, _ in TURNS]
+    drives = [k for k in rows if k != "hold" and k not in turns]
+    falls = [k for k in rows if k != "hold" and not rows[k]["up"]]
     if falls: reasons.append("falls:" + "/".join(falls))
+    for t in ("spin+", "spin-"):
+        if rows[t]["up"] and rows[t]["rate"] > SPIN_RATE_MAX: reasons.append(t + "-shimmy")
     if not rows["hold"]["up"]: reasons.append("hold-falls")
     if abs(m["a_op"]) > 0.5: reasons.append("a_op")
     if m["gRatio"] > 2.0: reasons.append("gain-asym")
@@ -127,18 +141,19 @@ def main():
         def cell(r):
             return "%.2f %.2f %s" % (r["spd"], r["a99"], "up" if r["up"] else "F%.1f" % r["fell"])
         h = rows["hold"]
-        say("%-14s %5.0fm | %+6.2f %5.0f %6.1f | %s | %-22s | %s" %
+        turns = " ".join("%4.1f%s" % (rows[t]["rate"], "" if rows[t]["up"] else "F") for t, _ in TURNS)
+        say("%-14s %5.0fm | %+6.2f %5.0f %6.1f | %s | %-22s | %-16s | %s" %
             (n, mins, m["a_op"], 100 * m["sat"], m["gRatio"],
              " | ".join(cell(rows[pl + "-fwd"]) + " / " + cell(rows[pl + "-rev"])
                         for pl in ("clean", "ss", "weak", "low", "drift")),
              "%4.2f° %5.1f°/s %3.1fHz x%-3.0f" % (h["pitch"], h["rate"], h["freq"], h["prom"]),
-             verdict(m, rows)))
+             turns, verdict(m, rows)))
 
-    header = "%-14s %6s | %6s %5s %6s | %s | %-22s | %s" % \
+    header = "%-14s %6s | %6s %5s %6s | %s | %-22s | %-16s | %s" % \
         ("policy", "train", "a_op", "sat%", "gRatio",
          " | ".join("%-25s" % (pl + " FWD/REV spd a99") for pl in ("clean", "stick-slip", "weak x0.85", "low legs -3",
                                                                     "turn drift -2")),
-         "ss HOLD std rate f x", "verdict")
+         "ss HOLD std rate f x", "2W spin+/-/turn", "verdict")
     if args.rescreen:
         say("\n=== rescreen %s ===" % time.strftime("%Y-%m-%d %H:%M")); say(header)
         for n in ([x for x in args.extra.split(",") if x] + names):

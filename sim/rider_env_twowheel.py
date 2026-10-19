@@ -27,6 +27,10 @@ HDG_KP, HDG_KD = 1.0, 2.0            # gHdgKp (raw per count of wheel1-wheel2), 
 WV_PER_MPS = 265.0                   # wheel_vx units per m/s (floor, 2026-10-19)
 LP_VEL = 0.85                        # firmware per-wheel speed low-pass
 CMD_FULL = 30.0 * 7.764              # raw wheel-cmd at action 1
+# training randomization (spin_prob > 0, domain_rand)
+SPIN_CMD = (0.3, 1.0)                # turnrate held (rad/s; the joystick's full stick = 1.0)
+SCRUB_DR = (0.02, 0.06)              # tyre torsional friction about the calibrated 0.04
+RIGHT_DEADBAND = (0.05, 0.15)        # the right wheel's own dead zone (the left gets the 2-D DR range too)
 WHEEL_HALF_WIDTH = 0.010             # m (tyre ~20 mm wide)
 SCRUB = [4, 0.04]                    # wheel contact: condim 4 (+ torsional) and the torsional friction (m). CALIBRATED
                                      # 2026-10-19: at turnrate 1.0 the floor needs turn ~60-67 raw for yaw ~1.2-1.3
@@ -80,7 +84,10 @@ class RiderTwoWheelEnv(RiderBalanceEnv):
     """RiderBalanceEnv with two wheels, yaw and the firmware turn controller. Set .yaw_cmd (rad/s, the
     'turnrate' the joystick sends; full stick = 1.0) at any time."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, spin_prob: float = 0.0, **kwargs):
+        # spin_prob (training, needs domain_rand): share of episodes that hold a turnrate for part of the episode
+        self.spin_prob = spin_prob
+        self._yaw_plan = None                                       # (cmd, start step, end step) or None
         super().__init__(*args, **kwargs)
         # swap in the two-wheel plant (the parent built the 1-wheel one; everything else is reused)
         self.model = mujoco.MjModel.from_xml_string(build_mjcf_twowheel(self.p))
@@ -165,6 +172,9 @@ class RiderTwoWheelEnv(RiderBalanceEnv):
         return self.turn_f
 
     def _apply_action(self, a):
+        if self._yaw_plan is not None:                              # training: the episode's turn schedule
+            cmd, s0, s1 = self._yaw_plan
+            self.yaw_cmd = cmd if s0 <= self._steps < s1 else 0.0
         tn = self._turn_output() / CMD_FULL                         # raw -> action units
         self.last_turn = tn * CMD_FULL
         self.data.ctrl[0] = self.actL(a + tn)
@@ -172,10 +182,18 @@ class RiderTwoWheelEnv(RiderBalanceEnv):
 
     # ---- episode ----
     def _randomize(self):
-        super()._randomize()                                        # samples this episode's wheel params into self.act
-        p = self.act.p                                              # both wheels share them (asymmetry: later)
+        from dataclasses import replace
+        super()._randomize()                                        # this episode's wheel params -> self.act, friction -> L
+        p = self.act.p
+        u = self.np_random.uniform
         self.actL = ActuatorModel(p, self.ctrl_dt)
-        self.actR = ActuatorModel(p, self.ctrl_dt)
+        # real wheels are never equal: the right one gets its own dead zone and +/-10 % strength
+        pr = replace(p, deadband_frac=u(*RIGHT_DEADBAND), vel_max_rad_s=p.vel_max_rad_s * u(0.9, 1.1))
+        self.actR = ActuatorModel(pr, self.ctrl_dt)
+        wl = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "wheelL")
+        wr = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "wheelR")
+        self.model.geom_friction[wl, 1] = u(*SCRUB_DR)               # tyre scrub (torsional friction)
+        self.model.geom_friction[wr] = self.model.geom_friction[wl]
 
     def set_right_wheel(self, **kw):
         """Make the RIGHT wheel differ (e.g. deadband_frac=0.15, stick_slip=True): real wheels are never equal."""
@@ -185,8 +203,18 @@ class RiderTwoWheelEnv(RiderBalanceEnv):
 
     def reset(self, *, seed=None, options=None):
         self._turn_reset()
+        self._yaw_plan = None
         out = super().reset(seed=seed, options=options)
         if self.right_kw:
             self.set_right_wheel(**self.right_kw)
         self.actL.reset(); self.actR.reset()
+        if self.domain_rand and self.spin_prob > 0.0 and self.np_random.uniform() < self.spin_prob:
+            # a turn: full-ish stick either way, starting 0.5-3 s in, held 2-6 s (then released: the stop too).
+            # Half of them spin in place (the floor shimmy), half turn while driving.
+            u = self.np_random.uniform
+            cmd = u(*SPIN_CMD) * (1.0 if u() < 0.5 else -1.0)
+            s0 = int(u(0.5, 3.0) / self.ctrl_dt); s1 = s0 + int(u(2.0, 6.0) / self.ctrl_dt)
+            self._yaw_plan = (cmd, s0, s1)
+            if self.drive_train and u() < 0.5:
+                self._drive_cmd = 0.0
         return out

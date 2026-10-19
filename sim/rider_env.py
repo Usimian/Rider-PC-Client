@@ -365,7 +365,7 @@ class RiderBalanceEnv(gym.Env):
 
     def _single_obs(self):
         pitch, pitch_rate, x_vel, wheel_vel = self.last_sensed
-        x = self.data.qpos[self.q_x]
+        x = self._raw_state()[2]                         # forward travel (2-D: slide_x; two-wheel: wheel odometry)
         xerr = 0.0 if self.pure_balance else (x - self.target_x)   # firmware zeros these (pos in code)
         xint = 0.0 if self.pure_balance else self._x_int
         # drive_train: the pitch obs is setpoint-RELATIVE (pitch + drive-loop bias), exactly like the
@@ -381,7 +381,7 @@ class RiderBalanceEnv(gym.Env):
             self._bias_rad = 0.0
             return
         dt = self.ctrl_dt
-        x = float(self.data.qpos[self.q_x])
+        x = float(self._raw_state()[2])                        # forward travel, not world x (the two-wheel env turns)
         if self._steps >= self._drive_start_step:              # hold first, then the stick goes over
             self._vdes_cmd = self._drive_cmd
         dv = DRIVE_AMAX * dt                                   # accel-cap the commanded velocity ramp
@@ -480,7 +480,7 @@ class RiderBalanceEnv(gym.Env):
             # cap), both signs -- so the policy learns balance AND driving. Drive episodes HOLD first for
             # DRIVE_HOLD_S (the hold integral builds, as on the robot), then the stick goes over: the
             # start from a standstill is where the 2026-10-19 policy falls happened.
-            x0 = float(self.data.qpos[self.q_x])
+            x0 = float(self._raw_state()[2])
             self._drive_cmd = 0.0 if self.np_random.uniform() < 0.4 else \
                 float(self.np_random.uniform(-DRIVE_TRAIN_VMAX, DRIVE_TRAIN_VMAX))
             self._drive_start_step = int(self.np_random.uniform(*DRIVE_HOLD_S) / self.ctrl_dt)

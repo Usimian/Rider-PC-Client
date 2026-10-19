@@ -10,17 +10,19 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
 
 from rider_env import RiderBalanceEnv
+from rider_env_twowheel import RiderTwoWheelEnv
 from caps_ppo import CAPS_PPO       # PPO + spatial action-smoothness (used when --caps_lambda > 0)
 
 
 def make_env(domain_rand=False, frame_stack=1, vel_pen=0.0, mirror_aug=True, rate_dr=True,
              pos_anchor=0.0, pure_balance=True, pos_weight=0.75, rate_pen=0.30, drive_train=False,
-             fw_obs=True, drive_lead=False, pitch_dis=False):
-    return lambda: RiderBalanceEnv(add_noise=True, domain_rand=domain_rand, frame_stack=frame_stack,
-                                   mirror_aug=mirror_aug, vel_pen=vel_pen, rate_dr=rate_dr, rate_pen=rate_pen,
-                                   pos_anchor=pos_anchor, pure_balance=pure_balance, pos_weight=pos_weight,
-                                   drive_train=drive_train, fw_obs=fw_obs, drive_lead=drive_lead,
-                                   pitch_dis=pitch_dis)
+             fw_obs=True, drive_lead=False, pitch_dis=False, spin_prob=0.0):
+    # spin_prob > 0: the TWO-WHEEL env (rider_env_twowheel) -- real turns/spins through the firmware turn controller
+    cls, extra = (RiderTwoWheelEnv, dict(spin_prob=spin_prob)) if spin_prob > 0.0 else (RiderBalanceEnv, {})
+    return lambda: cls(add_noise=True, domain_rand=domain_rand, frame_stack=frame_stack,
+                       mirror_aug=mirror_aug, vel_pen=vel_pen, rate_dr=rate_dr, rate_pen=rate_pen,
+                       pos_anchor=pos_anchor, pure_balance=pure_balance, pos_weight=pos_weight,
+                       drive_train=drive_train, fw_obs=fw_obs, drive_lead=drive_lead, pitch_dis=pitch_dis, **extra)
 
 
 def evaluate(model, vecnorm, frame_stack=1, n=20, fw_obs=True):
@@ -74,6 +76,8 @@ if __name__ == "__main__":
                                                                # is the firmware sensing path (FirmwareSensing).
     ap.add_argument("--drive_lead", action="store_true")       # LQR-like stick drive: the target advances at the
                                                                # commanded speed, position P keeps acting (2026-10-19)
+    ap.add_argument("--spin_prob", type=float, default=0.0)    # >0: train in the two-wheel env, this share of episodes
+                                                               # holding a turnrate (spins / turns, 2026-10-19)
     ap.add_argument("--pitch_dis", action="store_true")        # randomize the floor's pitch errors (moved balance
                                                                # point by leg height, turn drift) into the fed pitch
     ap.add_argument("--seed", type=int, default=None)          # PPO + env + numpy seed (seed sweeps; None = unseeded)
@@ -86,7 +90,7 @@ if __name__ == "__main__":
                                  pos_anchor=args.pos_anchor, pure_balance=not args.pos_aware,
                                  pos_weight=args.pos_weight, rate_pen=args.rate_pen,
                                  drive_train=args.drive_train, fw_obs=not args.legacy_obs,
-                                 drive_lead=args.drive_lead, pitch_dis=args.pitch_dis),
+                                 drive_lead=args.drive_lead, pitch_dis=args.pitch_dis, spin_prob=args.spin_prob),
                         n_envs=args.nenv, seed=args.seed)
     venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
     common = dict(verbose=1, device="cpu", n_steps=1024, batch_size=2048, gamma=0.997,
