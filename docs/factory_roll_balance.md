@@ -84,6 +84,10 @@ over MQTT.
 > made the same per-cycle step act 42 % harder per second: leveling went from roll std ~0.06-0.5° at
 > 0.5-0.9 Hz (June-Aug) to a ~1.2-1.5 Hz rock at ~0.9° std (Oct). The step is now scaled by
 > `dt · 165`, so these numbers keep their tuned meaning whatever the loop rate.
+> **Floor result after the fix (2026-10-19, recorder log):** leveling runs of 43-81 s gave roll std
+> 0.27-0.46° at 0.5-0.9 Hz (one 81 s run includes a disturbance, p2p 12°), vs 0.87° at 1.2 Hz that
+> morning before it — back in the June-Aug range. Switching leveling on still takes a few seconds to
+> settle (the gentle, slew-limited integrator), then holds within a few tenths of a degree.
 
 > **This replaced an earlier proportional version** (`target = levsign · levkp · (roll − levset)`,
 > gain `levkp`). Proportional **stalls at a non-zero roll offset** — the leg differential needed to
