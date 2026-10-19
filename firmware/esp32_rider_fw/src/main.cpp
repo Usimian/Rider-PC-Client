@@ -151,7 +151,14 @@ volatile float gPosHoldKd  = 10.0f; // setpoint-bias D gain (deg per m/s) -- HOL
                                     // (reorder freshened pitch at velocity's expense); 10 = clean hold (std 0.3deg). Robot 2026-06-17.
 volatile float gDriveKd    = 10.0f; // velocity-DRIVE gain (deg per m/s): used while moving (stick drive or ptgt slew).
                                     // 10 has the phase margin for the ~50ms wheel-vel delay (28/20 rang while driving).
-volatile float gPosHoldMax = 5.0f;  // max setpoint bias / braking authority (deg) (auto-tuned)
+volatile float gPosHoldMax = 8.0f;  // max setpoint bias / braking authority (deg). 5->8 (2026-10-19) with the LQR-like
+                                    // stick drive below: at 5 it pinned in reverse with the legs lowered (a 3 deg balance-
+                                    // point shift + the reverse lean) and held 0.25 instead of 0.30 m/s (sim, drive_sim).
+volatile float gPolLeash   = 0.25f; // POLICY stick drive (2026-10-19), 'polleash': >0 = LQR-LIKE -- the target ADVANCES at
+                                    // the commanded speed and the position P keeps acting, the target kept within this
+                                    // many m of the robot. Copes with a moved balance point (low legs) and the turn-time
+                                    // pitch drift that made the old drive creep/stall/speed up (floor 2026-10-19).
+                                    // 0 = the old drive: target latched to wheel_x every cycle, velocity-D only.
 volatile float gPosIntBand = 0.15f; // only integrate within this dist of target (m) -> no windup during moves
 volatile float gPosDeadband= 0.012f;// hold dead-band (m): when settled within this of target, STOP chasing the
                                     // exact center (P off, I frozen, D kept) so the loop can't limit-cycle against
@@ -927,27 +934,30 @@ static void balanceTask(void*){
         wasTurning = turning;
         if(fabsf(gDriveVel) > 0.001f){
           // ---- VELOCITY DRIVE (stick held) ----------------------------------------
-          // Position target is IRRELEVANT here: the home continuously tracks the current
-          // position (so nothing winds up), and vdes ramps (accel-limited) to the stick's
-          // commanded speed. Drive is then the gPosHoldKd velocity loop on (xvelF - vdes),
-          // posErr being ~0. The instant the stick releases, gPosTarget is left sitting at
-          // the current spot = the new hold home.
+          // vdes ramps (accel-limited) to the stick's commanded speed. gPolLeash > 0 (default, 2026-10-19):
+          // the target ADVANCES at vdes like the LQR's and the position P keeps pulling the robot to it (at
+          // most gPolLeash behind/ahead), so speed errors and pitch offsets are corrected. gPolLeash 0 (the
+          // old drive): the home tracks the current position, posErr ~0, only the velocity-D term drives.
+          // Either way, the instant the stick releases the home latches at the current spot.
           float vtgt = (gDriveVel < -gPosVmaxBack) ? -gPosVmaxBack : gDriveVel;   // asymmetric: limit backward
           if(vtgt > vdesS + damax) vdesS += damax; else if(vtgt < vdesS - damax) vdesS -= damax; else vdesS = vtgt;
           // posErrInt is FROZEN here, not zeroed (2026-09-16): at rest the integrator tilts the
           // setpoint to cancel the policy's constant command bias (ppo_fw_s2: ~-50 raw -> hold
           // pitch 5.0 vs setpoint 3.55). Zeroing it on stick touch brought the bias back and ate
           // one direction's drive authority (s2: forward 'non-existent'; mc_l4a: weak reverse).
-          // Held constant, the cancel carries into the drive. No windup: the target tracks wheel_x
-          // so posErr is 0 all through the drive and the integral gains nothing.
-          gPosTarget = wheel_x; gPosTargetEff = wheel_x;
+          // Held constant, the cancel carries into the drive. No windup: it only integrates with the
+          // stick released (gDriveVel 0), so the drive's lead error never reaches it.
+          if(gPolLeash > 0.0f){                              // LQR-like: advance the target at the commanded speed
+            gPosTargetEff = clampf(gPosTargetEff + vdesS*sdt, wheel_x - gPolLeash, wheel_x + gPolLeash);
+            gPosTarget = gPosTargetEff;
+          } else { gPosTarget = wheel_x; gPosTargetEff = wheel_x; }
           wasVelDrive = true;
         } else {
           // ---- POSITION HOLD / COMMANDED MOVE (stick released, or 'ptgt' distance) -----
           // Trapezoidal profile to gPosTarget (= latched release point, OR a commanded
           // ptgt move -- specific-distance moves are honored here). On the release edge,
           // zero the feedforward so we brake from rest at the latched home (no overshoot).
-          if(wasVelDrive){ vdesS = 0.0f; wasVelDrive = false; }
+          if(wasVelDrive){ vdesS = 0.0f; gPosTarget = wheel_x; gPosTargetEff = wheel_x; wasVelDrive = false; }  // latch HERE
           float dist = gPosTarget - gPosTargetEff;
           float vstop = sqrtf(2.0f * gPosAmax * fabsf(dist));  // brake-distance speed cap -> stop ON target
           float vcap = fminf((dist >= 0.0f) ? gPosVmax : gPosVmaxBack, vstop);  // asymmetric: limit backward moves
@@ -968,7 +978,7 @@ static void balanceTask(void*){
       bool inBand = (!moving && gPosDeadband > 0.0f && fabsf(posErr) < gPosDeadband);
       // integrate only once the slew has SETTLED at the final target and we're near it -- but
       // NOT inside the dead-band, so the integral trim holds steady instead of slowly creeping.
-      if(polInit && gPosTargetEff == gPosTarget && fabsf(posErr) < gPosIntBand && !inBand){
+      if(polInit && fabsf(gDriveVel) <= 0.001f && gPosTargetEff == gPosTarget && fabsf(posErr) < gPosIntBand && !inBand){
         float kiLim = (gPosHoldKi>0.01f) ? (gPosHoldMax/gPosHoldKi) : 1e6f;
         posErrInt = clampf(posErrInt + posErr*dt, -kiLim, kiLim);
       }
@@ -1461,6 +1471,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"poshd"))   gPosHoldKd=v;         // HOLD/close-in D gain (deg per m/s) -- high = crisp hold
   else if (!strcmp(s,"drivekd")) gDriveKd=v;           // DRIVE/moving D gain (deg per m/s) -- low = smooth drive
   else if (!strcmp(s,"posmax"))  gPosHoldMax=v;        // max setpoint bias (deg)
+  else if (!strcmp(s,"polleash")) gPolLeash=clampf(v,0.0f,1.0f);   // policy stick drive: >0 LQR-like target lead (m), 0 = old
   else if (!strcmp(s,"posiband")) gPosIntBand=v;       // integrate only within this dist of target (m)
   else if (!strcmp(s,"posdb"))    gPosDeadband=v;      // hold dead-band (m): stop position-chasing within this -> no hunt
   else if (!strcmp(s,"posvmax"))  gPosVmax=v;          // move speed cap (m/s) for the target slew
