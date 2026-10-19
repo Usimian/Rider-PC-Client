@@ -106,7 +106,10 @@ camera_auto_detect=0
 dtoverlay=ov5647,cam0
 ```
 
-and keep `otg_mode=1` under `[cm5]` (stock). Reboot, then verify: `ls /dev/i2c-1 /dev/spidev0.0`,
+and under `[cm5]` keep `otg_mode=1` (stock) and add **`arm_freq=2000`** — a 2.0 GHz CPU cap (stock
+2.4 GHz). The mainboard's 5 V path sags to ~4.7 V at the CM5 under full CPU load and trips its
+under-voltage throttle; the cap trims the current peaks. The robot's services use ~10-15 % CPU.
+(Measurements: `HARDWARE.md` → Power.) Reboot, then verify: `ls /dev/i2c-1 /dev/spidev0.0`,
 `aplay -l | grep wm8960`, `rpicam-hello --list-cameras` or `python3 -c "from picamera2 import
 Picamera2; print(Picamera2.global_camera_info())"` shows the ov5647.
 

@@ -73,6 +73,41 @@ position at rest — the fault only showed mid-range under motion, so a static r
   service talks MQTT. Services: `mosquitto`, `rider-bridge`, `rider-joystick`, `rider-camera`,
   `rider-tof`, `rider-tof-safety`, `rider-recorder` (see project CLAUDE.md + `BRIDGE_SETUP.md`).
 
+## Power (mainboard Luwu "XGOR/V1.1")
+- **5 V rail = TI TPS566242** (6 A sync buck, 3-16 V in, SOT-563, top marking `6242`), identified
+  2026-10-19 from a board photo (`data/photos/IMG_0018.jpg`, gitignored) + TI's marking table; the
+  pinout matches `Rider-Pi_SCH.pdf` (unnamed there). From the 2S battery (`VCC8.4V`); feedback
+  221 k / 30 k (board codes `34D`/`303`) = 5.04 V; Coilcraft XAL5030-class inductor ("222").
+- **3.3 V** for the ESP32 = XC6206P332MR (marking `662K`, ~200 mA LDO) off the 5 V rail.
+- Charger: SLM6800 (2-cell, from USB-C), on the second "222" inductor.
+- **The CM5 is fed from this 5 V rail** over the white 4-pin "5V" connector and a wire lead into the
+  **4-pin connector at the bottom of the carrier** (Marc, 2026-10-19; the carrier's parts list names a
+  JVT1505W4T-04GAR-S, 1.5 mm pitch, and no power inductor — the carrier makes no 5 V of its own).
+  Pin assignment (how many contacts carry 5 V / GND, and whether the UART shares it) NOT yet checked.
+- **Under-voltage on every boot** (5-34 events) is NOT a regulator-rating problem (6 A). **MEASURED
+  2026-10-19** (Marc's meter + `vcgencmd pmic_read_adc EXT5V_V`, robot disabled, 60 s 4-core CPU load,
+  run twice):
+
+  | point on the 5 V path | idle | full CPU load |
+  |---|---|---|
+  | mainboard 4-pin connector (meter) | 5.06-5.08 V | low 4.88 V |
+  | carrier 4-pin connector (meter) | 4.98 V | ~4.80 V, low 4.73 V |
+  | inside the CM5 (its sensor) | ~4.9-5.0 V | median 4.70 V, min 4.65 V |
+
+  ~0.35 V lost under load, spread over regulator/mainboard (~half), the lead + its two connectors
+  (~0.15 V), and the carrier. Under load the CM5 trips under-voltage and drops to 1.0 GHz (clock
+  log); temperature was fine (66 °C). **USB-C was plugged in (charging) for all of it** — so the
+  supply was not short; the loss is resistance along the delivery path. (Open: the schematic's
+  power-path FETs around `Ext_5V` / `VCC5V_USB` may route USB 5 V onto the rail when plugged in —
+  repeat on battery only to rule out the USB source.) Meter lows are averaged and from separate runs — the split is
+  approximate, the total matches the CM5's sensor. Options: cap `arm_freq` (~1800-2000), raise the
+  setpoint to ~5.2 V (R5 "303" 30 k → 28.7 k), shorter/thicker or doubled 5 V/GND lead.
+- **Applied 2026-10-19: `arm_freq=2000`** (was the stock 2400) under `[cm5]` in `config.txt`. Boot
+  after: **0 under-voltage events** (was 5-34 every boot). Same 60 s full-load test: CM5 sensor median
+  4.72 V / min 4.70 V (was 4.70 / 4.65), **clock held 2.0 GHz** (was dropping to 1.0 GHz), but still 3
+  brief under-voltage events in the minute at 100 % CPU; 73.6 °C at the end (sustained 2.0 GHz). In
+  normal use (~10-15 % CPU) it should stay clear. Setpoint / lead fixes remain the real margin.
+
 ## Camera / input
 - **CSI camera** OV5647 via picamera2 (`pi/rider_camera.py`). **NoIR module — no infrared-cut filter**
   (verified 2026-10-19: a TV remote's IR LED shows bright in the live feed). With the stock
