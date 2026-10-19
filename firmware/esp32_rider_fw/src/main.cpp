@@ -22,6 +22,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <Preferences.h>       // NVS key/value store -- persists the controller choice (gCtrl)
 #include "rider_policy.h"   // auto-generated PPO policy weights (sim/export_policy.py)
 #include "rider_turn_policy.h"  // Stage-1 CAPS-smoothed balance+turn policy (POLT_*, sim/export_policy_turn.py)
 #include "rider_posaware_policy.h"  // POSITION-AWARE policy (POA_*): SEES x_err/x_int, owns position like the LQR
@@ -73,6 +74,10 @@ volatile float gLqrVx = -6.0f;      // velocity-error gain (damping). NEGATIVE (
                                     // ~4.7mm; cliff ~-7. Capped by quantization-noisy encoder velocity -> velocity
                                     // observer (gObsA/B below) gives a cleaner v -> allows more damping. 'lqrvx'.
 volatile float gLqrQ  = 32.0f;      // pitch-error gain (factory 32) -- balances; sign matches our working PD
+volatile float gLqrVRef   = 1.0f;   // LQR speed reference scale: vel_est units per m/s of vdes. 1 = legacy (unit
+                                    // mismatch); ~270 = matched (MEASURED 2026-10-18). 'lqrvref'
+volatile float gLqrAccLean = 0.0f;  // LQR acceleration lean, deg per m/s^2 of commanded accel (0 = off; physics ~5.8). 'lqracclean'
+volatile float gLqrCmdFF  = 0.0f;   // LQR wheel-command feedforward, cmd per m/s of vdes (0 = off; ~360). 'lqrcff'
 volatile float gLqrInLP   = 0.0f;   // FACTORY input filter on the LQR's pitch + rate: per-cycle LP coefficient
                                     // (0 = off = June LQR; factory R-1.1.3 = 0.95 at 167 Hz). 'lqrinlp'
 volatile float gLqrInSlew = 5.0f;   // slew limit on the filtered pitch, deg/cycle (factory 5; 0 = none). 'lqrinslew'
@@ -108,9 +113,14 @@ volatile float gDriveFF = 0.0f;     // lean-FF: deg of setpoint tilt per m/s com
 // Was a compile-time #ifdef split (env esp32 = policy, env esp32_lqr = LQR) so the wrong one
 // could never be armed by accident. The runtime switch keeps that guarantee a different way:
 // 'ctrl 0|1' is ACCEPTED ONLY WHILE DISABLED (en=0), and the active controller is reported in
-// every telemetry line (ctrl=POL|LQR -> LCD + GUI). Not persisted: boots as CTRL_POL.
+// every telemetry line (ctrl=POL|LQR -> LCD + GUI).
+// PERSISTED (2026-10-19): the choice is saved in the ESP32's NVS (namespace "rider", key "ctrl") on
+// every accepted 'ctrl' command and read back in setup(), so it survives power cycles and flashes.
+// A blank / unreadable NVS boots as CTRL_POL. (The NVS write briefly stalls the other core -- fine,
+// 'ctrl' is only accepted while balancing is off.)
 enum { CTRL_POL = 0, CTRL_LQR = 1 };
 volatile int gCtrl = CTRL_POL;
+static Preferences gPrefs;
 static const char* ctrlName(){ return gCtrl == CTRL_LQR ? "LQR" : "POL"; }
 volatile float gPolSign  = 1.0f;    // action->wheel-command sign (verify on robot)
 volatile bool  gPolJoint   = false; // use Stage-1 balance+turn policy ('polj'); 0 = legacy 1-output balancer
@@ -256,6 +266,7 @@ static uint8_t gLegTurn=0;                           // alternate which leg gets
 // the roll error into the leg differential, rate-limit the per-cycle step (keeps the leg loop below the
 // body's ~2Hz lateral resonance so it can't self-excite), and hard-clamp the accumulator to the authority.
 volatile bool  gLevelOn  = false;            // 'level 1/0' -- IMU-roll body leveling via differential legs
+#define LEV_REF_HZ 165.0f                    // loop rate levki/levslew were tuned at; the step scales by dt*this
 volatile float gLevelKi  = 0.14f;            // integral gain: leg-counts accumulated per (deg of roll error) per cycle ('levki'). 0.14 bench-tuned 2026-06-25 (gyro-fused roll): holds level, reaches zero, no ring; 0.18/slew0.4 showed slight oscillation
 volatile float gLevelSet  = 0.0f;            // target body roll (deg); 0 = level ('levset')
 volatile float gLevelSlew = 0.30f;           // per-cycle rate limit on the accumulator (counts/cycle) ('levslew'); keeps the leg loop below the body's ~2Hz roll resonance. 0.30 bench-tuned (with gyro-fused roll)
@@ -1020,6 +1031,7 @@ static void balanceTask(void*){
     // (lqrInit declared up top alongside polInit so the position-runaway cutout's posRef can read it)
     static float obsX=0, obsV=0; static bool obsInit=false;   // velocity-observer state (alpha-beta on wheel_x)
     static float lqrInQ=0, lqrInDq=0; static bool lqrInInit=false;  // factory input-filter state (pitch, rate)
+    static float lqrVdesPrev=0, lqrAdesF=0;                         // drive-ramp acceleration (for the accel lean)
     static float lqrIx=0;                                     // position-error integral accumulator (m*s); homes steady-state pos error to 0
     if(gEnabled && !fallen){
       // ---- DRIVE MANAGEMENT: the SAME gDriveVel velocity-drive interface as the policy build, so
@@ -1054,6 +1066,13 @@ static void balanceTask(void*){
         }
         vdes = vdesS;
       }
+      // commanded ACCELERATION of the drive ramp (m/s^2), lightly low-passed (~40 ms) so the lean reference
+      // below eases in/out instead of stepping when a ramp starts or ends. Reset with the drive state.
+      {
+        float ades = lqrInit ? (vdesS - lqrVdesPrev) / sdt : 0.0f;
+        lqrVdesPrev = vdesS;
+        lqrAdesF = 0.9f*lqrAdesF + 0.1f*ades;
+      }
       tTgtEff=gPosTargetEff; tVdes=vdes;                                   // driving telemetry
       // --- LQR full-state feedback: u = -(Kx*x + Kvx*vx + Kq*q + Kdq*dq) (RIG-Omni hover port) ---
       // States in OUR units (identical to the factory's): x position err (m), vx velocity err (m/s),
@@ -1073,7 +1092,12 @@ static void balanceTask(void*){
       float lqr_x  = wheel_x - gPosTargetEff;           // position error (m)
       lqrIx += lqr_x * odt;                             // INTEGRATE position error (factory has a Ki here -> exact homing)
       if(lqrIx >  gLqrIxMax) lqrIx =  gLqrIxMax; else if(lqrIx < -gLqrIxMax) lqrIx = -gLqrIxMax;  // anti-windup
-      float lqr_vx = vel_est - vdes;                    // velocity error (m/s) -- observer or raw
+      // DRIVE REWORK (2026-10-18): vel_est (raw wheel_vx) is in 'scaled vel' units, MEASURED ~270 per m/s on the
+      // floor, but vdes is m/s -- so the reference cancelled ~0.4 % of the speed and the LQR fought all motion; the
+      // target had to run 20-37 cm ahead to drag it. gLqrVRef scales vdes into vel_est's units (default 1 = the old
+      // behavior; ~270 = matched). The observer path (gObsA>0) already estimates m/s, so it keeps the raw vdes.
+      float vref = (gObsA > 0.0f) ? vdes : vdes * gLqrVRef;
+      float lqr_vx = vel_est - vref;                    // velocity error (m/s) -- observer or raw
       // FACTORY INPUT FILTER (R-1.1.3 FUN_400d529c, Ghidra): low-pass pitch AND pitch rate per cycle,
       // then slew-limit the smoothed pitch. Factory: 0.95 LP, 5 deg/cycle. Default OFF (gLqrInLP 0) =
       // the LQR exactly as floor-tuned in June; step it up live ('lqrinlp'). Only the CONTROLLER sees
@@ -1089,19 +1113,28 @@ static void balanceTask(void*){
         pitchIn = lqrInQ; dqIn = lqrInDq;
       } else { lqrInQ = pitch; lqrInDq = dqf; }          // off: track raw so switching it on is seamless
       tLqrInQ = pitchIn;                                 // telemetry: what the LQR actually sees ('lqrq')
-      float lqr_q  = pitchIn - clampf(gDriveFF*vdes, -6.0f, 6.0f);  // pitch err; LEAN-FF tilts the setpoint
+      // ACCELERATION LEAN (2026-10-18): tilt the balance point INTO the commanded acceleration, so the LQR leans
+      // early + gently instead of late + hard (floor: starts overshot 6-10 deg). Physics: lean = atan(a/g)
+      // ~= 5.8 deg per m/s^2. Sign DERIVED (fwd lean makes th DECREASE): positive gLqrAccLean -> reference
+      // pitch goes DOWN on forward acceleration. 'lqracclean' (default 0 = off); verify the sign on the floor.
+      float leanRef = clampf(gDriveFF*vdes, -6.0f, 6.0f) - clampf(gLqrAccLean*lqrAdesF, -6.0f, 6.0f);
+      float lqr_q  = pitchIn - leanRef;                 // pitch err; LEAN-FF tilts the setpoint
                                                         // forward ~gDriveFF deg per m/s -> robot leans to cruise (works
                                                         // for the dv/joystick path; a command-FF gets cancelled by balance)
       float lqr_dq = dqIn;                              // pitch rate (deg/s)
       // Sign anchor: the pitch term -gLqrQ*q with q=+ pitch, plus the wheel L:+u/R:-u mapping below, is our
       // verified balance sign -- so it stays UP on the first arm. pos/vel gains floor-verified NEGATIVE.
       float uraw = -(gLqrX*lqr_x + gLqrXi*lqrIx + gLqrVx*lqr_vx + gLqrQ*lqr_q + gLqrDq*lqr_dq);  // +position integral; lean-FF in lqr_q
+      // wheel-COMMAND feedforward: the wheel servo is a velocity source, so the steady command for a speed is
+      // known (MEASURED floor fit: wheel v_raw ~= 0.9*(cmd-35) -> cmd ~= 35 + 360*v[m/s]; the 35 breakaway is
+      // left to the stiction boost below). Supplying it directly leaves the feedback only the deviations.
+      uraw += gLqrCmdFF * vdes;                         // 'lqrcff' cmd per m/s (default 0 = off; matched ~360)
       if(uraw > gFFband) uraw += gFF; else if(uraw < -gFFband) uraw -= gFF;   // factory stiction boost (+/-10 past +/-20)
       uF = gPolULP*uF + (1.0f-gPolULP)*uraw;            // output LP available ('polulp', default 0=off=raw)
       u = clampf(uF, -(float)gUMax, (float)gUMax);
     } else {
       uF = 0.0f; lqrInit=false; obsInit=false; lqrIx=0.0f;      // reset output-LP + drive + observer + pos-integral for next enable
-      lqrInInit = false;                                         // + the factory input filter (re-seeded at enable)
+      lqrInInit = false; lqrVdesPrev = 0.0f; lqrAdesF = 0.0f;                                       // + the factory input filter (re-seeded at enable)
       if(!gEnabled && gTestTor!=0) u = (float)gTestTor;          // stand-only debug
     }
     }  // end controller select (gCtrl)
@@ -1238,8 +1271,14 @@ static void balanceTask(void*){
         // ACCUMULATOR (factory FUN_400d4514): integrate the roll error into the leg differential so roll
         // reaches ZERO (proportional stalls at an offset). Per-cycle step rate-limited (stays below ~2Hz
         // body resonance); accumulator hard-clamped to the authority. As roll->0 the step shrinks -> settles.
-        float inc = gLevelSign * gLevelKi * (tRoll - gLevelSet);  // integration step (counts/cycle)
-        if(inc >  gLevelSlew) inc =  gLevelSlew; else if(inc < -gLevelSlew) inc = -gLevelSlew;
+        // RATE-INDEPENDENT (2026-10-19): levki/levslew were tuned PER CYCLE at the ~165 Hz loop (June-Aug:
+        // roll std ~0.06-0.5 deg). The Sept wheel-read fix raised the loop to ~234 Hz, so the same per-cycle
+        // step integrated 42 % harder per second and leveling began rocking at ~1.2-1.5 Hz (std ~0.9 deg).
+        // Scale the step by elapsed time so levki/levslew keep their 165 Hz meaning at ANY loop rate.
+        float levK = dt * LEV_REF_HZ;                               // = 1 at the tuned 165 Hz
+        float inc = gLevelSign * gLevelKi * (tRoll - gLevelSet) * levK;   // integration step this cycle
+        float slewC = gLevelSlew * levK;
+        if(inc >  slewC) inc =  slewC; else if(inc < -slewC) inc = -slewC;
         gLevCmd += inc;
         if(gLevCmd >  (float)gLevelMax) gLevCmd =  (float)gLevelMax; else if(gLevCmd < -(float)gLevelMax) gLevCmd = -(float)gLevelMax;
         // RESOLUTION: split the tilt between the legs at single-leg-count granularity. The old code put
@@ -1310,6 +1349,11 @@ static void balanceTask(void*){
 
 void setup(){
   Serial.begin(115200);
+  // restore the persisted controller choice before the control task starts (blank NVS -> POL)
+  if(gPrefs.begin("rider", false)){
+    uint8_t c = gPrefs.getUChar("ctrl", CTRL_POL);
+    gCtrl = (c == CTRL_LQR) ? CTRL_LQR : CTRL_POL;
+  }
   Serial1.begin(115200, SERIAL_8N1, 4, 5);   // UART1 -> Raspberry Pi (RX=IO4, TX=IO5)
   Serial2.begin(1000000, SERIAL_8N1, 13, 14);
   for(int i=0;i<3;i++){ legTorqueOff(LEFT_LEG); legTorqueOff(RIGHT_LEG); wheelTorque(0,0); delay(3); }
@@ -1356,6 +1400,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"ctrl")){                                   // controller select: 0=POL (policy), 1=LQR
     if(gEnabled){ emit("# ctrl REFUSED: disable first (en 0)\n", 37); return; }   // never swap mid-balance
     gCtrl = (v != 0.0f) ? CTRL_LQR : CTRL_POL;
+    if(gPrefs.getUChar("ctrl", 255) != (uint8_t)gCtrl) gPrefs.putUChar("ctrl", (uint8_t)gCtrl);  // persist (only on change)
     char cb[40]; int ck=snprintf(cb,sizeof(cb),"# ctrl=%s\n",ctrlName()); emit(cb,ck); return;
   }
   else if (!strcmp(s,"posmode")) gPosMode=(v!=0.0f);            // factory position-goal wheel cmd on/off
@@ -1368,6 +1413,9 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"lqrx"))  gLqrX=v;                 // LQR position-error gain (floor-tuned -500)
   else if (!strcmp(s,"lqrvx")) gLqrVx=v;                // LQR velocity-error gain (floor-tuned -6)
   else if (!strcmp(s,"lqrq"))  gLqrQ=v;                 // LQR pitch-error gain (32)
+  else if (!strcmp(s,"lqrvref"))   gLqrVRef=clampf(v,0.0f,600.0f);   // LQR speed-ref scale (1 legacy, ~270 matched)
+  else if (!strcmp(s,"lqracclean")) gLqrAccLean=clampf(v,-20.0f,20.0f); // accel lean deg per m/s^2 (0 off, ~5.8; sign to verify)
+  else if (!strcmp(s,"lqrcff"))    gLqrCmdFF=clampf(v,0.0f,800.0f);  // LQR wheel-cmd feedforward per m/s (0 off, ~360)
   else if (!strcmp(s,"lqrinlp"))   gLqrInLP=clampf(v,0.0f,0.98f);   // factory input LP on LQR pitch+rate (0=off; factory 0.95)
   else if (!strcmp(s,"lqrinslew")) gLqrInSlew=clampf(v,0.0f,90.0f); // filtered-pitch slew, deg/cycle (factory 5; 0=none)
   else if (!strcmp(s,"lqrdq")) gLqrDq=v;                // LQR pitch-rate gain (3)

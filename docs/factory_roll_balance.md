@@ -79,6 +79,12 @@ factory's **accumulator** structure (see `main.cpp` ~line 1151, the `levRun` bra
 Defaults: `levki 0.14`, `levslew 0.30`, `levmax 50`, `levsign -1`, `levset 0`. All live-tunable
 over MQTT.
 
+> **Units are per 165 Hz cycle, at any loop rate (2026-10-19).** `levki` and `levslew` were tuned
+> per cycle when the loop ran ~165 Hz. The September wheel-read fix took the loop to ~234 Hz, which
+> made the same per-cycle step act 42 % harder per second: leveling went from roll std ~0.06-0.5° at
+> 0.5-0.9 Hz (June-Aug) to a ~1.2-1.5 Hz rock at ~0.9° std (Oct). The step is now scaled by
+> `dt · 165`, so these numbers keep their tuned meaning whatever the loop rate.
+
 > **This replaced an earlier proportional version** (`target = levsign · levkp · (roll − levset)`,
 > gain `levkp`). Proportional **stalls at a non-zero roll offset** — the leg differential needed to
 > hold the body level is exactly where the error term stops growing. Integrating drives roll to

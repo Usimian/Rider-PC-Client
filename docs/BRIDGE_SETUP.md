@@ -44,11 +44,13 @@ cd firmware/esp32_rider_fw
 
 One binary carries both balance controllers, selected at runtime by a firmware command. The
 switch is accepted **only while balancing is disabled** (`en 0`); while balancing it is refused.
-Not persisted: the ESP32 boots with the policy.
+**Persisted (2026-10-19):** each accepted switch is saved in the ESP32's NVS (namespace `rider`,
+key `ctrl`) and restored at boot, so the robot comes back on the controller it was last set to —
+across power cycles and reflashes. A blank NVS (new board) boots on the policy.
 
 | command | controller | telemetry `ctrl=` |
 |---|---|---|
-| `ctrl 0` (boot default) | RL policy (`src/rider_policy.h`) | `POL` |
+| `ctrl 0` (blank-NVS default) | RL policy (`src/rider_policy.h`) | `POL` |
 | `ctrl 1` | LQR full-state, torque-direct | `LQR` |
 
 Send it like any firmware line, e.g. over MQTT `rider/control/line` `{"line": "ctrl 1"}`.
