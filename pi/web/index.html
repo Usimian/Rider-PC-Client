@@ -4,55 +4,52 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Rider</title>
-<style>
-  :root { --bg:#14182b; --panel:#1e2440; --text:#e8ecf8; --dim:#8b93b5; --ok:#3ecf72; --bad:#ff5a5a; }
-  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.4 system-ui, sans-serif; }
-  header { display:flex; flex-wrap:wrap; gap:14px; align-items:center; padding:10px 16px; background:var(--panel); }
-  header h1 { font-size:18px; margin:0 8px 0 0; letter-spacing:.08em; }
-  .dot { display:inline-block; width:11px; height:11px; border-radius:50%; background:var(--bad); vertical-align:middle; }
-  .dot.ok { background:var(--ok); }
-  .k { color:var(--dim); margin-right:4px; }
-  main { padding:16px; }
-  pre { background:var(--panel); padding:12px; border-radius:6px; overflow-x:auto; font-size:13px; }
-  .note { color:var(--dim); font-size:13px; }
-</style>
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
   <h1>RIDER</h1>
-  <span><span class="dot" id="link"></span> <span id="linktext">connecting…</span></span>
-  <span><span class="k">battery</span><span id="batt">–</span></span>
-  <span><span class="k">controller</span><span id="ctrl">–</span></span>
-  <span><span class="k">balancing</span><span id="bal">–</span></span>
+  <span class="item"><span class="dot" id="link"></span> <span id="linktext">connecting…</span></span>
+  <span class="item"><span class="k">battery</span><span id="batt" class="num">–</span></span>
+  <span class="item"><span class="k">DS4</span><span id="ds4">–</span></span>
+  <span class="item"><span class="k">controller</span><span id="ctrl">–</span></span>
+  <span class="item"><span class="k">drive</span><span id="drive">–</span></span>
+  <span class="item"><span class="k">balancing</span><span id="bal">–</span></span>
+  <span class="spacer"></span>
+  <button id="estop" disabled title="Balance off + legs limp (same as the LCD stop button)">E-STOP</button>
 </header>
+
 <main>
-  <p class="note">Step 1 placeholder (docs/WEB_UI_DESIGN.md): proves the page is served by the Rider and
-    receives live <code>rider/status</code>. Controls come in later steps.</p>
-  <pre id="status">waiting for rider/status…</pre>
+  <section class="card">
+    <h2>POSE</h2>
+    <div class="grid2">
+      <span class="k">pitch</span>   <span class="big" id="pitch">–</span>
+      <span class="k">roll</span>    <span class="big" id="roll">–</span>
+      <span class="k">heading</span> <span class="big" id="heading">–</span>
+      <span class="k">position</span><span class="num" id="pos">–</span>
+      <span class="k">target</span>  <span class="num" id="tgt">–</span>
+      <span class="k">pose x, y</span><span class="num" id="xy">–</span>
+      <span class="k">leveling</span><span id="lev">–</span>
+    </div>
+  </section>
+  <section class="card">
+    <h2>CONTROLS</h2>
+    <p class="later">Balance, Roll Balance, controller switch, top speed, legs and camera arrive in steps 3-5
+      (docs/WEB_UI_DESIGN.md).</p>
+  </section>
 </main>
+
+<footer>
+  <span><span class="k">CPU</span><span class="num" id="cpu">–</span></span>
+  <span><span class="k">temp</span><span class="num" id="temp">–</span></span>
+  <span><span class="k">power</span><span class="num" id="pw">–</span></span>
+  <span><span class="k">loop</span><span class="num" id="hz">–</span></span>
+  <span><span class="k">read fails</span><span class="num" id="rfail">–</span></span>
+  <span><span class="k">fault</span><span id="fault">–</span></span>
+</footer>
+<details><summary>raw status</summary><pre id="raw">waiting for rider/status…</pre></details>
+
 <script src="mqtt-lite.js"></script>
-<script>
-"use strict";
-const $ = (id) => document.getElementById(id);
-let lastStatus = 0;
-
-const client = new MqttLite("ws://" + location.host + "/", {
-  onConnect: () => { $("linktext").textContent = "connected"; },
-  onClose:   () => { $("linktext").textContent = "reconnecting…"; },
-  onMessage: (topic, payload) => {
-    if (topic !== "rider/status") return;
-    lastStatus = Date.now();
-    let s; try { s = JSON.parse(payload); } catch { return; }
-    $("status").textContent = JSON.stringify(s, null, 2);
-    $("batt").textContent = `${s.battery_level} % ${s.battery_voltage} V`;
-    $("ctrl").textContent = s.mode === "POL" ? "POLICY" : s.mode;
-    $("bal").textContent = s.roll_balance_enabled ? "ON" : "off";
-  },
-});
-client.subscribe("rider/status");
-
-// link = live status within the last 2 s (design rule), not just an open socket
-setInterval(() => { $("link").classList.toggle("ok", Date.now() - lastStatus < 2000); }, 250);
-</script>
+<script src="app.js"></script>
 </body>
 </html>

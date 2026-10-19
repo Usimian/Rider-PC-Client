@@ -1,0 +1,48 @@
+:root {
+  --bg: #14182b; --panel: #1e2440; --panel2: #262d50; --text: #e8ecf8; --dim: #8b93b5;
+  --ok: #3ecf72; --warn: #ffc53d; --bad: #ff5a5a; --pol: #96dc96; --lqr: #bea9ff; --accent: #66c2ff;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.4 system-ui, sans-serif; }
+
+header {
+  position: sticky; top: 0; z-index: 2;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px;
+  padding: 10px 16px; background: var(--panel); border-bottom: 1px solid #000;
+}
+header h1 { font-size: 18px; margin: 0; letter-spacing: .1em; }
+.item { white-space: nowrap; }
+.k { color: var(--dim); margin-right: 5px; font-size: 13px; }
+.dot { display: inline-block; width: 11px; height: 11px; border-radius: 50%; background: var(--bad); vertical-align: -1px; }
+.dot.ok { background: var(--ok); }
+.spacer { flex: 1; }
+
+#estop {
+  font: 700 16px system-ui, sans-serif; letter-spacing: .06em; color: #fff;
+  background: #c62828; border: 2px solid #ff8a80; border-radius: 8px;
+  padding: 10px 18px; cursor: pointer;
+}
+#estop:active { background: #8e0000; }
+#estop:disabled { opacity: .4; cursor: not-allowed; }
+#estop.sent { background: #8e0000; }
+
+main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; padding: 16px; }
+@media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+.card { background: var(--panel); border-radius: 8px; padding: 14px 16px; }
+.card h2 { margin: 0 0 10px; font-size: 13px; letter-spacing: .12em; color: var(--dim); font-weight: 600; }
+.later { color: var(--dim); font-size: 13px; }
+
+.grid2 { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; align-items: baseline; }
+.big { font-size: 22px; font-variant-numeric: tabular-nums; }
+.num { font-variant-numeric: tabular-nums; }
+
+footer {
+  display: flex; flex-wrap: wrap; gap: 6px 22px; padding: 10px 16px 16px; color: var(--dim); font-size: 13px;
+}
+footer .num { color: var(--text); }
+details { padding: 0 16px 16px; }
+summary { color: var(--dim); cursor: pointer; font-size: 13px; }
+pre { background: var(--panel); padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 12px; }
+
+.on { color: var(--ok); } .off { color: var(--dim); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+.pol { color: var(--pol); } .lqr { color: var(--lqr); }

@@ -61,7 +61,7 @@ bus (see the pairing plan in the Hover project).
 | **Ride height** | `leghome` | same as DS4 R3 |
 | **Top speed** slider | `posvmax v` + `posvmaxb v` (m/s) | caps full stick for both controllers; replaces the dead Tk speed slider |
 | **Reset position** | `poszero` | same as DS4 Circle |
-| **EMERGENCY STOP** | `rider/control/system` `emergency_stop` (→ `en 0`) | always visible, top bar |
+| **E-STOP** | `rider/control/line` `en 0` then `leglimp` | always visible, top bar; **same as the LCD stop button** (balance off + legs limp), not the Tk GUI's `emergency_stop` (balance off only). Built in step 2 |
 | **Power off / Reboot Pi** | `rider/control/system` `poweroff_pi` / `reboot_pi` | behind a confirm dialog; the LCD shows SHUTTING DOWN / REBOOTING |
 | **Camera** | `rider/control/image_capture` `{"request_id", "resolution"}` | see Video |
 
