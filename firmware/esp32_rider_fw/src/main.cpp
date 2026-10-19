@@ -313,6 +313,20 @@ static uint32_t dcT[DCAP_N]; static int16_t dcCmd[DCAP_N]; static int16_t dcV[DC
 static uint8_t  dcWid[DCAP_N]; static int16_t dcP[DCAP_N]; static int16_t dcR[DCAP_N]; static int dcIdx=0;
 // extras (2026-10-19): final wheel cmds L/R, right-wheel speed, and the policy's inputs (0 under LQR)
 static int16_t dcL[DCAP_N], dcRc[DCAP_N], dcVR[DCAP_N], dcPP[DCAP_N], dcPR[DCAP_N], dcXV[DCAP_N], dcPI[DCAP_N], dcB[DCAP_N];
+
+// ---- wheel FREQUENCY SWEEP (2026-10-19): identify the loaded wheel's true response on the floor ----
+// While balancing (either controller), 'chirp 1' adds a known log-swept sine to the balance output (the forward
+// wheel command), gChirpA raw cmd, gChirpF0 -> gChirpF1 Hz over gChirpDur s, faded in/out over 0.5 s. Because
+// the injected signal is known, the wheel's response can be separated from the controller's (closed-loop
+// recordings alone mix the two). Its own capture, every 2nd cycle, streamed with 'chirpdump' as '# dcapc' lines.
+// Stops itself at the end, on balance-off or a fall, or with 'chirp 0'.
+volatile float gChirpA = 60.0f, gChirpF0 = 1.0f, gChirpF1 = 10.0f, gChirpDur = 20.0f;
+volatile bool  gChirpOn = false, gChirpDump = false;
+static float   tChirpInj = 0.0f;                  // this cycle's injected value (raw cmd)
+#define CHIRP_N 2400                               // >= 25 s at ~95 Hz (every 2nd cycle)
+struct ChirpSample { uint32_t t; int16_t inj, cmdL, cmdR, vL, vR, wx, th, rate; };
+static ChirpSample* ci = nullptr;                  // 48 KB on the HEAP, allocated by the first 'chirp 1' (static DRAM is full)
+static int ciIdx = 0; static float ciWx0 = 0.0f;
 volatile float gYawBias=0.0f;             // gyro-Z zero-rate bias (deg/s), from calibrateGyro
 volatile float gVbatK=3.0f;              // GPIO33 divider ratio: pack = pin*K. Schematic R8=20K(top)/R7=10K(bot) => x3.0
 // 2S pack (net VCC8.4V): 8.4V full, 6.0V empty -> linear % for display.
@@ -1169,6 +1183,25 @@ static void balanceTask(void*){
       if(!wasDriving){ wheelTorqueEnAll(1);                                      // enable both (broadcast, no collision)
                        torqAcc=0; }                                             // seed accumulator at 0
       float uout = u;
+      // frequency sweep injection (see gChirpA): log sweep, 0.5 s fade in/out, only while balancing
+      {
+        static float chT = 0.0f, chPh = 0.0f;
+        float inj = 0.0f;
+        if(gChirpOn){
+          float sdt = (dt > 1e-4f) ? dt : 0.005f;
+          chT += sdt;
+          if(chT >= gChirpDur){ gChirpOn = false; }
+          else {
+            float f = gChirpF0 * powf(gChirpF1 / gChirpF0, chT / gChirpDur);
+            chPh += 6.2831853f * f * sdt; if(chPh > 6.2831853f) chPh -= 6.2831853f;
+            float env = fminf(1.0f, fminf(chT / 0.5f, (gChirpDur - chT) / 0.5f));
+            inj = gChirpA * env * sinf(chPh);
+          }
+        }
+        if(!gChirpOn){ chT = 0.0f; chPh = 0.0f; }
+        tChirpInj = inj;
+        uout += inj;
+      }
       if(driving && gDither>0){ uout += (float)(gDither*ditherSign); ditherSign = -ditherSign; }  // dither in balance OR stand-test
       // turn differential: from the Stage-1 policy (turnPol) when active, else the hand-tuned gTurn.
       // turnPol is assigned ONLY by the policy controller; under LQR it stays 0, so gate on gCtrl
@@ -1361,6 +1394,15 @@ static void balanceTask(void*){
       dcIdx++;
       if(dcIdx>=DCAP_N){ gDcArm=false; gDcReady=true; }
     }
+    // frequency-sweep capture: every 2nd cycle while the sweep runs
+    if(gChirpOn && !(gEnabled && !fallen)) gChirpOn = false;             // balance off / fall -> stop the sweep
+    if(gChirpOn && ci && (n & 1) == 0 && ciIdx < CHIRP_N){
+      ChirpSample& c = ci[ciIdx++];
+      c.t = micros(); c.inj = (int16_t)tChirpInj; c.cmdL = (int16_t)tCmdL; c.cmdR = (int16_t)tCmdR;
+      c.vL = (int16_t)v; c.vR = (int16_t)tVR;
+      c.wx = (int16_t)((wheel_x - ciWx0) * 10000.0f);                          // 0.1 mm since the sweep began
+      c.th = (int16_t)(theta * 100.0f); c.rate = (int16_t)(rate * 10.0f);
+    }
 
     n++;
     // NOTE: legs are untorqued at startup and stay limp until a 'legstep' (Triangle/Cross)
@@ -1475,6 +1517,18 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"gcal")){ gDoGcal=true; return; } // recalibrate gyro bias (hold still)
   else if (!strcmp(s,"stepcap")){ if(v!=0.0f) gStepCmd=(int)v; gStepCap=true; return; } // wheel step-response capture
   else if (!strcmp(s,"drivecap")){ dcIdx=0; gDcReady=false; gDcArm=true; return; }       // arm high-rate cmd-vs-actual capture (run WHILE balancing/driving)
+  else if (!strcmp(s,"chirp")){                                  // wheel frequency sweep: 1 = start (balancing only), 0 = stop
+    if(v == 0.0f){ gChirpOn = false; return; }
+    if(!gEnabled){ emit("# dcapc REFUSED: balance first\n", 31); return; }
+    if(!ci) ci = (ChirpSample*)malloc(sizeof(ChirpSample) * CHIRP_N);
+    if(!ci){ emit("# dcapc REFUSED: no memory\n", 27); return; }
+    ciIdx = 0; ciWx0 = wheel_x; gChirpOn = true; return;
+  }
+  else if (!strcmp(s,"chirpa"))   gChirpA = clampf(v, 0.0f, 80.0f);      // sweep amplitude, raw wheel cmd
+  else if (!strcmp(s,"chirpf0"))  gChirpF0 = clampf(v, 0.2f, 20.0f);     // sweep start frequency, Hz
+  else if (!strcmp(s,"chirpf1"))  gChirpF1 = clampf(v, 0.2f, 20.0f);     // sweep end frequency, Hz
+  else if (!strcmp(s,"chirpt"))   gChirpDur = clampf(v, 2.0f, 25.0f);    // sweep duration, s
+  else if (!strcmp(s,"chirpdump")) gChirpDump = true;                    // stream the sweep capture ('# dcapc' lines)
   else if (!strcmp(s,"logdump")){ gLogDump=true; return; }                                // dump the held enable->fall balance log over USB
   // ('polrun' removed: controller is selected at BUILD time now -- see gPolMode at top. No runtime toggle.)
   else if (!strcmp(s,"polsign")) gPolSign=(v<0.0f?-1.0f:1.0f);  // flip action->wheel sign (verify on robot)
@@ -1624,5 +1678,23 @@ void loop(){
     }
     { char d[16]; int dk=snprintf(d,sizeof(d),"# dcap done\n"); emit(d,dk); }
     gLogDump=false;
+  }
+  // frequency-sweep dump (refused while the sweep still runs): same pattern as above, commands keep flowing
+  if(gChirpDump){
+    gChirpDump = false;
+    if(gChirpOn){ emit("# dcapc REFUSED: sweep running\n", 30); }
+    else {
+      int n = ciIdx;
+      { char h[128]; int hk = snprintf(h, sizeof(h), "# dcapc n=%d cols: i t_us inj cmdL cmdR vL vR wx_01mm th_x100 rate_x10\n", n); emit(h, hk); }
+      for(int i = 0; i < n; i++){
+        const ChirpSample& c = ci[i];
+        char b[112]; int k = snprintf(b, sizeof(b), "# dcapc %d %lu %d %d %d %d %d %d %d %d\n", i, (unsigned long)c.t,
+                                      (int)c.inj, (int)c.cmdL, (int)c.cmdR, (int)c.vL, (int)c.vR, (int)c.wx,
+                                      (int)c.th, (int)c.rate);
+        emit(b, k);
+        if((i & 15) == 0){ delay(1); pump(Serial, b0, n0); pump(Serial1, b1, n1); }
+      }
+      { char d[16]; int dk = snprintf(d, sizeof(d), "# dcapc done\n"); emit(d, dk); }
+    }
   }
 }

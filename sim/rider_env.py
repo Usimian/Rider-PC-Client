@@ -119,7 +119,7 @@ DRIVE_LEASH    = 0.25                             # drive_lead: the moving targe
 # by the leg height (~3 deg at the lowest legs) and a sensor drift that builds during fast turns (~2 deg).
 PDIS_OFFSET_DEG = (-4.0, 4.0)                     # per-episode constant offset
 PDIS_DRIFT_DEG  = (-3.0, 3.0)                     # turn-style drift amplitude (half of the drive episodes)
-PDIS_DRIFT_RAMP_S = 1.5                           # it builds over this, holds 1-3 s, then fades over this
+PDIS_DRIFT_RAMP_S = 1.5                          # it builds over this, holds 1-3 s, then fades over this
 _DEG2RAD    = 0.017453292
 
 
@@ -178,12 +178,39 @@ class ActuatorModel:
                     # ladder (replay_actuator.py) shows a smooth line from breakaway, not a stick-slip step.
                     cmd = np.sign(cmd) * (abs(cmd) - db) / (1.0 - db)
         target = cmd * self.p.vel_max_rad_s            # velocity setpoint (rad/s)
-        if self.p.actuator_tau_s > 0.0:                # first-order tracking lag
-            a = self.dt / (self.p.actuator_tau_s + self.dt)
+        tau = self.p.actuator_tau_s
+        if self.p.actuator_tau_moving_s is not None:   # speed-dependent lag (floor sweeps 2026-10-19, see params)
+            k = min(1.0, abs(self.state) / self.p.tau_speed_ref_rad_s)
+            tau = tau + k * (self.p.actuator_tau_moving_s - tau)
+        if tau > 0.0:                                  # first-order tracking lag
+            a = self.dt / (tau + self.dt)
             self.state += a * (target - self.state)
         else:
             self.state = target
         return self.state
+
+
+class SpinActuator:
+    """A SPIN in place on the 2-D sim: the firmware adds a turn command to one wheel and subtracts it from the
+    other, each wheel its own actuator; the body's fore-aft motion is the MEAN of the two wheel speeds.
+    gain / extra_lat / extra_tau alter the spinning wheels for experiments. NOTE (2026-10-19): a "weaker, later
+    spinning wheel" was a misreading -- the floor frequency sweeps show the wheel responds the same spinning or
+    straight (it is slower whenever it MOVES; see RiderParams.actuator_tau_moving_s). This 2-D spin does NOT
+    reproduce ppo_ld8_s6's floor spin shimmy (4 Hz, 16-22 deg/s); the cause is still open."""
+
+    def __init__(self, p, dt, turn, gain=1.0, extra_lat=0.0, extra_tau=0.0):
+        q = replace(p, vel_max_rad_s=p.vel_max_rad_s * gain, latency_s=p.latency_s + extra_lat,
+                    actuator_tau_s=p.actuator_tau_s + extra_tau)
+        self.a, self.b, self.turn, self.dt = ActuatorModel(q, dt), ActuatorModel(q, dt), turn, dt
+        self.spin = 0.0                                         # differential wheel angle (rad): the spin
+
+    def reset(self):
+        self.a.reset(); self.b.reset(); self.spin = 0.0
+
+    def __call__(self, cmd):
+        va, vb = self.a(cmd + self.turn), self.b(cmd - self.turn)
+        self.spin += 0.5 * (va - vb) * self.dt
+        return 0.5 * (va + vb)
 
 
 class RiderBalanceEnv(gym.Env):

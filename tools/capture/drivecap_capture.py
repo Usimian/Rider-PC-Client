@@ -12,7 +12,9 @@ fwd/rev. Just drive forward a few times, then backward.
 turning shudder. The 'dir' column then reads spin-<POL|LQR>-g<turn output>: the captured cmd is the
 balance output u; the left wheel's actual command is u plus that (near-constant) turn output.
 
-Run (workstation):  /usr/bin/python3 tools/capture/drivecap_capture.py [out.csv] [--spin]
+--both: trigger on either a drive or a spin (drive tags read fwd-<ctrl> / rev-<ctrl>).
+
+Run (workstation):  /usr/bin/python3 tools/capture/drivecap_capture.py [out.csv] [--spin | --both]
 The broker comes from gui/rider_config.ini, as for tools/diag/mqtt_monitor.py.
 """
 import sys, os, time, json, configparser
@@ -23,6 +25,7 @@ _ini = configparser.ConfigParser()
 _ini.read(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "gui", "rider_config.ini"))
 BROKER = _ini.get("mqtt", "broker_host", fallback="localhost")
 SPIN = "--spin" in sys.argv
+BOTH = "--both" in sys.argv          # trigger on a drive OR a spin; tags carry the controller
 _args = [a for a in sys.argv[1:] if not a.startswith("--")]
 OUT = _args[0] if _args else "drivecap.csv"
 THR = 0.12
@@ -33,7 +36,8 @@ COLS = ["i", "t_us", "cmd", "wid", "v", "pitch_cdeg", "rate_x10", "cmdL", "cmdR"
 f.write("episode,dir," + ",".join(COLS) + "\n")
 st = {"ep": 0, "last": 0.0, "cap": False, "dir": "", "rows": [], "seen": False,
       "armed": 0.0, "dumped": True}
-hist = deque(maxlen=6)
+hist = deque(maxlen=6)       # commanded drive speed (drive trigger)
+hspin = deque(maxlen=6)      # yaw-rate command while not driving (spin trigger)
 
 
 def on_connect(c, u, fl, rc, p=None):
@@ -49,7 +53,8 @@ def on_message(c, u, m):
                 for r in st["rows"]:
                     f.write("%d,%s,%s\n" % (st["ep"], st["dir"], r))
                 print("   episode %d (%s): %d samples saved" % (st["ep"], st["dir"], len(st["rows"])), flush=True)
-                st["ep"] += 1; st["cap"] = False; st["rows"] = []; st["last"] = time.time(); hist.clear()
+                st["ep"] += 1; st["cap"] = False; st["rows"] = []; st["last"] = time.time()
+                hist.clear(); hspin.clear()
         elif pl.startswith("# dcap ") and st["cap"]:
             p = pl.split()
             if len(p) == 2 + len(COLS):      # '# dcap' + the fields (fw 2026-10-19 added cmdL..pol_bias_x100)
@@ -67,8 +72,9 @@ def on_message(c, u, m):
         st["seen"] = True
         print("  telemetry flowing (en=%d vdes=%.2f) -- ready to %s" % (en, vdes, "spin" if SPIN else "drive"),
               flush=True)
-    # spin mode: the 'signal' is the yaw-rate command while not driving (0 otherwise)
-    hist.append((yrc if abs(vdes) < 0.05 else 0.0) if SPIN else vdes)
+    # spin mode: the 'signal' is the yaw-rate command while not driving (0 otherwise); both: either one
+    hist.append(vdes)
+    hspin.append(yrc if abs(vdes) < 0.05 else 0.0)
     # The fw HOLDS the drivecap buffer until an explicit 'logdump' (which streams the
     # # dcap block out Serial1 = Pi UART -> bridge -> rider/debug/dcap). The old tool never
     # sent it, so nothing ever came back. Send logdump ~4s after arming (buffer is 600
@@ -77,14 +83,16 @@ def on_message(c, u, m):
         st["dumped"] = True
         print("   -> logdump (fetching buffer)", flush=True)
         c.publish("rider/control/line", json.dumps({"line": "logdump"}), qos=1)
-    if (en and not st["cap"] and len(hist) == hist.maxlen
-            and all(abs(x) > THR for x in hist)
-            and all((x > 0) == (hist[0] > 0) for x in hist)
-            and time.time() - st["last"] > 2.5):
-        if SPIN:
+    sustained = lambda h: (len(h) == h.maxlen and all(abs(x) > THR for x in h)
+                           and all((x > 0) == (h[0] > 0) for x in h))
+    want_spin = (SPIN or BOTH) and sustained(hspin)
+    want_drive = (not SPIN or BOTH) and sustained(hist)
+    if en and not st["cap"] and (want_spin or want_drive) and time.time() - st["last"] > 2.5:
+        if want_spin:
             st["dir"] = "spin-%s-g%+.0f" % (d.get("ctrl", "?"), gturn)
         else:
-            st["dir"] = "fwd" if hist[0] > 0 else "rev"
+            st["dir"] = "%s-%s" % ("fwd" if hist[0] > 0 else "rev", d.get("ctrl", "?")) if BOTH else \
+                        ("fwd" if hist[0] > 0 else "rev")
         st["cap"] = True; st["rows"] = []
         st["armed"] = time.time(); st["dumped"] = False
         print("  %s detected -> drivecap (keep going ~4s)" % st["dir"], flush=True)

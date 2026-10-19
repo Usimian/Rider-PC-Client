@@ -23,7 +23,7 @@ import argparse
 import numpy as np
 from collections import deque
 from dataclasses import replace
-from rider_env import RiderBalanceEnv
+from rider_env import RiderBalanceEnv, SpinActuator
 from rider_params import DEFAULT
 
 # --- firmware drive gains (main.cpp POLICY defaults, reconciled 2026-08-13) ---
@@ -63,6 +63,15 @@ def load_policy(name):
     return infer
 
 
+def spin_encoders(env):
+    """The firmware's wheel_x while spinning: the MEAN of the two wheels' own 10-bit encoders, each turning
+    (forward +/- spin). Each quantizes on its own, so the mean steps in half-counts at irregular times -- velocity
+    noise a still or straight-driving robot never has. Replaces the single-encoder model in env.sense."""
+    s = env.sense
+    q, r = s.q_step, s.p.wheel_radius_m
+    s._enc_x = lambda wa: 0.5 * (np.round((wa + env.act.spin) / q) + np.round((wa - env.act.spin) / q)) * q * r
+
+
 def lqr_controller(params):
     """The firmware's LQR (main.cpp, floor-tuned gains + 2026-10-18 drive rework), in the sim frame.
     Firmware: u = -(X*x + Xi*Ix + Vx*vx + Q*q + Dq*dq) + CmdFF*vdes, with q = theta - set (robot frame, forward lean
@@ -78,7 +87,8 @@ def lqr_controller(params):
 
 def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s=None, fw_obs=True, params=None,
              stick=True, hold_s=HOLD_S, pitch_offset_deg=0.0, drift_deg=0.0, controller="policy", drive="latch",
-             leash=LEASH, drive_int=False, reverse_at=None):
+             leash=LEASH, drive_int=False, reverse_at=None, turn_cmd=0.0, spin_gain=1.0, spin_enc=True,
+             spin_lat=0.0, spin_tau=0.0, lqr_vel_delay=0.0, inject=None, rate_offset_dps=0.0):
     """accel_couple: override the accelerometer-reads-acceleration gain (default rider_params, MEASURED);
     the firmware's pitch fusion lives in rider_env.FirmwareSensing, so it applies with fw_obs only.
     latency_s: override the actuator pure-delay (default = rider_params, the measured on-robot value).
@@ -96,7 +106,13 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
       the position P keeps acting; it is dragged along if the robot falls more than `leash` m behind/ahead).
       drive_int: with 'lead', also integrate the position error while driving (as the LQR does).
     reverse_at: flip the stick to the opposite direction at this time (s) -- full forward straight into full
-      reverse (floor 2026-10-19: where ppo_fw_s9 fell)."""
+      reverse (floor 2026-10-19: where ppo_fw_s9 fell).
+    turn_cmd: spin in place with this turn output (raw wheel-cmd, floor spins ~60) -- SpinActuator.
+      spin_gain: the spinning wheels' strength vs straight driving; spin_lat / spin_tau: their extra pure
+      delay / extra first-order lag (s);
+      spin_enc: model the two encoders' quantization.
+    lqr_vel_delay: report delay (s) of the servo-reported wheel speed the LQR uses (0 = the encoder speed).
+    inject: t -> raw wheel-cmd added to the controller's output (the firmware's frequency sweep, 'chirp')."""
     p = params or DEFAULT
     if latency_s is not None:
         p = replace(p, latency_s=latency_s)
@@ -107,12 +123,17 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
         lqr = lqr_controller(p)
     env = RiderBalanceEnv(params=p, add_noise=False, frame_stack=1, fw_obs=fw_obs)   # stacked obs built here
     env.reset(seed=seed)
+    if turn_cmd:
+        env.act = SpinActuator(p, env.ctrl_dt, turn_cmd / POL_FULL_CMD, spin_gain, spin_lat, spin_tau)
+        if spin_enc:
+            spin_encoders(env)
     dt = env.ctrl_dt
     pitch, prate, x, x_vel, wheel_vel = env._raw_state()
     x0 = x
     tgt = x0 + direction * 5.0                              # far target => cruise at vmax the whole run
     tgt_eff = x0; vdes_s = 0.0; xvelF = 0.0; prevX = x0; pint = 0.0; pint_pos = 0.0
     vest = 0.0; lqr_ix = 0.0
+    vel_buf = deque([0.0] * (max(0, round(lqr_vel_delay / dt)) + 1), maxlen=max(0, round(lqr_vel_delay / dt)) + 1)
     stack = deque(maxlen=2)
     log = []
     n = int(T / dt)
@@ -125,6 +146,7 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
         pitch_obs, prate, x_vel, wheel_vel = env.last_sensed
         dis = pitch_offset_deg + drift_deg * float(np.clip((t - hold_s - 1.0) / 1.5, 0.0, 1.0))
         pitch_obs += dis * DEG2RAD
+        prate = prate + rate_offset_dps * DEG2RAD           # a gyro offset (e.g. yaw leaking in while spinning)
         # drive loop's velocity: the firmware differences the ENCODER wheel_x (same read as the policy's)
         xvel = env.sense.xvel_raw if fw_obs else (x - prevX) / dt
         prevX = x
@@ -143,7 +165,11 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
             tgt_eff += vdes_s * dt
             vdes = vdes_s
             lqr_ix = float(np.clip(lqr_ix + (x - tgt_eff) * dt, -LQR_IXMAX, LQR_IXMAX))
-            vest = LQR_VEL_LP * vest + (1 - LQR_VEL_LP) * xvel * LQR_VEL_PER_MPS   # servo-speed path, scaled units
+            # the LQR's speed is the SERVOS' reported speed (wheel relative to body), which reports late:
+            # lqr_vel_delay of pure delay on the true wheel speed, then the firmware's LP_VEL
+            vel_buf.append(wheel_vel_true * WHEEL_R)
+            vrep = vel_buf[0] if lqr_vel_delay > 0 else xvel
+            vest = LQR_VEL_LP * vest + (1 - LQR_VEL_LP) * vrep * LQR_VEL_PER_MPS   # servo-speed path, scaled units
             u = lqr(x - tgt_eff, lqr_ix, vest - LQR_VREF * vdes, np.degrees(pitch_obs), np.degrees(prate), vdes)
             a = u / POL_FULL_CMD
             bias_deg = 0.0
@@ -199,8 +225,10 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
                 stack.append(frame)
             obs = np.concatenate(stack)
             a = infer(obs)
+        inj = inject(t) if inject else 0.0                  # firmware 'chirp': known signal on the wheel command
+        a = a + inj / POL_FULL_CMD
         _, _, term, _, _ = env.step(np.array([a], np.float32))
-        log.append((t, pitch, prate_true, a, x_vel_true, bias_deg, x - x0, vdes_s))
+        log.append((t, pitch, prate_true, a, x_vel_true, bias_deg, x - x0, vdes_s, xvel, inj))   # xvel: encoder speed
         if term:
             fell_t = (i + 1) * dt
             break

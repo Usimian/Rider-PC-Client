@@ -11,6 +11,7 @@ we always know how much to trust it:
               Until these are measured, transfer to hardware is not trustworthy.
 """
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -55,7 +56,11 @@ class RiderParams:
                                            # full scale (action 1 = 30 rad/s x 7.764 = 233 raw wheel-cmd, main.cpp
                                            # POL_VELMAX_RADS). The firmware clamps every controller at gUMax 400 raw:
                                            # the LQR uses that whole range (400/233 = 1.72), the policy only 1.0.
-    actuator_tau_s: float = 0.013          # MEASURED  first-order lag, amplitude-independent
+    actuator_tau_moving_s: Optional[float] = None  # EXPERIMENT 2026-10-19 (off = None): lag once the wheel turns steadily.
+                                           # Floor frequency sweeps (injected signal): a wheel reversing around
+                                           # standstill lags ~14 ms (= the sim), a MOVING one ~45 ms at 2-5 Hz.
+    tau_speed_ref_rad_s: float = 2.0       # wheel speed (rad/s) at which the moving lag is fully in
+    actuator_tau_s: float = 0.013         # MEASURED  first-order lag, amplitude-independent
     deadband_frac: float = 0.15            # MEASURED 2026-09-16 LOADED, on the floor (drivecap, 7 drive episodes, both
                                            # policies): steady v ~= 0.9*(cmd-35) raw -> breakaway 35/232 = 0.15. With
                                            # this + vel_max 27 the sim REPRODUCES ppo_fw_s8's full-stick forward fall
