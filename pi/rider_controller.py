@@ -65,7 +65,8 @@ HEIGHT_RATE     = 50.0  # leg encoder counts/s at full right-stick-vertical (leg
                         # end to end). Sent as 'legrate'; firmware integrates it, clamps to the servo limits.
 HEIGHT_HZ       = 10    # 'legrate' heartbeat while the stick is held (firmware times out after 300 ms)
 HEIGHT_DEADZONE = 0.40  # same as the turn deadzone: the right stick is worn (rest offset ~0.32 on X)
-DEADZONE = 0.12
+DEADZONE = 0.20       # left stick (drive). 0.12 -> 0.20 (2026-10-19): the worn left stick now rests ~0.15 off centre,
+                      # past 0.12 -> a steady 0.01 m/s command crept the robot forward ~0.5 m a minute.
 TURN_DEADZONE = 0.40  # right stick (turn) resting offset has DRIFTED to ~0.32 (worn stick), past the old 0.30
                       # deadzone -> it kept commanding turnrate 0.03 and, with no heartbeat to refresh it, that
                       # value LATCHED in the firmware (robot turned on a centered stick). Widened to 0.40 to
