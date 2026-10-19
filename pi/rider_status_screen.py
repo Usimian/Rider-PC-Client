@@ -138,9 +138,14 @@ def controller_connected():
     return _ctrl["on"]
 
 
+g_power_msg = None              # set once a poweroff/reboot fires -> render() shows only this from then on
+
+
 def do_poweroff():
     """Shut the Pi down (pi has NOPASSWD sudo). Triggered by the lower-left button
     held ~1.5s, or the GUI's rider/control/system 'poweroff_pi' command."""
+    global g_power_msg
+    g_power_msg = "SHUTTING DOWN"   # next frame (<=0.2 s) switches the LCD to it; it stays until power drops
     print("POWEROFF requested -> sudo poweroff", flush=True)
     try:
         subprocess.Popen(["sudo", "poweroff"])
@@ -151,6 +156,8 @@ def do_poweroff():
 def do_reboot():
     """Reboot the Pi (pi has NOPASSWD sudo). Triggered by the GUI's
     rider/control/system 'reboot_pi' command (mirrors do_poweroff)."""
+    global g_power_msg
+    g_power_msg = "REBOOTING"
     print("REBOOT requested -> sudo reboot", flush=True)
     try:
         subprocess.Popen(["sudo", "reboot"])
@@ -321,6 +328,12 @@ def wifi_connected():
 def render():
     img = Image.new("RGB", (320, 240), BG)
     d = ImageDraw.Draw(img)
+    if g_power_msg:                     # shutdown/reboot under way: a full-screen notice, nothing else
+        d.rectangle((0, 0, 320, 240), fill=(140, 0, 0))
+        d.text(((320 - _text_w(d, g_power_msg, f_l)) // 2, 85), g_power_msg, fill=(255, 255, 255), font=f_l)
+        d.text(((320 - _text_w(d, "please wait", f_m)) // 2, 135), "please wait", fill=(255, 210, 210), font=f_m)
+        lcd.ShowImage(img)
+        return
     en = int(tel.get("en", 0))
     mq_ok = mqc is not None and mqc.is_connected()
 
