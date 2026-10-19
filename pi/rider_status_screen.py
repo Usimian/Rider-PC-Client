@@ -94,6 +94,15 @@ def cpu_temp_c():
         return float("nan")
 
 
+def cpu_ghz():
+    """Current CPU clock (GHz). The 'ondemand' governor idles at 1.5 GHz and runs up to the
+    config.txt cap (arm_freq=2000 since 2026-10-19), so 1.5 at rest is normal, not throttling."""
+    try:
+        return float(open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq").read()) / 1e6
+    except Exception:
+        return float("nan")
+
+
 _pw = {"t": 0.0, "w": 0.0}
 
 
@@ -388,11 +397,17 @@ def render():
     ctrl_col = (150, 220, 150) if g_ctrl == "POL" else (190, 170, 255)
     d.text((312 - _text_w(d, ctrl_disp, f_m), 186), ctrl_disp, fill=ctrl_col, font=f_m)
 
-    cpu = psutil.cpu_percent(); temp = cpu_temp_c(); pw = cm5_power_w()
-    tcol = (255, 90, 90) if temp >= 80 else (255, 215, 60) if temp >= 70 else (170, 195, 235)
-    d.text((10, 214), "CPU %d%%" % cpu, fill=(170, 195, 235), font=f_m)
-    d.text((140, 214), "%.0f°C" % temp, fill=tcol, font=f_m)
-    d.text((232, 214), "%.1fW" % pw, fill=(170, 195, 235), font=f_m)
+    cpu = psutil.cpu_percent(); temp = cpu_temp_c(); pw = cm5_power_w(); ghz = cpu_ghz()
+    dim = (170, 195, 235)
+    tcol = (255, 90, 90) if temp >= 80 else (255, 215, 60) if temp >= 70 else dim
+    # four items -- CPU load, temperature, power, clock -- spread evenly across x=10..310
+    items = [("CPU %d%%" % cpu, dim), ("%.0f°C" % temp, tcol), ("%.1fW" % pw, dim), ("%.1fGHz" % ghz, dim)]
+    widths = [_text_w(d, s, f_m) for s, _ in items]
+    gap = (300 - sum(widths)) / (len(items) - 1)
+    x = 10.0
+    for (s, col), w in zip(items, widths):
+        d.text((int(x), 214), s, fill=col, font=f_m)
+        x += w + gap
     # power-button hold overlay: warn + show progress over the hold; release cancels
     if pwr_down_t > 0.0:
         held = min(time.time() - pwr_down_t, PWR_HOLD_S)
