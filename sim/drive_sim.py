@@ -49,6 +49,8 @@ LQR_FF, LQR_FFBAND = 10.0, 20.0     # gFF / gFFband: stiction boost
 LQR_UMAX = 400.0                    # gUMax: output clamp (raw wheel-cmd)
 LQR_VEL_LP = 0.85                   # LP_VEL: the servo-speed low-pass behind wheel_vx
 LQR_VEL_PER_MPS = 265.0             # MEASURED 2026-10-19: wheel_vx units per m/s of ground speed (floor cruise)
+LQR_SPEED_STEP = 0.0031             # MEASURED 2026-10-19: one raw unit of the servos' reported speed = 3.1 mm/s
+                                    # (floor sweeps: 3.09-3.17 mm/s per unit vs the encoder speed; no delay)
 
 
 def load_policy(name):
@@ -88,7 +90,7 @@ def lqr_controller(params):
 def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s=None, fw_obs=True, params=None,
              stick=True, hold_s=HOLD_S, pitch_offset_deg=0.0, drift_deg=0.0, controller="policy", drive="latch",
              leash=LEASH, drive_int=False, reverse_at=None, turn_cmd=0.0, spin_gain=1.0, spin_enc=True,
-             spin_lat=0.0, spin_tau=0.0, lqr_vel_delay=0.0, inject=None, rate_offset_dps=0.0):
+             spin_lat=0.0, spin_tau=0.0, lqr_speed="reported", inject=None, rate_offset_dps=0.0):
     """accel_couple: override the accelerometer-reads-acceleration gain (default rider_params, MEASURED);
     the firmware's pitch fusion lives in rider_env.FirmwareSensing, so it applies with fw_obs only.
     latency_s: override the actuator pure-delay (default = rider_params, the measured on-robot value).
@@ -111,7 +113,8 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
       spin_gain: the spinning wheels' strength vs straight driving; spin_lat / spin_tau: their extra pure
       delay / extra first-order lag (s);
       spin_enc: model the two encoders' quantization.
-    lqr_vel_delay: report delay (s) of the servo-reported wheel speed the LQR uses (0 = the encoder speed).
+    lqr_speed: the LQR's speed signal -- 'reported' (the servos' own speed, as the firmware uses) or 'encoder'
+      (the per-cycle encoder difference; the sim LQR before 2026-10-19).
     inject: t -> raw wheel-cmd added to the controller's output (the firmware's frequency sweep, 'chirp')."""
     p = params or DEFAULT
     if latency_s is not None:
@@ -133,7 +136,6 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
     tgt = x0 + direction * 5.0                              # far target => cruise at vmax the whole run
     tgt_eff = x0; vdes_s = 0.0; xvelF = 0.0; prevX = x0; pint = 0.0; pint_pos = 0.0
     vest = 0.0; lqr_ix = 0.0
-    vel_buf = deque([0.0] * (max(0, round(lqr_vel_delay / dt)) + 1), maxlen=max(0, round(lqr_vel_delay / dt)) + 1)
     stack = deque(maxlen=2)
     log = []
     n = int(T / dt)
@@ -165,11 +167,14 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
             tgt_eff += vdes_s * dt
             vdes = vdes_s
             lqr_ix = float(np.clip(lqr_ix + (x - tgt_eff) * dt, -LQR_IXMAX, LQR_IXMAX))
-            # the LQR's speed is the SERVOS' reported speed (wheel relative to body), which reports late:
-            # lqr_vel_delay of pure delay on the true wheel speed, then the firmware's LP_VEL
-            vel_buf.append(wheel_vel_true * WHEEL_R)
-            vrep = vel_buf[0] if lqr_vel_delay > 0 else xvel
-            vest = LQR_VEL_LP * vest + (1 - LQR_VEL_LP) * vrep * LQR_VEL_PER_MPS   # servo-speed path, scaled units
+            # the LQR's speed is the SERVOS' reported speed (wheel relative to body): MEASURED 2026-10-19 (floor
+            # sweeps) on time with the encoder speed (< 1 ms) but in fine LQR_SPEED_STEP steps each cycle -- not
+            # the per-cycle encoder difference (~43 mm/s steps), which made the sim LQR ring at 10-15 Hz.
+            if lqr_speed == "reported":
+                vrep = np.round(wheel_vel_true * WHEEL_R / LQR_SPEED_STEP) * LQR_SPEED_STEP
+            else:
+                vrep = xvel
+            vest = LQR_VEL_LP * vest + (1 - LQR_VEL_LP) * vrep * LQR_VEL_PER_MPS   # firmware LP_VEL, scaled units
             u = lqr(x - tgt_eff, lqr_ix, vest - LQR_VREF * vdes, np.degrees(pitch_obs), np.degrees(prate), vdes)
             a = u / POL_FULL_CMD
             bias_deg = 0.0

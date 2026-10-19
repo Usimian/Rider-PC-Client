@@ -22,15 +22,15 @@ from rider_model import build_mjcf
 # floor traction is still unknown).
 DR_RANGES = {
     "vel_gain":       (0.80, 1.20),    # cmd->velocity gain (vel_max multiplier) about the MEASURED loaded nominal
-                                       # 18.1 rad/s (2026-10-19 floor ground speed; per-window scatter 0.86-1.15 of
+                                       # 17.5 rad/s (2026-10-19 floor ground speed; per-window scatter 0.86-1.15 of
                                        # it at 7.3-7.7 V, plus battery: a full pack is stronger, a low one weaker)
     "actuator_tau_s": (0.010, 0.018),  # tight around measured 13 ms
     "latency_s":      (0.000, 0.010),  # 0-2 control steps around the 2026-09-16 calibrated ONE step (sim cross-corr
                                        # lag == robot's 30-35 ms) -> ~20-40 ms effective so the policy learns real
                                        # margin. (0.015-0.028 before: double-counted the sim's own ~20 ms -> 64 ms
                                        # effective and a 4 Hz thrash the robot never shows; see rider_params)
-    "deadband_frac":  (0.10, 0.22),    # breakaway about the LOADED floor value 0.15 (2026-09-16 drivecap fit
-                                       # v ~= 0.9*(cmd-35)); unloaded bench was 0.09. Wide: stick-slip varies.
+    "deadband_frac":  (0.05, 0.15),    # breakaway about the floor-sweep value 0.08 (2026-10-19; was (0.10, 0.22)
+                                       # about the 2026-09-16 cruise-fit 0.15). Wide: stick-slip varies.
     "mass_scale":     (0.85, 1.15),    # mass measured -> tighter
     "wheel_friction": (0.6, 1.5),      # real-floor traction unknown -> wide
     "accel_couple":   (-1.1, -0.6),    # accelerometer-reads-acceleration gain (sim frame) about the MEASURED -0.85
@@ -302,6 +302,10 @@ class RiderBalanceEnv(gym.Env):
         (self.q_x, self.d_x) = qadr("slide_x")
         (self.q_pitch, self.d_pitch) = qadr("pitch")
         (self.q_wheel, self.d_wheel) = qadr("wheel_spin")
+        # leg give (RiderParams.leg_flex_stiffness_Nm_rad): body pitch = legs' pitch + the flex
+        self.q_flex = self.d_flex = None
+        if mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "leg_flex") >= 0:
+            (self.q_flex, self.d_flex) = qadr("leg_flex")
 
         self.action_space = spaces.Box(-1.0, 1.0, (1,), np.float32)
         # single-frame obs: [pitch, pitch_rate, x_err, x_vel, wheel_vel, INT_pitch, INT_x]
@@ -319,6 +323,9 @@ class RiderBalanceEnv(gym.Env):
     def _raw_state(self):
         pitch = self.data.qpos[self.q_pitch]
         pitch_rate = self.data.qvel[self.d_pitch]
+        if self.q_flex is not None:                     # the IMU is on the torso, which flexes on the legs
+            pitch = pitch + self.data.qpos[self.q_flex]
+            pitch_rate = pitch_rate + self.data.qvel[self.d_flex]
         x = self.data.qpos[self.q_x]
         x_vel = self.data.qvel[self.d_x]
         wheel_vel = self.data.qvel[self.d_wheel]
@@ -491,6 +498,10 @@ class RiderBalanceEnv(gym.Env):
         torque = self.act(self.mirror * a)             # apply in the real frame -> symmetric training data
         self.data.ctrl[0] = torque
         for _ in range(self.decim):
+            if self.q_flex is not None and self.p.leg_play_deg > 0.0:
+                # FREE PLAY in the legs: no spring force within +/-play, the spring only beyond it (backlash)
+                q = self.data.qpos[self.q_flex]; b = np.radians(self.p.leg_play_deg)
+                self.data.qfrc_applied[self.d_flex] = -self.p.leg_play_stiffness_Nm_rad * (q - np.clip(q, -b, b))
             mujoco.mj_step(self.model, self.data)
         self._steps += 1
         pitch, pitch_rate, x, x_vel, wheel_vel = self._raw_state()

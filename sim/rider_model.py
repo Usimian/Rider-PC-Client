@@ -19,6 +19,25 @@ def build_mjcf(p: RiderParams) -> str:
     vmax = 1.25 * p.vel_max_rad_s * max(1.0, p.cmd_limit)   # headroom: DR vel_gain > 1 (and a command range
                                                              # beyond the policy's full scale) must not be clipped
     frng = p.vel_forcerange_Nm
+    flex = p.leg_flex_stiffness_Nm_rad is not None
+    torso_mass = p.body_mass_kg - (p.leg_mass_kg if flex else 0.0)
+    torso = f"""<geom name="torso" type="box" pos="0 0 {p.com_height_m}" size="{hx} {hy} {hz}"
+            mass="{torso_mass}" rgba="0.85 0.5 0.2 1"/>"""
+    if flex:
+        # leg give (2026-10-19 experiment): the torso (IMU) hangs on the legs through a torsional spring about
+        # the axle; the wheel servo (and its torque reaction) sits on the legs. 'pitch' is then the LEGS'
+        # angle and 'leg_flex' the torso relative to them -- the env adds them for the body pitch.
+        # the legs carry the wheel servos: give them that share of the measured body mass (not ~0, which makes
+        # a stiff spring ring faster than the time step can follow). Torso + legs geoms don't collide: the torso
+        # body is the wheels' SIBLING here (not their parent), so MuJoCo would let the torso box rub the wheel.
+        torso = torso.replace("<geom ", '<geom contype="0" conaffinity="0" ')
+        torso = f"""<geom name="legs" type="box" pos="0 0 0.02" size="0.01 {hy} 0.02" mass="{p.leg_mass_kg}"
+            contype="0" conaffinity="0" rgba="0.6 0.6 0.6 1"/>
+      <body name="torso_body" pos="0 0 0">
+        <joint name="leg_flex" type="hinge" axis="0 1 0" stiffness="{p.leg_flex_stiffness_Nm_rad}"
+               damping="{p.leg_flex_damping}"/>
+        {torso}
+      </body>"""
     return f"""<mujoco model="rider_balancer">
   <option timestep="{p.physics_timestep_s}" gravity="0 0 -9.81" integrator="implicitfast"/>
   <visual><headlight diffuse="0.6 0.6 0.6"/><global offwidth="640" offheight="480"/></visual>
@@ -31,8 +50,7 @@ def build_mjcf(p: RiderParams) -> str:
       <joint name="slide_x" type="slide" axis="1 0 0"/>
       <joint name="slide_z" type="slide" axis="0 0 1"/>
       <joint name="pitch"   type="hinge" axis="0 1 0"/>
-      <geom name="torso" type="box" pos="0 0 {p.com_height_m}" size="{hx} {hy} {hz}"
-            mass="{p.body_mass_kg}" rgba="0.85 0.5 0.2 1"/>
+      {torso}
       <body name="wheels" pos="0 0 0">
         <joint name="wheel_spin" type="hinge" axis="0 1 0" armature="{p.wheel_armature}"/>
         <geom name="wheel" type="cylinder" fromto="0 {-half_track} 0 0 {half_track} 0"

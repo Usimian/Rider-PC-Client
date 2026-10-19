@@ -42,7 +42,10 @@ class RiderParams:
 
     # ---------- actuator model (MEASURED 2026-06-13, bench step-response) ----------
     cmd_mode: str = "velocity"             # MEASURED  command is a velocity setpoint (settles, linear in cmd)
-    vel_max_rad_s: float = 18.1            # MEASURED 2026-10-19 on the floor: GROUND speed from the encoder distance
+    vel_max_rad_s: float = 17.5            # 2026-10-19 (late): refit with deadband 0.08 to the same cruise data (2.45e-3
+                                           # m/s per cmd beyond the dead zone -> 2.45e-3*(1-0.08)*232/0.03 = 17.5).
+                                           # The 18.1 below was the fit with the 0.15 dead zone:
+                                           # MEASURED 2026-10-19 on the floor: GROUND speed from the encoder distance
                                            # (wx, metres) over 140 one-second cruise windows, both controllers, battery
                                            # 7.3-7.7 V: |v| = 2.75e-3 m/s per command unit x (|cmd| - 35), resid 1.6 cm/s
                                            # -> vel_max = 2.75e-3*(1-0.15)*232/0.03 = 18.1 rad/s AT FULL command (the
@@ -56,12 +59,28 @@ class RiderParams:
                                            # full scale (action 1 = 30 rad/s x 7.764 = 233 raw wheel-cmd, main.cpp
                                            # POL_VELMAX_RADS). The firmware clamps every controller at gUMax 400 raw:
                                            # the LQR uses that whole range (400/233 = 1.72), the policy only 1.0.
-    actuator_tau_moving_s: Optional[float] = None  # EXPERIMENT 2026-10-19 (off = None): lag once the wheel turns steadily.
-                                           # Floor frequency sweeps (injected signal): a wheel reversing around
-                                           # standstill lags ~14 ms (= the sim), a MOVING one ~45 ms at 2-5 Hz.
+    actuator_tau_moving_s: Optional[float] = 0.045  # MEASURED 2026-10-19 (None = off): the lag once the wheel turns
+                                           # steadily. Floor frequency sweeps (injected signal, sim/wheel_sweep.py):
+                                           # a wheel reversing around standstill lags 7-18 ms, a MOVING one 36-56 ms at
+                                           # 2-5 Hz; tau rising 13 -> 45 ms with wheel speed reproduces both (sim:
+                                           # 21-26 ms holding, 29-44 ms driving at 0.30).
     tau_speed_ref_rad_s: float = 2.0       # wheel speed (rad/s) at which the moving lag is fully in
-    actuator_tau_s: float = 0.013         # MEASURED  first-order lag, amplitude-independent
-    deadband_frac: float = 0.15            # MEASURED 2026-09-16 LOADED, on the floor (drivecap, 7 drive episodes, both
+    leg_flex_stiffness_Nm_rad: Optional[float] = None  # EXPERIMENT 2026-10-19 (off = None): give in the legs, a
+                                           # torsional spring between the legs (wheel servo) and the torso (IMU).
+                                           # Marc, by hand: the legs give noticeably when torqued; the robot sits
+                                           # 2-3 mm lower loaded than with the wheels just touching.
+    leg_flex_damping: float = 0.005        # Nm*s/rad, with the above
+    leg_play_deg: float = 0.0              # EXPERIMENT, with leg_flex: free play (backlash) +/- this many degrees, in
+                                           # which only the weak leg_flex spring acts; beyond it leg_play_stiffness
+    leg_play_stiffness_Nm_rad: float = 100.0
+    leg_mass_kg: float = 0.08             # ESTIMATED, with the above: the legs' share of body_mass_kg (wheel servos ~2x20 g + links)
+    actuator_tau_s: float = 0.013        # MEASURED  first-order lag, amplitude-independent
+    deadband_frac: float = 0.08            # MEASURED 2026-10-19 (19 raw cmd): the floor HOLD sweep (the wheel follows the
+                                           # command ~0.9-0.97 mm/s per cmd flat over 1-7 Hz) needs it -- at 0.15 the sim
+                                           # wheel gave 0.7 -> 0.3 -- and the cruise fits with a free breakaway gave 20-28
+                                           # raw. With it (+ vel_max 17.5, the moving lag) the sim still reproduces
+                                           # ppo_fw_s9's floor falls and ld8_s6 / LQR's 0.30 m/s drives. Was 0.15:
+                                           # MEASURED 2026-09-16 LOADED, on the floor (drivecap, 7 drive episodes, both
                                            # policies): steady v ~= 0.9*(cmd-35) raw -> breakaway 35/232 = 0.15. With
                                            # this + vel_max 27 the sim REPRODUCES ppo_fw_s8's full-stick forward fall
                                            # (2.4 s) and ppo_mc_l4a's survival; at the unloaded 0.09 it did not.
