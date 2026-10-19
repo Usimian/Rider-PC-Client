@@ -18,15 +18,23 @@ Read at session start. Facts live in the repo (commit messages of 2026-10-19 car
   (`polulp 0.5` made it slightly worse: 17.1 -> 18.6 °/s, 4.0 -> 3.4 Hz -- delay feeds it), leg give or free
   play in the 2-D sim (they shake the sim LQR as much or more, unlike the floor).
 - **Sim now matches the floor** on: wheel response holding (sweep) and moving (lag 36-56 ms), s9's falls,
-  ld8_s6 / LQR drives, LQR calm (servo-style speed). It still does NOT produce the spin shimmy.
+  ld8_s6 / LQR drives, LQR calm (servo-style speed). Marc checked the mechanics: nothing loose.
+- **Two-wheel sim** (`sim/rider_env_twowheel.py`, drive_sim `twowheel=True`): firmware turn controller, tyre
+  scrub calibrated (turn 66 / yaw 1.22 rad/s = floor). Spinning, ld8_s6 rocks more than LQR (as on the floor)
+  but ~1/3 the floor size (5-7 vs 16-22 deg/s). Training in it (`--spin_prob 0.3`, sweep `ppo_tw2_*`):
+  **candidate `ppo_tw2_s6`** spins at 2.0 deg/s in the sim (ld8_s6 5.5, LQR 1.4-1.9), drives 0.30 both ways,
+  deep_check 150 runs clean except a weak wheel at 0.35; TRADE-OFF: reverse with low legs / turn drift only
+  0.15 / 0.19 m/s (ld8_s6 0.31).
 
 ## Open list, in order
 
-1. **Marc: tighten the legs/linkages/wheel hubs**, then spin in policy mode with the capture running
-   (`tools/capture/drivecap_capture.py out.csv --spin`) -- before/after numbers. If it drops, looseness was it.
-2. If not: the spin shimmy is a 3-D effect (sideways tyre scrub; a stalled wheel turning the spin into a
-   pivot). Bring `sim/rider_env_3d.py` (two wheels) up to today's wheel/sensing/drive model, require: policy
-   shimmies when spinning, LQR calm, all the floor facts above; only then retrain with spins.
+1. **Floor-test `ppo_tw2_s6`** (ask before flashing; stand + USB-C; copy `sim/ppo_tw2_s6_policy.h` ->
+   `firmware/esp32_rider_fw/src/rider_policy.h`): spins both ways WITH the capture running
+   (`tools/capture/drivecap_capture.py out.csv --spin`, then `shimmy_meter`-style numbers vs ld8_s6's 17-19
+   deg/s), straight 0.30 both ways, turns while driving, reverse with the legs lowered. ld8_s6 stays the
+   committed fallback (`git show 0cf57b3:firmware/esp32_rider_fw/src/rider_policy.h`).
+2. If tw2_s6 still shimmies on the floor: the two-wheel sim understates it ~3x -- find the missing factor
+   (compare the policy's captured spin inputs with the sim's), then retrain.
 3. Under-voltage on boot (5 V rail ~4.94 V idle) -- see HARDWARE.md Power; `/home/pi/riderlog.txt` is never
    rotated (archive + truncate when large, as on 2026-10-19).
 4. ToF obstacle/edge stop runs but is OFF by default (web page switch). It false-flagged a flat floor before;
