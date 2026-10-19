@@ -24,6 +24,7 @@ import numpy as np
 from collections import deque
 from dataclasses import replace
 from rider_env import RiderBalanceEnv, SpinActuator
+from rider_env_twowheel import RiderTwoWheelEnv
 from rider_params import DEFAULT
 
 # --- firmware drive gains (main.cpp POLICY defaults, reconciled 2026-08-13) ---
@@ -90,7 +91,8 @@ def lqr_controller(params):
 def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s=None, fw_obs=True, params=None,
              stick=True, hold_s=HOLD_S, pitch_offset_deg=0.0, drift_deg=0.0, controller="policy", drive="latch",
              leash=LEASH, drive_int=False, reverse_at=None, turn_cmd=0.0, spin_gain=1.0, spin_enc=True,
-             spin_lat=0.0, spin_tau=0.0, lqr_speed="reported", inject=None, rate_offset_dps=0.0):
+             spin_lat=0.0, spin_tau=0.0, lqr_speed="reported", inject=None, rate_offset_dps=0.0,
+             twowheel=False, yaw_cmd=0.0, yaw_from_s=None, right_wheel=None, noise=False):
     """accel_couple: override the accelerometer-reads-acceleration gain (default rider_params, MEASURED);
     the firmware's pitch fusion lives in rider_env.FirmwareSensing, so it applies with fw_obs only.
     latency_s: override the actuator pure-delay (default = rider_params, the measured on-robot value).
@@ -115,7 +117,9 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
       spin_enc: model the two encoders' quantization.
     lqr_speed: the LQR's speed signal -- 'reported' (the servos' own speed, as the firmware uses) or 'encoder'
       (the per-cycle encoder difference; the sim LQR before 2026-10-19).
-    inject: t -> raw wheel-cmd added to the controller's output (the firmware's frequency sweep, 'chirp')."""
+    inject: t -> raw wheel-cmd added to the controller's output (the firmware's frequency sweep, 'chirp').
+    twowheel: the two-wheel plant (rider_env_twowheel) with the firmware turn controller; yaw_cmd = the
+      'turnrate' (rad/s, full stick 1.0) held from yaw_from_s (default hold_s) -- a real spin."""
     p = params or DEFAULT
     if latency_s is not None:
         p = replace(p, latency_s=latency_s)
@@ -124,7 +128,12 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
     if controller == "lqr":
         p = replace(p, cmd_limit=LQR_UMAX / POL_FULL_CMD)      # the LQR may use the whole gUMax range
         lqr = lqr_controller(p)
-    env = RiderBalanceEnv(params=p, add_noise=False, frame_stack=1, fw_obs=fw_obs)   # stacked obs built here
+    env_cls = RiderTwoWheelEnv if twowheel else RiderBalanceEnv
+    np.random.seed(seed)                                    # the sensor noise (noise=True) uses numpy's global RNG
+    env = env_cls(params=p, add_noise=noise, frame_stack=1, fw_obs=fw_obs)   # stacked obs built here
+    yaw_from = hold_s if yaw_from_s is None else yaw_from_s
+    if twowheel and right_wheel:
+        env.right_kw = dict(right_wheel)                    # the right wheel differs (see RiderTwoWheelEnv)
     env.reset(seed=seed)
     if turn_cmd:
         env.act = SpinActuator(p, env.ctrl_dt, turn_cmd / POL_FULL_CMD, spin_gain, spin_lat, spin_tau)
@@ -232,8 +241,11 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
             a = infer(obs)
         inj = inject(t) if inject else 0.0                  # firmware 'chirp': known signal on the wheel command
         a = a + inj / POL_FULL_CMD
+        if twowheel:
+            env.yaw_cmd = yaw_cmd if t >= yaw_from else 0.0         # the joystick's 'turnrate' (rad/s)
         _, _, term, _, _ = env.step(np.array([a], np.float32))
-        log.append((t, pitch, prate_true, a, x_vel_true, bias_deg, x - x0, vdes_s, xvel, inj))   # xvel: encoder speed
+        log.append((t, pitch, prate_true, a, x_vel_true, bias_deg, x - x0, vdes_s, xvel, inj,   # xvel: encoder speed
+                    env.last_turn if twowheel else 0.0, env.yaw_rate_turn() if twowheel else 0.0))
         if term:
             fell_t = (i + 1) * dt
             break

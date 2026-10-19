@@ -320,6 +320,14 @@ class RiderBalanceEnv(gym.Env):
         self._steps = 0
 
     # ---- helpers ----
+    # hooks the two-wheel env (rider_env_twowheel.py) overrides: how the command reaches the wheel(s), and
+    # the encoder angle the firmware differences
+    def _apply_action(self, a):
+        self.data.ctrl[0] = self.act(a)
+
+    def _wheel_angle(self):
+        return self.data.qpos[self.q_wheel]
+
     def _raw_state(self):
         pitch = self.data.qpos[self.q_pitch]
         pitch_rate = self.data.qvel[self.d_pitch]
@@ -352,7 +360,7 @@ class RiderBalanceEnv(gym.Env):
             # What the firmware feeds the policy: encoder-differenced + LP'd velocity, LP'd gyro rate.
             # (The 2026-06 'qnoise' experiment trained on quantized-but-UNfiltered velocity and hurt
             # balance; this is the filtered signal the robot really uses -- see docs/loop_delay_budget.md.)
-            pitch_rate, x_vel, wheel_vel = self.sense.update(self.data.qpos[self.q_wheel], pitch_rate, self.ctrl_dt)
+            pitch_rate, x_vel, wheel_vel = self.sense.update(self._wheel_angle(), pitch_rate, self.ctrl_dt)
         self.last_sensed = (pitch, pitch_rate, x_vel, wheel_vel)
 
     def _single_obs(self):
@@ -460,7 +468,7 @@ class RiderBalanceEnv(gym.Env):
         self.data.qvel[self.d_pitch] = self.np_random.uniform(-0.20, 0.20)
         mujoco.mj_forward(self.model, self.data)
         self.act.reset()
-        self.sense.reset(float(self.data.qpos[self.q_wheel]), float(self.data.qpos[self.q_pitch]),
+        self.sense.reset(float(self._wheel_angle()), float(self.data.qpos[self.q_pitch]),
                          float(self.data.qvel[self.d_x]))
         self._steps = 0
         self._prev_a = 0.0
@@ -495,8 +503,7 @@ class RiderBalanceEnv(gym.Env):
 
     def step(self, action):
         a = float(np.asarray(action).flat[0])          # action in the (possibly mirrored) policy frame
-        torque = self.act(self.mirror * a)             # apply in the real frame -> symmetric training data
-        self.data.ctrl[0] = torque
+        self._apply_action(self.mirror * a)            # apply in the real frame -> symmetric training data
         for _ in range(self.decim):
             if self.q_flex is not None and self.p.leg_play_deg > 0.0:
                 # FREE PLAY in the legs: no spring force within +/-play, the spring only beyond it (backlash)
