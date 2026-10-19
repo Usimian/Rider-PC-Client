@@ -29,15 +29,52 @@ If `NICOU_WIFI_PSK` is set, nothing else in this runbook needs a value you'd hav
 
 ## Baseline
 
-Start from the **stock XGO Rider Raspberry Pi OS image** (RPi OS trixie, arm64) flashed to the
-SD card. That image is the source of two things this project does **not** vendor:
+*(Corrected 2026-10-19 from an inventory of the running card — an earlier version of this section
+said "stock XGO image"; the card was in fact plain Raspberry Pi OS.)*
 
-- **`xgoscreen`** — the 2-inch LCD library (lives in `xgovenv/.../site-packages/xgoscreen`, not
-  on PyPI). From the XGO / Luwu-OS distribution.
-- **`/home/pi/model/msyh.ttc`** — the CJK font the LCD renders with.
+Flash **Raspberry Pi OS Lite, 64-bit (trixie)** with Raspberry Pi Imager — the running card is the
+`2025-12-04` reference release (`/etc/rpi-issue`), any later trixie Lite is fine. In Imager's
+OS-customisation:
+
+- hostname **`raspberrypi`**, user **`pi`** (the services and paths assume `/home/pi`)
+- SSH **on, public-key only**, pasting the workstation's key (`~/.ssh/id_ed25519.pub`, comment
+  `marc@marc-6000`)
+- WiFi: leave it to step 5, but set **wireless country `US`** (it lands on the kernel cmdline as
+  `cfg80211.ieee80211_regdom=US`)
+
+After first boot: the alias `rider` keeps working if the router hands the same address to the
+same WiFi MAC; the host key changes, so on the workstation run `ssh-keygen -R <the rider address>`
+once. Find the address with `ssh -G rider | grep -i '^hostname'` — never hardcode it in source.
+
+Two things the project needs that are **not** on PyPI or apt:
+
+- **`xgoscreen`** — the 2-inch LCD driver (`LCD_2inch.py`, an ST7789 SPI driver, + two stub files).
+  **It is not on PyPI and not in either vendor tree.** Copies: the original card, and
+  `vendor/xgoscreen/` in this repo's working tree (pulled off the card 2026-10-19; gitignored
+  because its license is unknown and this repo is public). Installed in step 7.
+- **`/home/pi/model/msyh.ttc`** — the font the LCD renders with. It is **just a symlink** to the
+  apt font `fonts-wqy-microhei` (step 9), not a file from any image.
 
 Hardware target: **Compute Module 5** on an `XGO-CM4-V1.1` carrier. Reach it as `ssh rider`
 (set the alias's `HostName` once; never hardcode the IP). Full hardware map: [`HARDWARE.md`](HARDWARE.md).
+
+## 0. apt packages
+
+Everything the services and venvs need from Debian (from the card's apt history, filtered to what
+`pi/*.py` actually imports; `smbus2`/`vl53l5cx-ctypes`/`pygame` come from pip in step 7):
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git python3-pip python3-venv python3-dev build-essential \
+  i2c-tools python3-smbus swig python3-lgpio liblgpio-dev \
+  mosquitto mosquitto-clients python3-paho-mqtt \
+  python3-picamera2 python3-opencv python3-pygame \
+  fonts-wqy-microhei
+```
+
+`python3-picamera2` + `python3-opencv` must be the **apt** builds (libcamera bindings); `xgovenv`
+sees them through `--system-site-packages`. (The card also had `pyaudio`/`espeak-ng`/`vosk` from
+an earlier voice experiment — nothing in `pi/` uses them; leave them out.)
 
 ## 1. Kernel
 
@@ -46,12 +83,32 @@ Running **`6.18.39+rpt-rpi-2712`**, no apt holds. If the flashed image is older,
 the `algif_aead` block installed in step 4 — is in [`SECURITY_COPYFAIL.md`](SECURITY_COPYFAIL.md).
 Do **not** re-hold the kernel: the old DS4 hold was an ERTM problem, not a kernel one (see step 8).
 
-## 2. Serial / UART
+## 2. Boot config: serial, buses, audio, camera
 
 `rider-bridge` owns `/dev/ttyAMA0` as the single link to the ESP32, so the serial **console**
 must be off: no `console=ttyAMA0,...` in `/boot/firmware/cmdline.txt`, and
 `serial-getty@ttyAMA0` disabled. `sudo raspi-config` → Interface → Serial → login shell **no**,
 hardware **yes**. Verify: `grep ttyAMA0 /boot/firmware/cmdline.txt` returns nothing.
+
+The hardware interfaces live in **`/boot/firmware/config.txt`**. These are the lines on the
+running card that differ from the stock Lite image (without them the LCD, ToF sensor, WM8960
+beeper and camera are all dead). Add/ensure, in the top `[all]` section:
+
+```ini
+dtparam=i2c_arm=on
+dtparam=spi=on
+dtparam=audio=on
+enable_uart=1
+gpu_mem=128
+dtoverlay=i2s-mmap
+dtoverlay=wm8960-soundcard
+camera_auto_detect=0
+dtoverlay=ov5647,cam0
+```
+
+and keep `otg_mode=1` under `[cm5]` (stock). Reboot, then verify: `ls /dev/i2c-1 /dev/spidev0.0`,
+`aplay -l | grep wm8960`, `rpicam-hello --list-cameras` or `python3 -c "from picamera2 import
+Picamera2; print(Picamera2.global_camera_info())"` shows the ov5647.
 
 ## 3. Group memberships (user `pi`)
 
@@ -113,10 +170,13 @@ Two venvs. `deploy_bridge.sh` installs *most* deps, but assumes the venvs exist 
 heavy/vendored packages are already present. Create them and pre-seed those:
 
 ```bash
-# xgovenv -- bridge, joystick, camera, tof-safety. xgoscreen is vendored (see Baseline).
+# xgovenv -- bridge, joystick, camera, tof-safety. xgoscreen is NOT on PyPI (see Baseline).
 python3 -m venv --system-site-packages /home/pi/xgovenv
-/home/pi/xgovenv/bin/pip install paho-mqtt lgpio rpi-lgpio pyserial psutil pillow pygame
-#   pygame = the DS4 joystick reader; the rest deploy also installs (idempotent).
+/home/pi/xgovenv/bin/pip install paho-mqtt lgpio rpi-lgpio pyserial psutil pillow pygame spidev
+#   pygame = the DS4 joystick reader; spidev = the LCD driver's SPI; the rest deploy also installs.
+# the LCD driver, from the workstation's repo working tree:
+#   scp -r vendor/xgoscreen rider:/home/pi/xgovenv/lib/python3.13/site-packages/
+#   (adjust python3.13 to the image's Python; check: ssh rider '/home/pi/xgovenv/bin/python -c "import xgoscreen.LCD_2inch"')
 
 # tofvenv -- rider_tof.py only. vl53l5cx-ctypes builds ST's ULD + bundles ~84KB sensor fw.
 python3 -m venv /home/pi/tofvenv
@@ -127,7 +187,7 @@ Headless pygame needs `SDL_VIDEODRIVER=dummy` (already set in the joystick unit)
 
 ## 8. DS4 controller pairing
 
-Genuine DualShock 4 (VID `054C:09CC`). ERTM at **default** (step 4). To pair:
+Genuine DualShock 4 (VID `054C:09CC`, MAC `98:B6:E9:29:18:54`). ERTM at **default** (step 4). To pair:
 
 ```bash
 # clear any stale bond on the Pi AND on the workstation (it will steal the pad otherwise)
@@ -143,7 +203,8 @@ Verify: `/dev/input/js0` exists and `journalctl -u rider-joystick` shows
 
 - **`/home/pi/beep.wav`** — ships from this repo (`pi/assets/beep.wav`); `deploy_bridge.sh`
   copies it. 16 kHz mono PCM; the joystick service plays it on mode changes via the WM8960.
-- **`/home/pi/model/msyh.ttc`** — LCD font, from the stock image (Baseline).
+- **`/home/pi/model/msyh.ttc`** — LCD font. A symlink to the apt font (step 0):
+  `mkdir -p /home/pi/model && ln -sf /usr/share/fonts/truetype/wqy/wqy-microhei.ttc /home/pi/model/msyh.ttc`
 
 ## 10. Deploy the stack
 
@@ -156,6 +217,22 @@ pi/deploy_bridge.sh rider
 It installs the six units (`rider-bridge`, `-joystick`, `-camera`, `-tof`, `-tof-safety`,
 `-recorder`), copies `beep.wav`, and enables + starts everything. Full service description:
 [`BRIDGE_SETUP.md`](BRIDGE_SETUP.md).
+
+**Local deviation (2026-10-18, Marc):** `rider-tof-safety` was stopped and disabled at boot — it
+false-flagged cliffs/obstacles on a flat floor. The deploy re-enables it; disable it again
+(`sudo systemctl disable --now rider-tof-safety`) until that is fixed. See `docs/HANDOFF.md`.
+
+## Card upkeep
+
+- **TRIM.** On 2026-10-19 the card had slowed to 22 MB/s sequential / ~560 small reads per second and
+  a 19 s boot; one `sudo fstrim -v /` (18.5 GiB trimmed — it had evidently never run) brought it back
+  to 40 MB/s / ~1830 reads/s and an 8 s boot. The stock weekly `fstrim.timer` only fires while the Pi
+  is on, which the robot rarely is for long — run `sudo fstrim -v /` by hand now and then.
+- **`/home/pi/riderlog.txt`** (the always-on recorder) is never rotated; it reached 966 MB. Archive
+  it to the workstation (`ssh rider 'gzip -c riderlog.txt' > data/…`, `data/` is gitignored) and
+  clear it with `sudo truncate -s 0` (root-owned, the unit appends, so it keeps writing).
+- **Under-voltage** is logged on every boot (5–34 events) — a 5 V supply issue on the carrier,
+  unrelated to the card, but brown-outs during writes are how SD cards get corrupted.
 
 ## Verify the rebuild
 

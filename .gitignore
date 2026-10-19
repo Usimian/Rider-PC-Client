@@ -10,6 +10,8 @@ __pycache__/
 # re-fetchable from upstream; see README "External assets" for source + version. NOT tracked:
 # this repo is PUBLIC and the CM4 repo carries no license file.
 /vendor/
+# Archived robot logs (e.g. the Pi's riderlog.txt, pulled off before a card swap) -- bulky, local only
+/data/
 # Backup archives
 *.tar.gz
 # Flash / servo dumps (transient, regenerable)

@@ -42,6 +42,28 @@ filters/gains were tuned at 163 — try `loopus 6000` first. Also: LQR drive lag
   end-to-end height while balancing, both legs answer, STOP limps both, rfail 0 %. **Watch for a
   recurrence** — a single run is not proof. Free stuck legs with a power cycle.
 
+## Pi boot / SD card baseline (2026-10-19, MEASURED)
+
+- Boot 2026-10-19 was slow: systemd total 19.0 s (kernel 4.3 + userspace 14.7) vs 7.7-8.1 s on the
+  five boots before; slowdown spread across everything (storage-like), no SD errors logged.
+- SD card read test right after: **21.9 MB/s sequential (4 MB direct), 2.3 MB/s = ~560 IOPS at 4 KB**.
+  No earlier baseline, so "degrading" is unproven. Re-measure on the next slow boot.
+- **Under-voltage on every boot** (5-34 events/boot, first ~6 s in) — long-standing, not new; 5 V
+  rail reads 4.94 V at idle. Worth fixing (SD writes during brown-outs are a corruption risk).
+- `/home/pi/riderlog.txt` (always-on recorder) is 919 MB and never rotated.
+- **Fixed same morning, no card swap:** `fstrim` (18.5 GiB trimmed — never ran) + log archived to
+  `data/riderlog_2026-10-19.txt.gz` (gitignored, sha-verified) and truncated. After: 40.1 MB/s,
+  ~1830 reads/s, boot 8.1 s (software reboot) and **8.2 s from a cold power-on**. Upkeep notes are in
+  `PI_HOST_SETUP.md` → "Card upkeep"; that guide was corrected from an inventory of the card.
+
+## Robot state NOT in the repo (2026-10-18)
+
+- **`rider-tof-safety` is stopped AND disabled at boot** on the Pi (Marc's call). It was false-
+  flagging cliffs/obstacles on a flat floor and cutting forward speed 78-86 %, wrecking drive tests.
+  The ToF publisher (`rider-tof`) still runs. `pi/deploy_bridge.sh` still enables it, so **any
+  redeploy turns it back on** — re-disable, or decide in the repo. Fix the false triggers before
+  re-enabling (suspects: body height / lean changing the floor reference).
+
 Marc's recollection of the factory firmware (for step 3 below): full-stick forward had a
 **slow start, then reached a decent speed** — consistent with its heavy input filter and
 rate-limited accumulating wheel command. That ramp is the target feel.
