@@ -17,7 +17,8 @@ Mapping:
   Cross (X)           -> balance controller = LQR        (firmware 'ctrl 1')  } is OFF; LCD shows it
   Square (#)          -> toggle roll-leveling (IMU-roll differential legs; level 1/0)
   Circle (O)          -> reset position (poszero) without dropping balance
-  Share               -> toggle balance (en 1 / en 0); off = stop (no separate e-stop)
+  Share               -> BALANCE / STOP: idle -> en 1; balancing -> en 0 + leglimp (legs limp too),
+                         the same stop as the LCD upper-left button and the web page's E-STOP
   Options             -> toggle joystick <-> computer drive
 
 Run normally:  /home/pi/xgovenv/bin/python rider_controller.py
@@ -42,6 +43,10 @@ def _shutdown(*_a):
 BROKER, PORT = "localhost", 1883
 TOPIC_CMD, TOPIC_STATUS = "rider/control/line", "rider/status"
 TOPIC_FWDLIMIT = "rider/safety/fwd_limit"  # ToF safety governor -> forward-speed factor (rider_tof_safety.py)
+TOPIC_MAXSPEED = "rider/control/maxspeed"  # RETAINED {"mps": v}: full-stick speed, set by the web page's slider.
+                                           # Scales the whole stick range (stays proportional); capped at MAX_SPEED
+                                           # (= the firmware's gPosVmax) -- going faster needs both raised.
+MIN_SPEED = 0.05
 
 # --- mapping (verify indices with --test, then adjust) ---
 AXIS_DRIVE = 1       # left stick Y (stick up = negative)
@@ -83,7 +88,8 @@ def beep(n):
     except Exception:
         pass
 
-state = {"en": 0, "pos": 0.0, "fwd_factor": 1.0}  # fwd_factor: ToF safety cap (1=clear..0=stop)
+state = {"en": 0, "pos": 0.0, "fwd_factor": 1.0,   # fwd_factor: ToF safety cap (1=clear..0=stop)
+         "max_speed": MAX_SPEED}                     # full-stick speed (m/s), from TOPIC_MAXSPEED
 
 
 def on_message(client, userdata, msg):
@@ -94,6 +100,13 @@ def on_message(client, userdata, msg):
     if msg.topic == TOPIC_FWDLIMIT:                 # ToF governor: forward-speed factor
         try:
             state["fwd_factor"] = max(0.0, min(1.0, float(p["factor"])))
+        except Exception:
+            pass
+        return
+    if msg.topic == TOPIC_MAXSPEED:                 # web page's top-speed slider (retained)
+        try:
+            state["max_speed"] = max(MIN_SPEED, min(MAX_SPEED, float(p["mps"])))
+            print("top speed -> %.2f m/s" % state["max_speed"], flush=True)
         except Exception:
             pass
         return
@@ -119,6 +132,7 @@ def main():
     def _on_connect(c, u, flags, rc, properties=None):
         c.subscribe(TOPIC_STATUS)
         c.subscribe(TOPIC_FWDLIMIT)
+        c.subscribe(TOPIC_MAXSPEED)
     mqc.on_connect = _on_connect
     mqc.reconnect_delay_set(min_delay=1, max_delay=10)
     mqc.connect(BROKER, PORT, keepalive=30)
@@ -195,9 +209,9 @@ def main():
             cur = buttons[idx] if idx < len(buttons) else 0
             return cur and not prev_btn.get(idx, 0)
 
-        if edge(BTN_BALANCE):                  # Share: balance on/off (toggling off = stop)
+        if edge(BTN_BALANCE):                  # Share: BALANCE / STOP
             if state["en"]:
-                send("en 0")
+                send("en 0"); send("leglimp")  # STOP = balance off + legs limp -- same as the LCD button + web E-STOP
             else:
                 send("en 1")                       # firmware homes the target on enable
         for btn, c, name in ((BTN_CTRL_POLICY, 0, "POLICY"), (BTN_CTRL_LQR, 1, "LQR")):
@@ -244,7 +258,7 @@ def main():
             # the hold-home the instant it returns to 0 (-> drives smooth, stops where you let
             # go, no windup/overshoot). 'ptgt' position moves are still honored separately.
             d = dz(-axes[AXIS_DRIVE]) if AXIS_DRIVE < len(axes) else 0.0   # stick up = forward
-            vel = d * MAX_SPEED
+            vel = d * state["max_speed"]                # full stick = the web page's top speed
             if vel > 0.0:                       # ToF safety governor: cap FORWARD only (reverse = escape)
                 vel *= state["fwd_factor"]
             # send on meaningful change (incl. return to 0) OR as a periodic heartbeat
