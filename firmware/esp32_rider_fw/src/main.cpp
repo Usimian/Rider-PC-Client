@@ -74,10 +74,12 @@ volatile float gLqrVx = -6.0f;      // velocity-error gain (damping). NEGATIVE (
                                     // ~4.7mm; cliff ~-7. Capped by quantization-noisy encoder velocity -> velocity
                                     // observer (gObsA/B below) gives a cleaner v -> allows more damping. 'lqrvx'.
 volatile float gLqrQ  = 32.0f;      // pitch-error gain (factory 32) -- balances; sign matches our working PD
-volatile float gLqrVRef   = 1.0f;   // LQR speed reference scale: vel_est units per m/s of vdes. 1 = legacy (unit
-                                    // mismatch); ~270 = matched (MEASURED 2026-10-18). 'lqrvref'
+volatile float gLqrVRef   = 270.0f; // LQR speed reference scale: vel_est units per m/s of vdes. 270 = matched
+                                    // (MEASURED 2026-10-18; default since 2026-10-19, floor-verified with lqrcff);
+                                    // 1 = the old unit-mismatched drive. 'lqrvref'
 volatile float gLqrAccLean = 0.0f;  // LQR acceleration lean, deg per m/s^2 of commanded accel (0 = off; physics ~5.8). 'lqracclean'
-volatile float gLqrCmdFF  = 0.0f;   // LQR wheel-command feedforward, cmd per m/s of vdes (0 = off; ~360). 'lqrcff'
+volatile float gLqrCmdFF  = 360.0f; // LQR wheel-command feedforward, cmd per m/s of vdes (360 = loaded-wheel fit,
+                                    // default since 2026-10-19; 0 = off). 'lqrcff'
 volatile float gLqrInLP   = 0.0f;   // FACTORY input filter on the LQR's pitch + rate: per-cycle LP coefficient
                                     // (0 = off = June LQR; factory R-1.1.3 = 0.95 at 167 Hz). 'lqrinlp'
 volatile float gLqrInSlew = 5.0f;   // slew limit on the filtered pitch, deg/cycle (factory 5; 0 = none). 'lqrinslew'
@@ -154,15 +156,18 @@ volatile float gPosIntBand = 0.15f; // only integrate within this dist of target
 volatile float gPosDeadband= 0.012f;// hold dead-band (m): when settled within this of target, STOP chasing the
                                     // exact center (P off, I frozen, D kept) so the loop can't limit-cycle against
                                     // wheel stiction -> robot sits STILL instead of hunting. 0=off. live-tune 'posdb'
-volatile float gPosVmax    = 0.25f; // move speed cap (m/s): full-stick drive speed. ->0.25 (2026-06-19, LQR): allow
+volatile float gPosVmax    = 0.30f; // move speed cap (m/s): full-stick drive speed. ->0.30 (2026-10-19, Marc; matches the
+                                    // joystick's MAX_SPEED). ->0.25 (2026-06-19, LQR): allow
                                     // real drive speeds now that the lean-FF (gDriveFF) gives drive authority. The cap
                                     // only bounds the target ramp; no motion without a command. live-tune via 'posvmax'.
-volatile float gPosVmaxBack= 0.25f; // BACKWARD speed cap (m/s). matched to forward.
+volatile float gPosVmaxBack= 0.30f; // BACKWARD speed cap (m/s). matched to forward (0.30 since 2026-10-19).
                                     // (the +setpoint lean + ppo_v_pure's forward cruise make backward the "against"
                                     // direction -> the balance policy saturates ~23% at full speed = the shimmy).
                                     // Matching the demand to the headroom (lower cap backward) keeps it out of the
                                     // rail. Drive-shaping fix for the cruise-bias asymmetry. live-tune via 'posvmaxb'
-volatile float gPosAmax    = 0.8f;  // accel cap (m/s^2) on the drive-velocity ramp: gentle accel kills the lurch/oscillation. live-tune via 'posamax'
+volatile float gPosAmax    = 0.4f;  // accel cap (m/s^2) on the drive-velocity ramp: gentle accel kills the lurch/oscillation.
+                                    // 0.8 -> 0.4 (2026-10-19): with the matched LQR speed reference, 0.8 made starts lean
+                                    // 9-10 deg; 0.4 cut that by ~1/3 (floor). Applies to the policy's drive ramp too. 'posamax'
 volatile float gTurn       = 0.0f;  // wheel differential (raw) ADDED to both wheel cmds -> yaw. Computed by the yaw-rate controller each loop.
 volatile float gTurnMax    = 250.0f;// clamp on |gTurn| (raw)
 volatile float gWheelDZ    = 5.0f;  // per-wheel anti-stiction floor (raw), applied DURING TURNS only: keeps
