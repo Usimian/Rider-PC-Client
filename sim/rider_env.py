@@ -21,8 +21,9 @@ from rider_model import build_mjcf
 # is exactly the payoff of the bench characterization. Friction stays wide (real
 # floor traction is still unknown).
 DR_RANGES = {
-    "vel_gain":       (0.85, 1.15),    # cmd->velocity gain (vel_max multiplier) about the LOADED nominal 27 rad/s
-                                       # (2026-09-16 floor drivecap: 0.9x unloaded; unloaded 30 rad/s = 1.11 here)
+    "vel_gain":       (0.80, 1.20),    # cmd->velocity gain (vel_max multiplier) about the MEASURED loaded nominal
+                                       # 18.1 rad/s (2026-10-19 floor ground speed; per-window scatter 0.86-1.15 of
+                                       # it at 7.3-7.7 V, plus battery: a full pack is stronger, a low one weaker)
     "actuator_tau_s": (0.010, 0.018),  # tight around measured 13 ms
     "latency_s":      (0.000, 0.010),  # 0-2 control steps around the 2026-09-16 calibrated ONE step (sim cross-corr
                                        # lag == robot's 30-35 ms) -> ~20-40 ms effective so the policy learns real
@@ -32,6 +33,8 @@ DR_RANGES = {
                                        # v ~= 0.9*(cmd-35)); unloaded bench was 0.09. Wide: stick-slip varies.
     "mass_scale":     (0.85, 1.15),    # mass measured -> tighter
     "wheel_friction": (0.6, 1.5),      # real-floor traction unknown -> wide
+    "accel_couple":   (-1.1, -0.6),    # accelerometer-reads-acceleration gain (sim frame) about the MEASURED -0.85
+                                       # (2026-10-19 recorder fits +0.66..+0.97 robot frame); see rider_params
 }
 
 CONTROL_RATE_HZ = (180.0, 260.0)   # per-episode control-rate DR. MEASURED 2026-09-16 after the wheel-read
@@ -47,6 +50,9 @@ class FirmwareSensing:
                     (wheel relative to the body -- NOT ground speed; it omits the r*pitch_rate term)
       * wheel_vel = that same filtered signal / r  (the firmware feeds xvelP/POL_WHEEL_R)
       * pitch rate = LP(fw_rate_lp) of the gyro
+      * pitch     = the firmware's complementary filter: accelerometer pitch (which ALSO reads the chassis
+                    acceleration, accel_couple * atan(a/g)) blended at 1/(|gyro deg/s|+200) per cycle into the
+                    gyro-integrated pitch (2026-10-19; before, the policy saw the true pitch)
     Per-cycle coefficients (they scale with the control rate), exactly as the firmware runs them.
     All ops are linear or odd-symmetric (round), so mirror_aug stays exact.
     """
@@ -54,13 +60,27 @@ class FirmwareSensing:
     def __init__(self, p: RiderParams):
         self.p = p
         self.q_step = 2.0 * np.pi / p.encoder_counts_per_rev
+        self.couple = p.accel_couple   # per-episode (env DR overrides it)
         self.reset(0.0)
 
-    def reset(self, wheel_angle: float):
+    def reset(self, wheel_angle: float, pitch: float = 0.0, x_vel: float = 0.0):
         self.prev_x = self._enc_x(wheel_angle)
         self.xvelP = 0.0          # firmware xvelP (polInit zeroes it)
         self.rate_f = 0.0         # firmware dqf
         self.xvel_raw = 0.0       # last differenced encoder velocity (drive loop's input)
+        self.theta = pitch        # firmware theta (primed from the accelerometer; still at reset)
+        self.prev_xv = x_vel      # chassis velocity at the last read (-> the accelerometer's a)
+
+    def fuse_pitch(self, pitch: float, gyro_rate: float, x_vel: float, dt: float, acc_noise: float = 0.0):
+        """The firmware's pitch fusion (main.cpp theta), radians in the sim frame. The accelerometer pitch is
+        the true pitch plus couple*atan(a/g) for the chassis acceleration a (+ noise); the gyro rate is the
+        raw (unfiltered) rate the firmware integrates."""
+        a = (x_vel - self.prev_xv) / dt
+        self.prev_xv = x_vel
+        pit_acc = pitch + self.couple * np.arctan2(a, 9.81) + acc_noise
+        pf = 1.0 / (abs(np.degrees(gyro_rate)) + 200.0)
+        self.theta = pf * pit_acc + (1.0 - pf) * (self.theta + gyro_rate * dt)
+        return self.theta
 
     def _enc_x(self, wheel_angle: float) -> float:
         return np.round(wheel_angle / self.q_step) * self.q_step * self.p.wheel_radius_m
@@ -82,9 +102,18 @@ class FirmwareSensing:
 # (a pure balance-in-place policy has no forward-drive authority -> falls at full stick).
 DRIVE_K, DRIVE_KI, DRIVE_KD = 20.0, 1.0, 10.0   # gPosHoldK / gPosHoldKi / gDriveKd (MOVING regime)
 DRIVE_POSMAX_DEG = 5.0                           # gPosHoldMax (setpoint-bias clamp, deg)
-DRIVE_AMAX  = 0.8                                 # gPosAmax  (accel cap m/s^2)
-DRIVE_VMAX  = 0.25                                # gPosVmax  (full-stick speed cap m/s)
+DRIVE_AMAX  = 0.4                                 # gPosAmax  (accel cap m/s^2) -- 0.8 -> 0.4 fw default 2026-10-19
+DRIVE_VMAX  = 0.30                                # gPosVmax  (full-stick speed cap m/s) -- 0.25 -> 0.30 2026-10-19
+DRIVE_TRAIN_VMAX = 0.35                           # training samples cruise speeds up to this: margin over the fw cap
 DRIVE_VELLP = 0.9                                 # gPosVelLP (LP on velocity feeding the D term)
+# HOLD integral (main.cpp posErrInt): integrates position error while HOLDING (target settled, within
+# gPosIntBand, outside the gPosDeadband), clamped to gPosHoldMax/gPosHoldKi; it cancels the policy's own
+# command bias at rest. Since 2026-10-18 it is KEPT (frozen) through a stick drive. Before 2026-10-19 the
+# training env never integrated it at all (always 0) -- unlike every real drive, which starts from a hold.
+DRIVE_INTBAND  = 0.15                             # gPosIntBand (m)
+DRIVE_DEADBAND = 0.012                            # gPosDeadband (m)
+DRIVE_KILIM    = DRIVE_POSMAX_DEG / DRIVE_KI      # integral clamp (m*s)
+DRIVE_HOLD_S   = (1.0, 2.5)                       # drive episodes start with a hold this long (real use: hold, then drive)
 _DEG2RAD    = 0.017453292
 
 
@@ -260,10 +289,16 @@ class RiderBalanceEnv(gym.Env):
         obs, which both consume it (the firmware reads the wheels once, then derives xvel for the
         drive-loop bias and the policy from that same read). Stores (pitch, rate, x_vel, wheel_vel)."""
         pitch, pitch_rate, x, x_vel, wheel_vel = self._raw_state()
+        acc_noise = 0.0
         if self.add_noise:
             d2r = np.pi / 180.0
-            pitch += np.random.normal(0, self.p.accel_pitch_noise_deg * d2r)
+            acc_noise = np.random.normal(0, self.p.accel_pitch_noise_deg * d2r)
             pitch_rate += np.random.normal(0, self.p.gyro_noise_dps * d2r)
+        if self.fw_obs:
+            # the accelerometer noise enters through the fusion (heavily filtered), as on the robot
+            pitch = self.sense.fuse_pitch(pitch, pitch_rate, x_vel, self.ctrl_dt, acc_noise)
+        else:
+            pitch += acc_noise
         if self.fw_obs:
             # What the firmware feeds the policy: encoder-differenced + LP'd velocity, LP'd gyro rate.
             # (The 2026-06 'qnoise' experiment trained on quantized-but-UNfiltered velocity and hurt
@@ -290,6 +325,8 @@ class RiderBalanceEnv(gym.Env):
             return
         dt = self.ctrl_dt
         x = float(self.data.qpos[self.q_x])
+        if self._steps >= self._drive_start_step:              # hold first, then the stick goes over
+            self._vdes_cmd = self._drive_cmd
         dv = DRIVE_AMAX * dt                                   # accel-cap the commanded velocity ramp
         if self._vdes_cmd > self._vdes_s + dv:   self._vdes_s += dv
         elif self._vdes_cmd < self._vdes_s - dv: self._vdes_s -= dv
@@ -301,14 +338,18 @@ class RiderBalanceEnv(gym.Env):
         self._xvelF = DRIVE_VELLP * self._xvelF + (1.0 - DRIVE_VELLP) * xvel
         if abs(self._vdes_cmd) > 0.001:
             # STICK DRIVE (main.cpp): the target tracks wheel_x every cycle (posErr == 0) and the hold
-            # integral is zeroed, so the lean is the velocity-D term ONLY: KD*(xvelF - vdes), <= 2.5 deg
-            # at full stick. (Before 2026-09-16 the sim let the target run away and leaned up to 5 deg
-            # on the P term -- authority the firmware never gives; it hid a policy's command bias.)
+            # integral is FROZEN (kept, not zeroed -- fw 2026-10-18), so the lean is the velocity-D term
+            # plus the integral's bias cancel. (Before 2026-09-16 the sim let the target run away and
+            # leaned up to 5 deg on the P term -- authority the firmware never gives.)
             self._tgt_eff = x
-            self._posErrInt = 0.0
             posErr = 0.0
         else:
             posErr = x - self._tgt_eff
+            inband = abs(posErr) < DRIVE_DEADBAND
+            if abs(posErr) < DRIVE_INTBAND and not inband and abs(self._vdes_s) < 1e-6:
+                self._posErrInt = float(np.clip(self._posErrInt + posErr * dt, -DRIVE_KILIM, DRIVE_KILIM))
+            if inband:
+                posErr = 0.0
         bias_deg = float(np.clip(DRIVE_K * posErr + DRIVE_KI * self._posErrInt
                                  + DRIVE_KD * (self._xvelF - self._vdes_s),
                                  -DRIVE_POSMAX_DEG, DRIVE_POSMAX_DEG))
@@ -333,6 +374,7 @@ class RiderBalanceEnv(gym.Env):
                      deadband_frac=u(*DR_RANGES["deadband_frac"]),
                      latency_s=u(*DR_RANGES["latency_s"]))
         self.act = ActuatorModel(ep, self.ctrl_dt)
+        self.sense.couple = u(*DR_RANGES["accel_couple"])
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -350,17 +392,23 @@ class RiderBalanceEnv(gym.Env):
         self.data.qvel[self.d_pitch] = self.np_random.uniform(-0.20, 0.20)
         mujoco.mj_forward(self.model, self.data)
         self.act.reset()
-        self.sense.reset(float(self.data.qpos[self.q_wheel]))
+        self.sense.reset(float(self.data.qpos[self.q_wheel]), float(self.data.qpos[self.q_pitch]),
+                         float(self.data.qvel[self.d_x]))
         self._steps = 0
         self._prev_a = 0.0
         self._pitch_int = 0.0
         self._x_int = 0.0
         self._bias_rad = 0.0
         if self.drive_train:
-            # 40% HOLD (vdes=0), 60% DRIVE at a random speed up to full-stick, both signs -- so the
-            # policy learns balance AND driving. The setpoint-tilt loop below turns this into a lean.
+            # 40% HOLD (vdes=0), 60% DRIVE at a random speed up to DRIVE_TRAIN_VMAX (margin over the fw
+            # cap), both signs -- so the policy learns balance AND driving. Drive episodes HOLD first for
+            # DRIVE_HOLD_S (the hold integral builds, as on the robot), then the stick goes over: the
+            # start from a standstill is where the 2026-10-19 policy falls happened.
             x0 = float(self.data.qpos[self.q_x])
-            self._vdes_cmd = 0.0 if self.np_random.uniform() < 0.4 else float(self.np_random.uniform(-DRIVE_VMAX, DRIVE_VMAX))
+            self._drive_cmd = 0.0 if self.np_random.uniform() < 0.4 else \
+                float(self.np_random.uniform(-DRIVE_TRAIN_VMAX, DRIVE_TRAIN_VMAX))
+            self._drive_start_step = int(self.np_random.uniform(*DRIVE_HOLD_S) / self.ctrl_dt)
+            self._vdes_cmd = 0.0
             self._tgt_eff = x0; self._vdes_s = 0.0; self._xvelF = 0.0; self._prevX = x0; self._posErrInt = 0.0
         self.mirror = (1.0 if self.np_random.uniform() < 0.5 else -1.0) if self.mirror_aug else 1.0
         self._sense()
@@ -394,7 +442,8 @@ class RiderBalanceEnv(gym.Env):
         self._prev_a = a
         # accumulate integral state (clamped to prevent windup)
         ci, cx = self._int_clip
-        self._pitch_int = float(np.clip(self._pitch_int + (pitch + self._bias_rad) * self.ctrl_dt, -ci, ci))
+        p_fed = self.last_sensed[0] if self.fw_obs else pitch   # the robot's polIpitch integrates the FUSED pitch
+        self._pitch_int = float(np.clip(self._pitch_int + (p_fed + self._bias_rad) * self.ctrl_dt, -ci, ci))
         self._x_int = float(np.clip(self._x_int + (x - self.target_x) * self.ctrl_dt, -cx, cx))
         terminated = bool(fell)
         truncated = self._steps >= self.max_steps

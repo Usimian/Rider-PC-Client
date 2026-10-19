@@ -19,7 +19,6 @@ bias_rad (a negative bias => the policy leans the body +pitch => drives +x).
 Run:  ./.venv/bin/python drive_sim.py [policy ...] [--legacy_obs] [--both] [--accel]
       (default policy ppo_mc_l4a = flashed; --both runs fw and legacy sensing side by side)
 """
-import sys
 import argparse
 import numpy as np
 from collections import deque
@@ -30,10 +29,12 @@ from rider_params import DEFAULT
 # --- firmware drive gains (main.cpp POLICY defaults, reconciled 2026-08-13) ---
 K, KI, KD = 20.0, 1.0, 10.0         # gPosHoldK (poshold) / gPosHoldKi (poshi) / gDriveKd (drivekd, MOVING regime)
 POSMAX_DEG = 5.0                    # gPosHoldMax: setpoint-bias clamp (deg)
-AMAX = 0.8                          # gPosAmax: accel cap (m/s^2)
+AMAX = 0.4                          # gPosAmax: accel cap (m/s^2) -- 0.8 -> 0.4 fw default 2026-10-19
 VEL_LP = DEFAULT.fw_drive_vel_lp    # gPosVelLP: LP on velocity feeding the D term
 INTBAND = 0.15                      # gPosIntBand: integrate only within this of the FINAL target
-VMAX = 0.25                         # gPosVmax = gPosVmaxBack (full stick, both directions, main.cpp)
+DEADBAND = 0.012                    # gPosDeadband: no P term / no integration this close to the hold target
+VMAX = 0.30                         # gPosVmax = gPosVmaxBack (full stick, both directions) -- 0.25 -> 0.30 2026-10-19
+HOLD_S = 1.5                        # stick runs start from a HOLD this long (the hold integral builds, as on the robot)
 DEG2RAD = 0.017453292
 WHEEL_R = 0.03
 
@@ -50,19 +51,22 @@ def load_policy(name):
     return infer
 
 
-G = 9.81
-
-
-def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=0.0, latency_s=None, fw_obs=True, params=None,
-             stick=True):
-    """accel_couple: gain on the accelerometer-during-acceleration pitch corruption.
+def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s=None, fw_obs=True, params=None,
+             stick=True, hold_s=HOLD_S, pitch_offset_deg=0.0):
+    """accel_couple: override the accelerometer-reads-acceleration gain (default rider_params, MEASURED);
+    the firmware's pitch fusion lives in rider_env.FirmwareSensing, so it applies with fw_obs only.
     latency_s: override the actuator pure-delay (default = rider_params, the measured on-robot value).
     fw_obs: firmware sensing path (default) vs clean physics state (legacy).
     params: full RiderParams override (sweeps); latency_s still applies on top of it.
-    stick: model the joystick drive (D-only lean, firmware default) vs a 'ptgt' distance move (P-term lean)."""
+    stick: model the joystick drive (D-only lean, firmware default) vs a 'ptgt' distance move (P-term lean).
+    hold_s: stick runs HOLD this long first (hold integral builds), then full stick; the integral is
+    then KEPT through the drive (fw 2026-10-18), as on the robot.
+    pitch_offset_deg: constant error in the policy's pitch (balance setpoint 'set' vs the true balance point)."""
     p = params or DEFAULT
     if latency_s is not None:
         p = replace(p, latency_s=latency_s)
+    if accel_couple is not None:
+        p = replace(p, accel_couple=accel_couple)
     env = RiderBalanceEnv(params=p, add_noise=False, frame_stack=1, fw_obs=fw_obs)   # stacked obs built here
     env.reset(seed=seed)
     dt = env.ctrl_dt
@@ -70,50 +74,57 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=0.0, latency_s=
     x0 = x
     tgt = x0 + direction * 5.0                              # far target => cruise at vmax the whole run
     tgt_eff = x0; vdes_s = 0.0; xvelF = 0.0; prevX = x0; pint = 0.0; pint_pos = 0.0
-    theta_filt = pitch; prev_xv = x_vel                    # complementary-filter state + accel calc
     stack = deque(maxlen=2)
     log = []
     n = int(T / dt)
     fell_t = None
     for i in range(n):
         pitch, prate_true, x, x_vel_true, wheel_vel_true = env._raw_state()
-        # sensed values: env._sense() ran at the end of the previous step (firmware order)
-        _, prate, x_vel, wheel_vel = env.last_sensed
-        # --- sensing model: optionally corrupt pitch like the real IMU ---
-        if accel_couple != 0.0:
-            a_x = (x_vel_true - prev_xv) / dt               # cart horizontal accel (m/s^2)
-            pit_acc = pitch + accel_couple * np.arctan2(a_x, G)   # accelerometer can't separate tilt from accel
-            pf = 1.0 / (abs(np.degrees(prate_true)) + 200.0)      # firmware rate-adaptive accel weight (~0.005)
-            theta_filt = pf * pit_acc + (1 - pf) * (theta_filt + prate_true * dt)
-            pitch_obs = theta_filt
-        else:
-            pitch_obs = pitch
-        prev_xv = x_vel_true
+        # sensed values: env._sense() ran at the end of the previous step (firmware order); with fw_obs the
+        # pitch is the firmware's fused one (accelerometer reads the chassis acceleration too)
+        pitch_obs, prate, x_vel, wheel_vel = env.last_sensed
+        pitch_obs += pitch_offset_deg * DEG2RAD
         # drive loop's velocity: the firmware differences the ENCODER wheel_x (same read as the policy's)
         xvel = env.sense.xvel_raw if fw_obs else (x - prevX) / dt
         prevX = x
         xvelF = VEL_LP * xvelF + (1 - VEL_LP) * xvel
-        # trapezoidal profile (brake-distance capped velocity)
-        dist = tgt - tgt_eff
-        vstop = np.sqrt(2 * AMAX * abs(dist))
-        vcap = min(vmax, vstop)
-        vcmd = vcap if dist >= 0 else -vcap
         damax = AMAX * dt
-        if vcmd > vdes_s + damax: vdes_s += damax
-        elif vcmd < vdes_s - damax: vdes_s -= damax
-        else: vdes_s = vcmd
-        tgt_eff += vdes_s * dt
-        vdes = vdes_s
-        if stick and vmax > 0.0:
-            # STICK DRIVE (main.cpp): while the stick is held the target tracks wheel_x every cycle
-            # (posErr == 0) and the hold integral is zeroed -> lean = KD*(xvelF - vdes) ONLY (<= 2.5 deg
-            # at full stick). The far-target P-term cruise below (stick=False) is a 'ptgt' distance
-            # move, which leans up to 5 deg -- it hid a policy's command bias (ppo_fw_s2, 2026-09-16).
-            tgt_eff = x; pint_pos = 0.0
-        pos_err = x - tgt_eff
-        if tgt_eff == tgt and abs(pos_err) < INTBAND:
-            kiLim = POSMAX_DEG / KI if KI > 0.01 else 1e6
-            pint_pos = float(np.clip(pint_pos + pos_err * dt, -kiLim, kiLim))
+        kiLim = POSMAX_DEG / KI if KI > 0.01 else 1e6
+        if stick:
+            # STICK (main.cpp): HOLD until hold_s (target latched at x0; the hold integral builds, with
+            # the deadband), then full stick: vdes ramps at AMAX, the target tracks wheel_x every cycle
+            # (posErr 0) and the integral is FROZEN (kept -- fw 2026-10-18). Lean = KD*(xvelF - vdes)
+            # + the integral's bias cancel.
+            driving = vmax > 0.0 and i * dt >= hold_s
+            vcmd = direction * vmax if driving else 0.0
+            if vcmd > vdes_s + damax: vdes_s += damax
+            elif vcmd < vdes_s - damax: vdes_s -= damax
+            else: vdes_s = vcmd
+            vdes = vdes_s
+            if driving:
+                tgt_eff = x
+                pos_err = 0.0
+            else:
+                pos_err = x - tgt_eff
+                inband = abs(pos_err) < DEADBAND
+                if abs(pos_err) < INTBAND and not inband:
+                    pint_pos = float(np.clip(pint_pos + pos_err * dt, -kiLim, kiLim))
+                if inband:
+                    pos_err = 0.0
+        else:
+            # 'ptgt' distance move: trapezoidal profile (brake-distance capped) to a far target, P-term lean
+            dist = tgt - tgt_eff
+            vstop = np.sqrt(2 * AMAX * abs(dist))
+            vcap = min(vmax, vstop)
+            vcmd = vcap if dist >= 0 else -vcap
+            if vcmd > vdes_s + damax: vdes_s += damax
+            elif vcmd < vdes_s - damax: vdes_s -= damax
+            else: vdes_s = vcmd
+            tgt_eff += vdes_s * dt
+            vdes = vdes_s
+            pos_err = x - tgt_eff
+            if tgt_eff == tgt and abs(pos_err) < INTBAND:
+                pint_pos = float(np.clip(pint_pos + pos_err * dt, -kiLim, kiLim))
         bias_deg = np.clip(K * pos_err + KI * pint_pos + KD * (xvelF - vdes), -POSMAX_DEG, POSMAX_DEG)
         bias_rad = bias_deg * DEG2RAD
         pr_pitch = pitch_obs + bias_rad                     # setpoint-tilted (possibly accel-corrupted) pitch obs
@@ -161,7 +172,7 @@ def stats(L, fs, settle=2.0):
 
 def run_table(infer, fw_obs, accel_couples):
     for ac in accel_couples:
-        lbl = "perfect pitch" if ac == 0.0 else "accel-coupled pitch (gain %+.0f)" % ac
+        lbl = "measured accel coupling" if ac is None else "accel coupling %+.2f" % ac
         print("  -- %s sensing, %s --" % ("FIRMWARE" if fw_obs else "LEGACY (clean)", lbl))
         print("  %-14s %9s %9s %8s %7s %8s %9s %6s" %
               ("condition", "pitchStd", "rateRMS", "actRMS", "sat%", "travel", "domFreq", "fell@"))
@@ -179,10 +190,10 @@ def main():
     ap.add_argument("policies", nargs="*", default=["ppo_mc_l4a"])
     ap.add_argument("--legacy_obs", action="store_true", help="clean physics obs (pre-2026-09-16 sim)")
     ap.add_argument("--both", action="store_true", help="run firmware AND legacy sensing")
-    ap.add_argument("--accel", action="store_true", help="also run the accel-coupled pitch variants")
+    ap.add_argument("--accel", action="store_true", help="also run with NO accelerometer coupling (contrast)")
     args = ap.parse_args()
     modes = [True, False] if args.both else [not args.legacy_obs]
-    acs = (0.0, 1.0, -1.0) if args.accel else (0.0,)
+    acs = (None, 0.0) if args.accel else (None,)
     for name in args.policies:
         infer = load_policy(name)
         print("=== driving test bed: %s  (full stick %.2f m/s, %d s) ===" % (name, VMAX, 7))

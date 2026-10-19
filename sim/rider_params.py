@@ -41,9 +41,16 @@ class RiderParams:
 
     # ---------- actuator model (MEASURED 2026-06-13, bench step-response) ----------
     cmd_mode: str = "velocity"             # MEASURED  command is a velocity setpoint (settles, linear in cmd)
-    vel_max_rad_s: float = 27.0            # action=1 -> 27 rad/s LOADED (floor drivecap 2026-09-16: v ~= 0.9*(cmd-35)
-                                           # raw, i.e. 0.9x the unloaded bench gain of 1.0*(cmd-21); unloaded: 0.129
-                                           # rad/s per raw cmd unit, cmd 200 -> 22.8 rad/s = 30 rad/s at action 1)
+    vel_max_rad_s: float = 18.1            # MEASURED 2026-10-19 on the floor: GROUND speed from the encoder distance
+                                           # (wx, metres) over 140 one-second cruise windows, both controllers, battery
+                                           # 7.3-7.7 V: |v| = 2.75e-3 m/s per command unit x (|cmd| - 35), resid 1.6 cm/s
+                                           # -> vel_max = 2.75e-3*(1-0.15)*232/0.03 = 18.1 rad/s AT FULL command (the
+                                           # ActuatorModel maps action a -> (a-db)/(1-db)*vel_max). Scatter 0.68-0.91 of
+                                           # the old value -> DR vel_gain covers it. Earlier values were 27 then 22.9,
+                                           # both from the servo's REPORTED speed x a bench rad/s-per-unit scale; that
+                                           # chain was 26 % strong, so in sim ppo_fw_s9 never neared its output limit
+                                           # while on the floor it pinned it and fell. With 18.1 + accel_couple the sim
+                                           # reproduces those falls (fwd 0.30 ~2.5 s, rev 0.30 pinned; fwd 0.25 holds).
     actuator_tau_s: float = 0.013          # MEASURED  first-order lag, amplitude-independent
     deadband_frac: float = 0.15            # MEASURED 2026-09-16 LOADED, on the floor (drivecap, 7 drive episodes, both
                                            # policies): steady v ~= 0.9*(cmd-35) raw -> breakaway 35/232 = 0.15. With
@@ -87,6 +94,12 @@ class RiderParams:
     gyro_noise_dps: float = 1.0            # ESTIMATED  gyro white-noise std
     gyro_bias_drift_dps: float = 0.3       # ESTIMATED  residual bias after gcal
     accel_pitch_noise_deg: float = 0.5     # ESTIMATED  accel-derived pitch noise
+    accel_couple: float = -0.85            # MEASURED 2026-10-19 (recorder, policy drives): the firmware's accelerometer
+                                           # pitch (lever-arm compensated, the one it fuses) shifts by +0.66..+0.97 x
+                                           # atan(a/g) deg in the robot frame during chassis acceleration a -- a
+                                           # forward-accelerating robot "reads" a backward lean. Sim frame = minus that.
+                                           # The complementary filter (FirmwareSensing) lets it leak into the policy's
+                                           # pitch; without it the sim never showed the floor's ~1-1.5 Hz drive hunt.
 
     # ---------- sim integration ----------
     physics_timestep_s: float = 0.001      # 1 kHz physics
