@@ -24,7 +24,7 @@ Mapping:
 Run normally:  /home/pi/xgovenv/bin/python rider_controller.py
 Verify mapping: /home/pi/xgovenv/bin/python rider_controller.py --test
 """
-import os, sys, time, json, signal, subprocess
+import os, sys, time, json, signal, subprocess, wave
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 # pygame/SDL can't open this Pi's ALSA "default" device (error 524); we beep via aplay to the wm8960
 # by name instead, and disable pygame audio so it neither errors nor grabs a device.
@@ -82,11 +82,21 @@ LOOP_HZ = 50
 BEEP_WAV = "/home/pi/beep.wav"
 # Address the wm8960 by NAME, not card number -- ALSA indices reshuffle across reboots/kernel updates.
 BEEP_DEV = "plughw:CARD=wm8960soundcard,DEV=0"
+BEEP_GAP_S = 0.12   # silence between beeps. One aplay per beep put each aplay start-up in the gap (slow, uneven);
+                    # n beeps are now ONE wav (built once per n, cached in /tmp) played by ONE aplay.
 def beep(n):
     """n short beeps, non-blocking: 1 = joystick mode, 2 = computer mode, 3 = boot ready."""
     try:
-        subprocess.Popen(" ; sleep 0.03 ; ".join(["aplay -q -D %s %s" % (BEEP_DEV, BEEP_WAV)] * n),
-                         shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        path = "/tmp/rider_beep_%d.wav" % n
+        if not os.path.exists(path):
+            with wave.open(BEEP_WAV) as w:
+                params, tone = w.getparams(), w.readframes(w.getnframes())
+            gap = b"\0" * (int(BEEP_GAP_S * params.framerate) * params.sampwidth * params.nchannels)
+            with wave.open(path, "wb") as o:
+                o.setparams(params)
+                o.writeframes(gap.join([tone] * n))
+        subprocess.Popen(["aplay", "-q", "-D", BEEP_DEV, path],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
 
