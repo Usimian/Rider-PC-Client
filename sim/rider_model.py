@@ -16,7 +16,8 @@ def build_mjcf(p: RiderParams) -> str:
     half_track = p.track_width_m / 2.0
     wheel_mass_pair = p.wheel_mass_kg * 2.0
     r = p.wheel_radius_m
-    vmax = 1.25 * p.vel_max_rad_s      # headroom: DR vel_gain > 1 must not be clipped back to the nominal
+    vmax = 1.25 * p.vel_max_rad_s * max(1.0, p.cmd_limit)   # headroom: DR vel_gain > 1 (and a command range
+                                                             # beyond the policy's full scale) must not be clipped
     frng = p.vel_forcerange_Nm
     return f"""<mujoco model="rider_balancer">
   <option timestep="{p.physics_timestep_s}" gravity="0 0 -9.81" integrator="implicitfast"/>

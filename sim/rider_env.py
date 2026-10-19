@@ -101,7 +101,7 @@ class FirmwareSensing:
 # EXACT setpoint-tilt loop, so the policy learns to hold the driving lean at the real 34 ms delay
 # (a pure balance-in-place policy has no forward-drive authority -> falls at full stick).
 DRIVE_K, DRIVE_KI, DRIVE_KD = 20.0, 1.0, 10.0   # gPosHoldK / gPosHoldKi / gDriveKd (MOVING regime)
-DRIVE_POSMAX_DEG = 5.0                           # gPosHoldMax (setpoint-bias clamp, deg)
+DRIVE_POSMAX_DEG = 8.0                           # gPosHoldMax (setpoint-bias clamp, deg); 5 -> 8 with drive_lead (2026-10-19)
 DRIVE_AMAX  = 0.4                                 # gPosAmax  (accel cap m/s^2) -- 0.8 -> 0.4 fw default 2026-10-19
 DRIVE_VMAX  = 0.30                                # gPosVmax  (full-stick speed cap m/s) -- 0.25 -> 0.30 2026-10-19
 DRIVE_TRAIN_VMAX = 0.35                           # training samples cruise speeds up to this: margin over the fw cap
@@ -114,6 +114,12 @@ DRIVE_INTBAND  = 0.15                             # gPosIntBand (m)
 DRIVE_DEADBAND = 0.012                            # gPosDeadband (m)
 DRIVE_KILIM    = DRIVE_POSMAX_DEG / DRIVE_KI      # integral clamp (m*s)
 DRIVE_HOLD_S   = (1.0, 2.5)                       # drive episodes start with a hold this long (real use: hold, then drive)
+DRIVE_LEASH    = 0.25                             # drive_lead: the moving target stays within this of the robot (m)
+# pitch_dis: errors in the pitch the controller is fed, as MEASURED on the floor 2026-10-19 -- a balance point moved
+# by the leg height (~3 deg at the lowest legs) and a sensor drift that builds during fast turns (~2 deg).
+PDIS_OFFSET_DEG = (-4.0, 4.0)                     # per-episode constant offset
+PDIS_DRIFT_DEG  = (-3.0, 3.0)                     # turn-style drift amplitude (half of the drive episodes)
+PDIS_DRIFT_RAMP_S = 1.5                           # it builds over this, holds 1-3 s, then fades over this
 _DEG2RAD    = 0.017453292
 
 
@@ -143,7 +149,7 @@ class ActuatorModel:
             self._buf.extend([0.0] * self._buf.maxlen)
 
     def __call__(self, cmd: float) -> float:
-        cmd = float(np.clip(cmd, -1.0, 1.0))
+        cmd = float(np.clip(cmd, -self.p.cmd_limit, self.p.cmd_limit))
         if self._buf is not None:                      # pure latency
             self._buf.append(cmd)
             cmd = self._buf[0]
@@ -188,7 +194,8 @@ class RiderBalanceEnv(gym.Env):
                  domain_rand: bool = False, frame_stack: int = 1, pure_balance: bool = True,
                  mirror_aug: bool = False, vel_pen: float = 0.0, rate_dr: bool = True,
                  pos_anchor: float = 0.0, pos_weight: float = 0.75, rate_pen: float = 0.30,
-                 drive_train: bool = False, fw_obs: bool = True):
+                 drive_train: bool = False, fw_obs: bool = True, drive_lead: bool = False,
+                 pitch_dis: bool = False):
         super().__init__()
         # fw_obs: feed the policy what the FIRMWARE feeds it (FirmwareSensing: encoder-differenced +
         # low-passed velocity, low-passed pitch rate) instead of clean physics state. Default ON since
@@ -197,6 +204,12 @@ class RiderBalanceEnv(gym.Env):
         # drive_train: embed the firmware setpoint-tilt drive loop in training so the policy learns
         # forward/back drive authority (a balance-in-place policy falls at full-stick forward on HW).
         self.drive_train = drive_train
+        # drive_lead: the LQR-like stick drive (2026-10-19) -- the target ADVANCES at the commanded speed and the
+        # position P keeps acting (leashed at DRIVE_LEASH), instead of the target latching to wheel_x every cycle.
+        self.drive_lead = drive_lead
+        # pitch_dis: randomize the floor's pitch errors (moved balance point + turn drift) into the fed pitch.
+        self.pitch_dis = pitch_dis
+        self._dis_off = 0.0; self._dis_amp = 0.0; self._dis_t0 = 0.0; self._dis_hold = 0.0
         self._bias_rad = 0.0
         self.rate_pen = rate_pen   # temporal action-rate^2 weight (chatter suppressor); default 0.30 = deployed
         # pos_weight: position-error^2 penalty when NOT pure_balance (position-aware end-to-end policy).
@@ -299,6 +312,8 @@ class RiderBalanceEnv(gym.Env):
             pitch = self.sense.fuse_pitch(pitch, pitch_rate, x_vel, self.ctrl_dt, acc_noise)
         else:
             pitch += acc_noise
+        if self.pitch_dis:
+            pitch += self._pitch_dis_now()
         if self.fw_obs:
             # What the firmware feeds the policy: encoder-differenced + LP'd velocity, LP'd gyro rate.
             # (The 2026-06 'qnoise' experiment trained on quantized-but-UNfiltered velocity and hurt
@@ -336,7 +351,12 @@ class RiderBalanceEnv(gym.Env):
         xvel = self.sense.xvel_raw if self.fw_obs else (x - self._prevX) / dt
         self._prevX = x
         self._xvelF = DRIVE_VELLP * self._xvelF + (1.0 - DRIVE_VELLP) * xvel
-        if abs(self._vdes_cmd) > 0.001:
+        if abs(self._vdes_cmd) > 0.001 and self.drive_lead:
+            # LQR-LIKE STICK DRIVE: the target advanced at the ramped speed above; the robot is held to it by
+            # the position P (dragged along if more than DRIVE_LEASH away); the hold integral stays frozen.
+            self._tgt_eff = float(np.clip(self._tgt_eff, x - DRIVE_LEASH, x + DRIVE_LEASH))
+            posErr = x - self._tgt_eff
+        elif abs(self._vdes_cmd) > 0.001:
             # STICK DRIVE (main.cpp): the target tracks wheel_x every cycle (posErr == 0) and the hold
             # integral is FROZEN (kept, not zeroed -- fw 2026-10-18), so the lean is the velocity-D term
             # plus the integral's bias cancel. (Before 2026-09-16 the sim let the target run away and
@@ -354,6 +374,20 @@ class RiderBalanceEnv(gym.Env):
                                  + DRIVE_KD * (self._xvelF - self._vdes_s),
                                  -DRIVE_POSMAX_DEG, DRIVE_POSMAX_DEG))
         self._bias_rad = bias_deg * _DEG2RAD
+
+    def _pitch_dis_now(self):
+        """The pitch error (rad, real frame) at this step: the episode's offset + the turn-style drift profile."""
+        t = self._steps * self.ctrl_dt - self._dis_t0
+        r = PDIS_DRIFT_RAMP_S
+        if t <= 0.0:
+            k = 0.0
+        elif t < r:
+            k = t / r
+        elif t < r + self._dis_hold:
+            k = 1.0
+        else:
+            k = max(0.0, 1.0 - (t - r - self._dis_hold) / r)
+        return (self._dis_off + k * self._dis_amp) * _DEG2RAD
 
     def _obs(self):
         return np.concatenate(self._stack).astype(np.float32)
@@ -410,6 +444,13 @@ class RiderBalanceEnv(gym.Env):
             self._drive_start_step = int(self.np_random.uniform(*DRIVE_HOLD_S) / self.ctrl_dt)
             self._vdes_cmd = 0.0
             self._tgt_eff = x0; self._vdes_s = 0.0; self._xvelF = 0.0; self._prevX = x0; self._posErrInt = 0.0
+        if self.pitch_dis:
+            u = self.np_random.uniform
+            self._dis_off = u(*PDIS_OFFSET_DEG)
+            drive_ep = self.drive_train and abs(self._drive_cmd) > 0.0
+            self._dis_amp = u(*PDIS_DRIFT_DEG) if (drive_ep and u() < 0.5) else 0.0
+            self._dis_t0 = (self._drive_start_step * self.ctrl_dt if drive_ep else 0.0) + u(0.0, 3.0)
+            self._dis_hold = u(1.0, 3.0)
         self.mirror = (1.0 if self.np_random.uniform() < 0.5 else -1.0) if self.mirror_aug else 1.0
         self._sense()
         s = self._single_obs()

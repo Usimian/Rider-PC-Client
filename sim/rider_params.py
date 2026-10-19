@@ -51,6 +51,10 @@ class RiderParams:
                                            # chain was 26 % strong, so in sim ppo_fw_s9 never neared its output limit
                                            # while on the floor it pinned it and fell. With 18.1 + accel_couple the sim
                                            # reproduces those falls (fwd 0.30 ~2.5 s, rev 0.30 pinned; fwd 0.25 holds).
+    cmd_limit: float = 1.0                 # KNOWN  largest |command| the controller may send, in units of the policy's
+                                           # full scale (action 1 = 30 rad/s x 7.764 = 233 raw wheel-cmd, main.cpp
+                                           # POL_VELMAX_RADS). The firmware clamps every controller at gUMax 400 raw:
+                                           # the LQR uses that whole range (400/233 = 1.72), the policy only 1.0.
     actuator_tau_s: float = 0.013          # MEASURED  first-order lag, amplitude-independent
     deadband_frac: float = 0.15            # MEASURED 2026-09-16 LOADED, on the floor (drivecap, 7 drive episodes, both
                                            # policies): steady v ~= 0.9*(cmd-35) raw -> breakaway 35/232 = 0.15. With

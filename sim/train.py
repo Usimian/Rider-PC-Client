@@ -15,11 +15,12 @@ from caps_ppo import CAPS_PPO       # PPO + spatial action-smoothness (used when
 
 def make_env(domain_rand=False, frame_stack=1, vel_pen=0.0, mirror_aug=True, rate_dr=True,
              pos_anchor=0.0, pure_balance=True, pos_weight=0.75, rate_pen=0.30, drive_train=False,
-             fw_obs=True):
+             fw_obs=True, drive_lead=False, pitch_dis=False):
     return lambda: RiderBalanceEnv(add_noise=True, domain_rand=domain_rand, frame_stack=frame_stack,
                                    mirror_aug=mirror_aug, vel_pen=vel_pen, rate_dr=rate_dr, rate_pen=rate_pen,
                                    pos_anchor=pos_anchor, pure_balance=pure_balance, pos_weight=pos_weight,
-                                   drive_train=drive_train, fw_obs=fw_obs)
+                                   drive_train=drive_train, fw_obs=fw_obs, drive_lead=drive_lead,
+                                   pitch_dis=pitch_dis)
 
 
 def evaluate(model, vecnorm, frame_stack=1, n=20, fw_obs=True):
@@ -42,7 +43,6 @@ def evaluate(model, vecnorm, frame_stack=1, n=20, fw_obs=True):
 
 def summarize(results):
     stood = sum(1 for _, _, s in results if s)
-    full = [t for t, _, s in results if s]
     held = [x for _, x, s in results if s]
     import numpy as _np
     print(f"  STOOD {stood}/{len(results)}  "
@@ -72,6 +72,10 @@ if __name__ == "__main__":
                                                                # training -> policy learns forward-drive authority
     ap.add_argument("--legacy_obs", action="store_true")       # CLEAN physics obs (pre-2026-09-16 recipes). Default
                                                                # is the firmware sensing path (FirmwareSensing).
+    ap.add_argument("--drive_lead", action="store_true")       # LQR-like stick drive: the target advances at the
+                                                               # commanded speed, position P keeps acting (2026-10-19)
+    ap.add_argument("--pitch_dis", action="store_true")        # randomize the floor's pitch errors (moved balance
+                                                               # point by leg height, turn drift) into the fed pitch
     ap.add_argument("--seed", type=int, default=None)          # PPO + env + numpy seed (seed sweeps; None = unseeded)
     args = ap.parse_args()
     if args.seed is not None:
@@ -81,7 +85,8 @@ if __name__ == "__main__":
                                  mirror_aug=not args.no_mirror, rate_dr=not args.no_rate_dr,
                                  pos_anchor=args.pos_anchor, pure_balance=not args.pos_aware,
                                  pos_weight=args.pos_weight, rate_pen=args.rate_pen,
-                                 drive_train=args.drive_train, fw_obs=not args.legacy_obs),
+                                 drive_train=args.drive_train, fw_obs=not args.legacy_obs,
+                                 drive_lead=args.drive_lead, pitch_dis=args.pitch_dis),
                         n_envs=args.nenv, seed=args.seed)
     venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
     common = dict(verbose=1, device="cpu", n_steps=1024, batch_size=2048, gamma=0.997,

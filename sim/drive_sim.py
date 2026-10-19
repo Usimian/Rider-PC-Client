@@ -28,7 +28,8 @@ from rider_params import DEFAULT
 
 # --- firmware drive gains (main.cpp POLICY defaults, reconciled 2026-08-13) ---
 K, KI, KD = 20.0, 1.0, 10.0         # gPosHoldK (poshold) / gPosHoldKi (poshi) / gDriveKd (drivekd, MOVING regime)
-POSMAX_DEG = 5.0                    # gPosHoldMax: setpoint-bias clamp (deg)
+POSMAX_DEG = 8.0                    # gPosHoldMax: setpoint-bias clamp (deg). 5 -> 8 with the LQR-like drive (2026-10-19):
+                                    # at 5 it pinned in low-legs reverse (3 deg offset + reverse lean) -> 0.25 m/s
 AMAX = 0.4                          # gPosAmax: accel cap (m/s^2) -- 0.8 -> 0.4 fw default 2026-10-19
 VEL_LP = DEFAULT.fw_drive_vel_lp    # gPosVelLP: LP on velocity feeding the D term
 INTBAND = 0.15                      # gPosIntBand: integrate only within this of the FINAL target
@@ -37,6 +38,17 @@ VMAX = 0.30                         # gPosVmax = gPosVmaxBack (full stick, both 
 HOLD_S = 1.5                        # stick runs start from a HOLD this long (the hold integral builds, as on the robot)
 DEG2RAD = 0.017453292
 WHEEL_R = 0.03
+LEASH = 0.25                        # 'lead' drive: the moving target may run at most this far from the robot (m)
+POL_FULL_CMD = 30.0 * 7.764         # raw wheel-cmd at policy action 1 (main.cpp POL_VELMAX_RADS x POL_RAW_PER_RADS)
+# --- firmware LQR (main.cpp defaults, floor-tuned 2026-06-19 + drive rework 2026-10-18) ---
+LQR_X, LQR_XI, LQR_VX, LQR_Q, LQR_DQ = -500.0, -30.0, -6.0, 32.0, 3.0   # gLqrX / gLqrXi / gLqrVx / gLqrQ / gLqrDq
+LQR_IXMAX = 3.0                     # gLqrIxMax (m*s)
+LQR_VREF = 270.0                    # gLqrVRef: speed units per m/s of vdes
+LQR_CMDFF = 360.0                   # gLqrCmdFF: wheel-cmd per m/s of vdes
+LQR_FF, LQR_FFBAND = 10.0, 20.0     # gFF / gFFband: stiction boost
+LQR_UMAX = 400.0                    # gUMax: output clamp (raw wheel-cmd)
+LQR_VEL_LP = 0.85                   # LP_VEL: the servo-speed low-pass behind wheel_vx
+LQR_VEL_PER_MPS = 265.0             # MEASURED 2026-10-19: wheel_vx units per m/s of ground speed (floor cruise)
 
 
 def load_policy(name):
@@ -51,22 +63,48 @@ def load_policy(name):
     return infer
 
 
+def lqr_controller(params):
+    """The firmware's LQR (main.cpp, floor-tuned gains + 2026-10-18 drive rework), in the sim frame.
+    Firmware: u = -(X*x + Xi*Ix + Vx*vx + Q*q + Dq*dq) + CmdFF*vdes, with q = theta - set (robot frame, forward lean
+    makes it DECREASE) = -pitch_sim, dq = -rate_sim, x = wheel_x - target (m), vx = wheel speed (scaled units,
+    ~265 per m/s) - VRef*vdes; then the stiction boost and the gUMax clamp. Returns u in raw wheel-cmd units."""
+    def u_of(x_err, ix, vx_err, pitch_deg, rate_deg, vdes):
+        u = -(LQR_X * x_err + LQR_XI * ix + LQR_VX * vx_err - LQR_Q * pitch_deg - LQR_DQ * rate_deg) + LQR_CMDFF * vdes
+        if u > LQR_FFBAND: u += LQR_FF
+        elif u < -LQR_FFBAND: u -= LQR_FF
+        return float(np.clip(u, -LQR_UMAX, LQR_UMAX))
+    return u_of
+
+
 def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s=None, fw_obs=True, params=None,
-             stick=True, hold_s=HOLD_S, pitch_offset_deg=0.0):
+             stick=True, hold_s=HOLD_S, pitch_offset_deg=0.0, drift_deg=0.0, controller="policy", drive="latch",
+             leash=LEASH, drive_int=False, reverse_at=None):
     """accel_couple: override the accelerometer-reads-acceleration gain (default rider_params, MEASURED);
     the firmware's pitch fusion lives in rider_env.FirmwareSensing, so it applies with fw_obs only.
     latency_s: override the actuator pure-delay (default = rider_params, the measured on-robot value).
     fw_obs: firmware sensing path (default) vs clean physics state (legacy).
     params: full RiderParams override (sweeps); latency_s still applies on top of it.
-    stick: model the joystick drive (D-only lean, firmware default) vs a 'ptgt' distance move (P-term lean).
-    hold_s: stick runs HOLD this long first (hold integral builds), then full stick; the integral is
-    then KEPT through the drive (fw 2026-10-18), as on the robot.
-    pitch_offset_deg: constant error in the policy's pitch (balance setpoint 'set' vs the true balance point)."""
+    stick: model the joystick drive vs a 'ptgt' distance move (P-term lean).
+    hold_s: stick runs HOLD this long first (hold integral builds), then full stick.
+    pitch_offset_deg: constant error in the controller's pitch (sim frame, deg): the balance point moved, e.g. legs
+      lowered (floor 2026-10-19: ~-3 at the lowest height -> forward creep, no reverse).
+    drift_deg: a pitch-sensor drift (sim frame, deg) that builds over 1.5 s starting 1 s into the stick drive, as in
+      a fast turn (floor 2026-10-19: ~-2 -> the robot sped up and fell forward).
+    controller: 'policy' (infer) or 'lqr' (the firmware LQR; infer unused).
+    drive: the policy's stick-drive structure -- 'latch' (firmware now: target = wheel_x every cycle, only the
+      velocity-D acts, hold integral frozen) or 'lead' (LQR-like: the target advances at the commanded speed and
+      the position P keeps acting; it is dragged along if the robot falls more than `leash` m behind/ahead).
+      drive_int: with 'lead', also integrate the position error while driving (as the LQR does).
+    reverse_at: flip the stick to the opposite direction at this time (s) -- full forward straight into full
+      reverse (floor 2026-10-19: where ppo_fw_s9 fell)."""
     p = params or DEFAULT
     if latency_s is not None:
         p = replace(p, latency_s=latency_s)
     if accel_couple is not None:
         p = replace(p, accel_couple=accel_couple)
+    if controller == "lqr":
+        p = replace(p, cmd_limit=LQR_UMAX / POL_FULL_CMD)      # the LQR may use the whole gUMax range
+        lqr = lqr_controller(p)
     env = RiderBalanceEnv(params=p, add_noise=False, frame_stack=1, fw_obs=fw_obs)   # stacked obs built here
     env.reset(seed=seed)
     dt = env.ctrl_dt
@@ -74,70 +112,95 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
     x0 = x
     tgt = x0 + direction * 5.0                              # far target => cruise at vmax the whole run
     tgt_eff = x0; vdes_s = 0.0; xvelF = 0.0; prevX = x0; pint = 0.0; pint_pos = 0.0
+    vest = 0.0; lqr_ix = 0.0
     stack = deque(maxlen=2)
     log = []
     n = int(T / dt)
     fell_t = None
     for i in range(n):
+        t = i * dt
         pitch, prate_true, x, x_vel_true, wheel_vel_true = env._raw_state()
         # sensed values: env._sense() ran at the end of the previous step (firmware order); with fw_obs the
         # pitch is the firmware's fused one (accelerometer reads the chassis acceleration too)
         pitch_obs, prate, x_vel, wheel_vel = env.last_sensed
-        pitch_obs += pitch_offset_deg * DEG2RAD
+        dis = pitch_offset_deg + drift_deg * float(np.clip((t - hold_s - 1.0) / 1.5, 0.0, 1.0))
+        pitch_obs += dis * DEG2RAD
         # drive loop's velocity: the firmware differences the ENCODER wheel_x (same read as the policy's)
         xvel = env.sense.xvel_raw if fw_obs else (x - prevX) / dt
         prevX = x
         xvelF = VEL_LP * xvelF + (1 - VEL_LP) * xvel
         damax = AMAX * dt
         kiLim = POSMAX_DEG / KI if KI > 0.01 else 1e6
-        if stick:
-            # STICK (main.cpp): HOLD until hold_s (target latched at x0; the hold integral builds, with
-            # the deadband), then full stick: vdes ramps at AMAX, the target tracks wheel_x every cycle
-            # (posErr 0) and the integral is FROZEN (kept -- fw 2026-10-18). Lean = KD*(xvelF - vdes)
-            # + the integral's bias cancel.
-            driving = vmax > 0.0 and i * dt >= hold_s
-            vcmd = direction * vmax if driving else 0.0
-            if vcmd > vdes_s + damax: vdes_s += damax
-            elif vcmd < vdes_s - damax: vdes_s -= damax
-            else: vdes_s = vcmd
-            vdes = vdes_s
-            if driving:
-                tgt_eff = x
-                pos_err = 0.0
-            else:
-                pos_err = x - tgt_eff
-                inband = abs(pos_err) < DEADBAND
-                if abs(pos_err) < INTBAND and not inband:
-                    pint_pos = float(np.clip(pint_pos + pos_err * dt, -kiLim, kiLim))
-                if inband:
-                    pos_err = 0.0
-        else:
-            # 'ptgt' distance move: trapezoidal profile (brake-distance capped) to a far target, P-term lean
-            dist = tgt - tgt_eff
-            vstop = np.sqrt(2 * AMAX * abs(dist))
-            vcap = min(vmax, vstop)
-            vcmd = vcap if dist >= 0 else -vcap
+        driving = stick and vmax > 0.0 and t >= hold_s
+        sdir = -direction if (reverse_at is not None and t >= reverse_at) else direction
+        if controller == "lqr":
+            # LQR drive management (main.cpp): stick held -> target ADVANCES at the ramped speed, the position
+            # integral runs throughout; held still -> target latched at the start.
+            vcmd = sdir * vmax if driving else 0.0
             if vcmd > vdes_s + damax: vdes_s += damax
             elif vcmd < vdes_s - damax: vdes_s -= damax
             else: vdes_s = vcmd
             tgt_eff += vdes_s * dt
             vdes = vdes_s
-            pos_err = x - tgt_eff
-            if tgt_eff == tgt and abs(pos_err) < INTBAND:
-                pint_pos = float(np.clip(pint_pos + pos_err * dt, -kiLim, kiLim))
-        bias_deg = np.clip(K * pos_err + KI * pint_pos + KD * (xvelF - vdes), -POSMAX_DEG, POSMAX_DEG)
-        bias_rad = bias_deg * DEG2RAD
-        pr_pitch = pitch_obs + bias_rad                     # setpoint-tilted (possibly accel-corrupted) pitch obs
-        pint = float(np.clip(pint + pr_pitch * dt, -1.0, 1.0))
-        frame = np.array([pr_pitch, prate, 0.0, x_vel, wheel_vel, pint, 0.0], np.float32)
-        if i == 0:
-            for _ in range(2): stack.append(frame)
+            lqr_ix = float(np.clip(lqr_ix + (x - tgt_eff) * dt, -LQR_IXMAX, LQR_IXMAX))
+            vest = LQR_VEL_LP * vest + (1 - LQR_VEL_LP) * xvel * LQR_VEL_PER_MPS   # servo-speed path, scaled units
+            u = lqr(x - tgt_eff, lqr_ix, vest - LQR_VREF * vdes, np.degrees(pitch_obs), np.degrees(prate), vdes)
+            a = u / POL_FULL_CMD
+            bias_deg = 0.0
         else:
-            stack.append(frame)
-        obs = np.concatenate(stack)
-        a = infer(obs)
+            if stick:
+                # STICK (main.cpp): HOLD until hold_s (target latched at x0; the hold integral builds, with
+                # the deadband), then full stick: vdes ramps at AMAX.
+                vcmd = sdir * vmax if driving else 0.0
+                if vcmd > vdes_s + damax: vdes_s += damax
+                elif vcmd < vdes_s - damax: vdes_s -= damax
+                else: vdes_s = vcmd
+                vdes = vdes_s
+                if driving and drive == "latch":
+                    # target tracks wheel_x every cycle (posErr 0), integral FROZEN: lean = KD*(xvelF - vdes) + cancel
+                    tgt_eff = x
+                    pos_err = 0.0
+                elif driving:
+                    # 'lead': the target advances at the commanded speed; the robot is held to it (LQR-like)
+                    tgt_eff += vdes_s * dt
+                    tgt_eff = float(np.clip(tgt_eff, x - leash, x + leash))   # dragged, never further than the leash
+                    pos_err = x - tgt_eff
+                    if drive_int:
+                        pint_pos = float(np.clip(pint_pos + pos_err * dt, -kiLim, kiLim))
+                else:
+                    pos_err = x - tgt_eff
+                    inband = abs(pos_err) < DEADBAND
+                    if abs(pos_err) < INTBAND and not inband:
+                        pint_pos = float(np.clip(pint_pos + pos_err * dt, -kiLim, kiLim))
+                    if inband:
+                        pos_err = 0.0
+            else:
+                # 'ptgt' distance move: trapezoidal profile (brake-distance capped) to a far target, P-term lean
+                dist = tgt - tgt_eff
+                vstop = np.sqrt(2 * AMAX * abs(dist))
+                vcap = min(vmax, vstop)
+                vcmd = vcap if dist >= 0 else -vcap
+                if vcmd > vdes_s + damax: vdes_s += damax
+                elif vcmd < vdes_s - damax: vdes_s -= damax
+                else: vdes_s = vcmd
+                tgt_eff += vdes_s * dt
+                vdes = vdes_s
+                pos_err = x - tgt_eff
+                if tgt_eff == tgt and abs(pos_err) < INTBAND:
+                    pint_pos = float(np.clip(pint_pos + pos_err * dt, -kiLim, kiLim))
+            bias_deg = np.clip(K * pos_err + KI * pint_pos + KD * (xvelF - vdes), -POSMAX_DEG, POSMAX_DEG)
+            bias_rad = bias_deg * DEG2RAD
+            pr_pitch = pitch_obs + bias_rad                 # setpoint-tilted (possibly accel-corrupted) pitch obs
+            pint = float(np.clip(pint + pr_pitch * dt, -1.0, 1.0))
+            frame = np.array([pr_pitch, prate, 0.0, x_vel, wheel_vel, pint, 0.0], np.float32)
+            if i == 0:
+                for _ in range(2): stack.append(frame)
+            else:
+                stack.append(frame)
+            obs = np.concatenate(stack)
+            a = infer(obs)
         _, _, term, _, _ = env.step(np.array([a], np.float32))
-        log.append((i * dt, pitch, prate_true, a, x_vel_true, bias_deg, x - x0))
+        log.append((t, pitch, prate_true, a, x_vel_true, bias_deg, x - x0, vdes_s))
         if term:
             fell_t = (i + 1) * dt
             break

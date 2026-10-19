@@ -14,12 +14,12 @@ CAPS lambda 4 + frame_stack 2, 2.5M steps. Logs + summary go to a FIXED path: si
 Run:  ./.venv/bin/python seed_sweep.py [--seeds 0-9] [--parallel 5] [--steps 2500000] [--tag fw]
 """
 import argparse, os, subprocess, sys, time
-import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = os.path.join(HERE, ".venv", "bin", "python")
 LOGDIR = os.path.join(HERE, "logs", "seed_sweep")
-RECIPE = ["--domain_rand", "--frame_stack", "2", "--drive_train", "--caps_lambda", "4"]
+RECIPE = ["--domain_rand", "--frame_stack", "2", "--drive_train", "--caps_lambda", "4", "--drive_lead", "--pitch_dis"]
+DRIVE = "lead"          # the stick-drive structure the screen runs (must match the recipe: --drive_lead -> 'lead')
 
 
 def parse_seeds(s):
@@ -43,14 +43,17 @@ def export(name):
 
 
 def screen(name):
-    """Offline screen on THREE loaded plants (2026-09-16 + 2026-10-19 floor lessons):
-      * clean loaded deadband (rider_params nominal): full-stick FWD/REV -- reproduced ppo_fw_s8's fall
-      * loaded STICK-SLIP: full-stick FWD/REV + a 7 s HOLD -- reproduced ppo_fw_s5's ~2 Hz hold hunt
-      * WEAK wheel (x0.85, a low battery): full-stick FWD/REV -- margin for a tired pack
-    All with the MEASURED accelerometer coupling (rider_params) -- with it the sim reproduces ppo_fw_s9's
-    0.30 m/s falls. A policy must survive all six drives; 'a99' = 99th-percentile |output| while driving
-    (the saturation margin: s9 pinned -1 just before it fell); the hold row ranks the hunt (1-6 Hz)."""
+    """Offline screen, all with the MEASURED accelerometer coupling and the recipe's stick drive (DRIVE):
+      * clean loaded wheel (nominal), loaded STICK-SLIP, and a WEAK wheel (x0.85, a low battery): full stick
+        FWD/REV at 0.30 -- s8/s9's floor falls
+      * LOW LEGS: balance point 3 deg off (floor 2026-10-19 at the lowest legs: no reverse, forward creep/falls)
+      * TURN DRIFT: a 2 deg pitch-sensor drift building mid-drive (floor 2026-10-19: sped up in turns, fell)
+      * HOLD 7 s on stick-slip -- ranks the hunt (s5's ~2 Hz see-saw)
+    A policy must survive every drive at a speed within 0.05 m/s of the command; 'a99' = 99th-percentile
+    |output| while driving (saturation margin: s9 pinned its output before it fell). The firmware LQR passes
+    all of these in the same sim."""
     sys.path.insert(0, HERE)
+    import numpy as np
     import policy_symmetry as ps
     import drive_sim as ds
     from dataclasses import replace
@@ -59,16 +62,20 @@ def screen(name):
     infer = ds.load_policy(os.path.join(HERE, name))
     ss = replace(DEFAULT, stick_slip=True)
     weak = replace(DEFAULT, vel_max_rad_s=0.85 * DEFAULT.vel_max_rad_s)
+    cases = [("clean", DEFAULT, {}), ("ss", ss, {}), ("weak", weak, {}),
+             ("low", DEFAULT, dict(pitch_offset_deg=-3.0)), ("drift", DEFAULT, dict(drift_deg=-2.0))]
     rows = {}
-    for plant, p in (("clean", DEFAULT), ("ss", ss), ("weak", weak)):
+    for plant, p, kw in cases:
         for dirn, tag in ((+1, "fwd"), (-1, "rev")):
-            L, fell, dt = ds.simulate(infer, dirn, ds.VMAX, params=p, fw_obs=True)
+            L, fell, dt = ds.simulate(infer, dirn, ds.VMAX, T=9.0, params=p, fw_obs=True, drive=DRIVE, **kw)
             s = ds.stats(L, 1.0 / dt)
-            a99 = float(np.percentile(np.abs(L[L[:, 0] > ds.HOLD_S, 3]), 99)) if (L[:, 0] > ds.HOLD_S).any() else 1.0
+            drv = L[:, 0] > ds.HOLD_S
+            a99 = float(np.percentile(np.abs(L[drv, 3]), 99)) if drv.any() else 1.0
+            spd = abs(float(np.mean(L[L[:, 0] > L[-1, 0] - 3.0, 4])))
             rows[plant + "-" + tag] = dict(up=fell is None, fell=fell, rate=s["rate_rms"], freq=s["freq"],
                                            prom=s["prom"], sat=s["act_sat"], pitch=s["pitch_std"],
-                                           travel=abs(s["travel"]), a99=a99)
-    L, fell, dt = ds.simulate(infer, +1, 0.0, params=ss, fw_obs=True)
+                                           travel=abs(s["travel"]), a99=a99, spd=spd)
+    L, fell, dt = ds.simulate(infer, +1, 0.0, params=ss, fw_obs=True, drive=DRIVE)
     k = L[:, 0] > 2.0; pr = L[k, 2]
     f, prom = ds.dom_freq(pr, 1.0 / dt, 1.0, 6.0)
     rows["hold"] = dict(up=fell is None, fell=fell, pitch=np.degrees(L[k, 1].std()),
@@ -79,18 +86,20 @@ def screen(name):
 def verdict(m, rows):
     reasons = []
     drives = [k for k in rows if k != "hold"]
-    if not all(rows[k]["up"] for k in drives): reasons.append("falls")
+    falls = [k for k in drives if not rows[k]["up"]]
+    if falls: reasons.append("falls:" + "/".join(falls))
     if not rows["hold"]["up"]: reasons.append("hold-falls")
     if abs(m["a_op"]) > 0.5: reasons.append("a_op")
     if m["gRatio"] > 2.0: reasons.append("gain-asym")
     if m["sat"] > 0.10: reasons.append("clipped")
     for t in drives:
         r = rows[t]
-        if r["up"] and r["rate"] > 60.0: reasons.append(t + "-rough")
-        if r["up"] and 6.0 <= r["freq"] <= 12.0 and r["prom"] > 8: reasons.append(t + "-ring")
-        if r["up"] and r["travel"] < 1.0: reasons.append(t + "-slow")   # full stick should cover ~1.4 m in 7 s
-                                                                       # (ppo_fw_s2 floor: forward 'non-existent')
-        if r["up"] and not t.startswith("weak") and r["a99"] > 0.90: reasons.append(t + "-nomargin")
+        if not r["up"]:
+            continue
+        if r["rate"] > 60.0: reasons.append(t + "-rough")
+        if 6.0 <= r["freq"] <= 12.0 and r["prom"] > 8: reasons.append(t + "-ring")
+        if abs(r["spd"] - 0.30) > 0.05: reasons.append(t + "-speed")    # LQR holds the command within 0.01
+        if t in ("clean-fwd", "clean-rev", "ss-fwd", "ss-rev") and r["a99"] > 0.90: reasons.append(t + "-nomargin")
     h = rows["hold"]
     if h["up"] and h["prom"] > 4.5 and h["freq"] < 3.5: reasons.append("hold-hunt")   # s5-style 2 Hz see-saw
     return "PASS" if not reasons else "fail(" + ",".join(reasons) + ")"
@@ -116,18 +125,19 @@ def main():
 
     def report(n, mins, m, rows):
         def cell(r):
-            return "%4.1f %.2f %s" % (r["rate"], r["a99"], "up" if r["up"] else "F%.1f" % r["fell"])
+            return "%.2f %.2f %s" % (r["spd"], r["a99"], "up" if r["up"] else "F%.1f" % r["fell"])
         h = rows["hold"]
-        say("%-14s %5.0fm | %+6.2f %5.0f %6.1f | %-27s | %-27s | %-27s | %-22s | %s" %
+        say("%-14s %5.0fm | %+6.2f %5.0f %6.1f | %s | %-22s | %s" %
             (n, mins, m["a_op"], 100 * m["sat"], m["gRatio"],
-             cell(rows["clean-fwd"]) + " / " + cell(rows["clean-rev"]),
-             cell(rows["ss-fwd"]) + " / " + cell(rows["ss-rev"]),
-             cell(rows["weak-fwd"]) + " / " + cell(rows["weak-rev"]),
+             " | ".join(cell(rows[pl + "-fwd"]) + " / " + cell(rows[pl + "-rev"])
+                        for pl in ("clean", "ss", "weak", "low", "drift")),
              "%4.2f° %5.1f°/s %3.1fHz x%-3.0f" % (h["pitch"], h["rate"], h["freq"], h["prom"]),
              verdict(m, rows)))
 
-    header = "%-14s %6s | %6s %5s %6s | %-27s | %-27s | %-27s | %-22s | %s" % \
-        ("policy", "train", "a_op", "sat%", "gRatio", "clean FWD/REV rate a99", "stick-slip FWD/REV", "weak x0.85 FWD/REV",
+    header = "%-14s %6s | %6s %5s %6s | %s | %-22s | %s" % \
+        ("policy", "train", "a_op", "sat%", "gRatio",
+         " | ".join("%-25s" % (pl + " FWD/REV spd a99") for pl in ("clean", "stick-slip", "weak x0.85", "low legs -3",
+                                                                    "turn drift -2")),
          "ss HOLD std rate f x", "verdict")
     if args.rescreen:
         say("\n=== rescreen %s ===" % time.strftime("%Y-%m-%d %H:%M")); say(header)
