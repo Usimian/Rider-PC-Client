@@ -77,6 +77,8 @@ It runs these systemd services (deployed by `pi/deploy_bridge.sh`):
   venv (not xgovenv): it needs `vl53l5cx-ctypes` + `smbus2`.
 - **rider-tof-safety** (`pi/rider_tof_safety.py`) — floor-referenced obstacle/cliff governor →
   `rider/safety/fwd_limit`; the joystick service caps **forward** drive by it (reverse never limited).
+  Always running, but it only limits while switched ON by the retained `rider/safety/enable {"on"}`
+  (web page button); off — the default — it reports what it sees and publishes factor 1.0.
 - **rider-recorder** — bare `mosquitto_sub` unit logging `rider/debug/telem` + `rider/debug/dcap`
   to `/home/pi/riderlog.txt`, always on so no fall/swing is ever missed. Needs `mosquitto-clients`.
 

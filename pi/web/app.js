@@ -1,4 +1,5 @@
-// Rider control page -- steps 2-4: status bar, pose, stats, E-STOP, balance card, legs (docs/WEB_UI_DESIGN.md).
+// Rider control page -- steps 2-4: status bar, pose, stats, E-STOP, balance card, legs (docs/WEB_UI_DESIGN.md);
+// + the ToF card (8x8 view, obstacle/edge stop switch).
 // Rules: the page holds no robot state -- every control shows and decides from the robot's own
 // messages (the top speed is a RETAINED broker message, so every open page sees the same value) --
 // and it sends nothing on load or close.
@@ -31,19 +32,29 @@ const client = new MqttLite("ws://" + location.host + "/", {
       speedRetained = Number(p.mps);
       if (!speedDragging) showSpeed(speedRetained);
     }
+    else if (topic === "rider/response/image_capture") camFrame(p);
+    else if (topic === "rider/tof") tofFrame(p);
+    else if (topic === "rider/safety/fwd_limit") tofSafety(p);
   },
 });
 for (const t of ["rider/status", "rider/status/imu", "rider/status/odom", "rider/control/drivemode",
-                 "rider/control/maxspeed", "rider/debug/telem"]) client.subscribe(t);
+                 "rider/control/maxspeed", "rider/debug/telem", "rider/tof", "rider/safety/fwd_limit",
+                 "rider/response/image_capture"]) client.subscribe(t);
 
 function status(s) {
   lastStatus = Date.now();
   S = s;
   controls();
   $("raw").textContent = JSON.stringify(s, null, 2);
-  const lowBatt = s.battery_level < 15;
-  set("batt", `${s.battery_level} %  ${Number(s.battery_voltage).toFixed(2)} V`, lowBatt ? "num bad" : "num");
-  set("ds4", s.controller_connected ? "connected" : "not connected", s.controller_connected ? "on" : "off");
+  // battery icon: the fill is the charge, coloured green (full) -> yellow (half) -> red (empty)
+  const lvl = Math.max(0, Math.min(100, Number(s.battery_level)));
+  const fill = $("battfill");
+  fill.setAttribute("width", (23 * lvl / 100).toFixed(1));
+  fill.setAttribute("fill", `hsl(${(1.2 * lvl).toFixed(0)} 80% 50%)`);       // 120 = green, 60 = yellow, 0 = red
+  set("batt", `${s.battery_level} %`, lvl < 15 ? "num bad" : "num");
+  $("battitem").title = `battery ${s.battery_level} %, ${Number(s.battery_voltage).toFixed(2)} V`;
+  $("ds4").setAttribute("class", "icon " + (s.controller_connected ? "on" : "off"));
+  $("ds4").parentElement.title = "DS4 controller " + (s.controller_connected ? "connected" : "not connected");
   set("ctrl", s.mode === "POL" ? "POLICY" : s.mode, s.mode === "POL" ? "pol" : "lqr");
   set("bal", s.roll_balance_enabled ? "ON" : "off", s.roll_balance_enabled ? "on" : "off");
   set("lev", s.roll_leveling_enabled ? "ON" : "off", s.roll_leveling_enabled ? "on" : "off");
@@ -179,3 +190,91 @@ setInterval(() => {
   line(`legrate ${rate.toFixed(1)}`);
 }, 100);
 $("leghome").addEventListener("click", () => { if (live()) line("leghome"); });
+
+// ---- camera (design v1): request a frame, show it, request the next ----
+// rider-camera answers rider/control/image_capture with one 640x480 JPEG (base64) on
+// rider/response/image_capture, and powers the camera down a few seconds after the last request -- so
+// the feed runs only while some page has it switched on (off by default; nothing is sent on load).
+// Each page tags its requests and paces itself on its OWN replies; other pages' frames are ignored.
+const CAM_MIN_MS = 100, CAM_TIMEOUT_MS = 2000;    // at most ~10 frames/s; re-ask if a reply is lost
+let camOn = false, camReq = null, camSentT = 0, camFrames = [], camTimer = null;
+const camId = Math.random().toString(16).slice(2, 8);
+let camSeq = 0;
+function camAsk() {
+  camTimer = null;
+  if (!camOn || !client.connected) return;
+  camReq = `${camId}-${++camSeq}`;
+  camSentT = Date.now();
+  client.publish("rider/control/image_capture", JSON.stringify({ request_id: camReq, resolution: "high" }));
+}
+function camFrame(p) {
+  if (!camOn || p.request_id !== camReq) return;
+  camReq = null;
+  if (p.success) {
+    $("cam").src = "data:image/jpeg;base64," + p.image_data;
+    const now = Date.now();
+    camFrames.push(now); camFrames = camFrames.filter((t) => now - t < 2000);
+    set("caminfo", `${(camFrames.length / 2).toFixed(1)} frames/s`);
+  } else set("caminfo", "camera error: " + (p.error || "?"));
+  camTimer = setTimeout(camAsk, Math.max(0, CAM_MIN_MS - (Date.now() - camSentT)));
+}
+setInterval(() => {                                // lost reply / reconnect: ask again
+  $("cambtn").disabled = !client.connected;
+  if (camOn && camReq !== null && Date.now() - camSentT > CAM_TIMEOUT_MS) { camReq = null; camAsk(); }
+  if (camOn && camReq === null && camTimer === null) camAsk();
+}, 500);
+$("cambtn").addEventListener("click", () => {
+  camOn = !camOn;
+  $("cambtn").textContent = "Camera: " + (camOn ? "on" : "off");
+  $("cambtn").className = "btn" + (camOn ? " active" : "");
+  if (camOn) { set("caminfo", "starting…"); camAsk(); }
+  else { camReq = null; if (camTimer) { clearTimeout(camTimer); camTimer = null; } $("cam").removeAttribute("src"); set("caminfo", ""); }
+});
+
+// ---- obstacles (ToF): the 8x8 view + the obstacle/edge stop switch ----
+// Distances come from the sensor (rider/tof, ~10 Hz); the zone classes, what is ahead and whether the
+// stop is ON come from the governor (rider/safety/fwd_limit, rider_tof_safety.py) -- robot truth, as
+// for every other control. The switch is the RETAINED rider/safety/enable {"on"}: the governor limits
+// forward drive only while it is on; off, it still reports what it sees ('would' = the limit it would set).
+const tofCells = [];
+for (let k = 0; k < 64; k++) { const c = document.createElement("div"); $("tofgrid").appendChild(c); tofCells.push(c); }
+let tofT = 0, safeT = 0, SAFE = null, tofCls = ".".repeat(64);
+const TOF_VALID = new Set([5, 6]);                  // VL53L5CX target_status: 5 valid, 6 50 % valid
+function tofFrame(f) {
+  tofT = Date.now();
+  for (let k = 0; k < 64; k++) {
+    const c = tofCells[k], mm = f.d[k], ok = TOF_VALID.has(f.s[k]) && mm > 0;
+    const cl = tofCls[k];
+    c.className = !ok ? "none" : (cl === "o" || cl === "f" || cl === "d") ? cl : "";
+    if (!ok) { c.textContent = "–"; c.style.background = ""; continue; }
+    const hue = 220 * Math.min(1, mm / 2000);     // 0 mm red .. 2 m+ blue
+    c.style.background = `hsl(${hue.toFixed(0)} 70% 38%)`;
+    c.textContent = mm >= 1000 ? (mm / 1000).toFixed(1) + "m" : Math.round(mm / 10);
+  }
+}
+function tofSafety(p) {
+  safeT = Date.now();
+  SAFE = p;
+  if (typeof p.cls === "string" && p.cls.length === 64) tofCls = p.cls;
+  tofShow();
+}
+const safeLive = () => client.connected && SAFE && Date.now() - safeT < 2000;
+function tofShow() {
+  $("tofgrid").classList.toggle("stale", Date.now() - tofT > 2000);
+  const b = $("tofbtn"), ok = safeLive();
+  b.disabled = !ok;
+  b.textContent = "Obstacle & edge stop: " + (!ok ? "–" : SAFE.on ? "ON" : "off");
+  b.className = "btn" + (ok && SAFE.on ? " active" : "");
+  if (!ok) { set("tofstate", "ToF governor not running", "off"); return; }
+  const what = SAFE.reason === "obstacle" ? "obstacle" : SAFE.reason === "cliff" ? "table edge" : null;
+  const dist = !what ? "clear" : SAFE.min_mm >= 0 ? `${what} ${Math.round(SAFE.min_mm / 10)} cm`
+             : `${what} — no floor ahead`;
+  const lim = SAFE.on ? Number(SAFE.factor) : Number(SAFE.would);
+  const pct = `${Math.round(100 * lim)} %`;
+  const txt = dist + (lim < 0.999 ? (SAFE.on ? ` — forward speed capped at ${pct}` : ` — would cap forward at ${pct}`) : "");
+  set("tofstate", txt, !SAFE.on ? "off" : lim <= 0.001 ? "bad" : lim < 0.999 ? "warn" : "on");
+}
+setInterval(tofShow, 250);
+$("tofbtn").addEventListener("click", () => {
+  if (safeLive()) client.publish("rider/safety/enable", JSON.stringify({ on: !SAFE.on }), true);   // retained
+});

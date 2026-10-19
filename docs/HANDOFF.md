@@ -58,11 +58,10 @@ filters/gains were tuned at 163 — try `loopus 6000` first. Also: LQR drive lag
 
 ## Robot state NOT in the repo (2026-10-18)
 
-- **`rider-tof-safety` is stopped AND disabled at boot** on the Pi (Marc's call). It was false-
-  flagging cliffs/obstacles on a flat floor and cutting forward speed 78-86 %, wrecking drive tests.
-  The ToF publisher (`rider-tof`) still runs. `pi/deploy_bridge.sh` still enables it, so **any
-  redeploy turns it back on** — re-disable, or decide in the repo. Fix the false triggers before
-  re-enabling (suspects: body height / lean changing the floor reference).
+- **ToF obstacle/edge stop** (2026-10-19): the governor runs again but limits only when switched ON
+  from the web page (default off). It was false-flagging cliffs/obstacles on a flat floor (cutting
+  forward speed 78-86 %); the page's ToF card now shows each zone's class (obstacle / floor / dropped)
+  live, to find those before leaving it on (suspects: body height / lean changing the floor reference).
 
 Marc's recollection of the factory firmware (for step 3 below): full-stick forward had a
 **slow start, then reached a decent speed** — consistent with its heavy input filter and

@@ -16,6 +16,11 @@ header h1 { font-size: 18px; margin: 0; letter-spacing: .1em; }
 .dot { display: inline-block; width: 11px; height: 11px; border-radius: 50%; background: var(--bad); vertical-align: -1px; }
 .dot.ok { background: var(--ok); }
 .spacer { flex: 1; }
+.icon { vertical-align: middle; color: var(--text); }
+.icon.off { color: #5a6185; }               /* DS4 not connected: grey */
+.icon.on  { color: var(--ok); }             /* DS4 connected: green */
+#battitem .icon { color: var(--dim); }
+#batt { margin-left: 4px; font-size: 13px; }
 
 #estop {
   font: 700 16px system-ui, sans-serif; letter-spacing: .06em; color: #fff;
@@ -39,7 +44,10 @@ main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap:
 footer {
   display: flex; flex-wrap: wrap; gap: 6px 22px; padding: 10px 16px 16px; color: var(--dim); font-size: 13px;
 }
-footer .num { color: var(--text); }
+footer .num { color: var(--text); display: inline-block; text-align: right; }
+/* fixed-width slots sized for each value's widest form, so a digit appearing (9 % -> 10 %) shifts nothing */
+#cpu { min-width: 5ch; } #temp { min-width: 5ch; } #pw { min-width: 6ch; }
+#hz { min-width: 6ch; } #rfail { min-width: 6ch; }
 details { padding: 0 16px 16px; }
 summary { color: var(--dim); cursor: pointer; font-size: 13px; }
 pre { background: var(--panel); padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 12px; }
@@ -63,3 +71,23 @@ input[type=range] { flex: 1; min-width: 140px; accent-color: var(--accent); }
 
 .on { color: var(--ok); } .off { color: var(--dim); } .warn { color: var(--warn); } .bad { color: var(--bad); }
 .pol { color: var(--pol); } .lqr { color: var(--lqr); }
+
+/* camera: 640x480 JPEGs, scaled to the card */
+#cam { display: block; width: 100%; max-width: 640px; aspect-ratio: 4 / 3; background: #0d1020; border-radius: 6px; }
+#cam:not([src]) { visibility: hidden; height: 0; }
+
+/* ToF card: 8x8 zone grid (robot's view) + drive-path bar under the middle four columns */
+.tofgrid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 3px; max-width: 420px; }
+.tofgrid div {
+  aspect-ratio: 1; display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-variant-numeric: tabular-nums; color: #fff; text-shadow: 0 0 2px #000;
+  background: #2a2f45; border: 2px solid transparent; border-radius: 3px;
+}
+.tofgrid div.o { border-color: var(--bad); }
+.tofgrid div.f { border-color: #2e8f55; }
+.tofgrid div.d { border-color: var(--warn); }
+.tofgrid div.none { background: #23273a; color: var(--dim); }
+.tofgrid.stale { opacity: .35; }
+.tofpath { display: grid; grid-template-columns: 2fr 4fr 2fr; gap: 3px; max-width: 420px; margin: 4px 0 8px; }
+.tofpath span { height: 4px; border-radius: 2px; }
+.tofpath span.on { background: var(--accent); }

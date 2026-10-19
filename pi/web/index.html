@@ -10,8 +10,21 @@
 <header>
   <h1>RIDER</h1>
   <span class="item"><span class="dot" id="link"></span> <span id="linktext">connecting…</span></span>
-  <span class="item"><span class="k">battery</span><span id="batt" class="num">–</span></span>
-  <span class="item"><span class="k">DS4</span><span id="ds4">–</span></span>
+  <span class="item" id="battitem" title="battery">
+    <svg class="icon" viewBox="0 0 34 16" width="34" height="16" aria-hidden="true">
+      <rect x="1" y="1" width="28" height="14" rx="3" fill="none" stroke="currentColor" stroke-width="2"/>
+      <rect x="30" y="5" width="3" height="6" rx="1" fill="currentColor"/>
+      <rect id="battfill" x="3.5" y="3.5" width="0" height="9" rx="1.5"/>
+    </svg>
+    <span id="batt" class="num">–</span>
+  </span>
+  <span class="item" title="DS4 controller">
+    <svg id="ds4" class="icon off" viewBox="0 0 32 20" width="30" height="19" aria-hidden="true">
+      <path fill="currentColor" d="M9 2h14c4 0 6.5 2.5 7.6 6.5l1.2 5.3c.7 3.3-1.4 5.9-4 5.9-1.8 0-3-1.1-4-2.6L22.4 15H9.6l-1.4 2.1c-1 1.5-2.2 2.6-4 2.6-2.6 0-4.7-2.6-4-5.9l1.2-5.3C2.5 4.5 5 2 9 2z"/>
+      <g fill="#14182b"><rect x="6.5" y="6" width="2" height="6"/><rect x="4.5" y="8" width="6" height="2"/>
+        <circle cx="23" cy="7" r="1.2"/><circle cx="23" cy="11" r="1.2"/><circle cx="21" cy="9" r="1.2"/><circle cx="25" cy="9" r="1.2"/></g>
+    </svg>
+  </span>
   <span class="item"><span class="k">controller</span><span id="ctrl">–</span></span>
   <span class="item"><span class="k">drive</span><span id="drive">–</span></span>
   <span class="item"><span class="k">balancing</span><span id="bal">–</span></span>
@@ -20,6 +33,14 @@
 </header>
 
 <main>
+  <section class="card">
+    <h2>CAMERA</h2>
+    <div class="row">
+      <button class="btn" id="cambtn" disabled title="The camera only runs while a page is watching it">Camera: off</button>
+      <span class="hint" id="caminfo"></span>
+    </div>
+    <img id="cam" alt="">
+  </section>
   <section class="card">
     <h2>POSE</h2>
     <div class="grid2">
@@ -62,7 +83,19 @@
     <div class="row">
       <button class="btn" id="leghome" disabled title="Back to the normal ride height (DS4 R3)">Ride height</button>
     </div>
-    <p class="later">Camera arrives in step 5 (docs/WEB_UI_DESIGN.md).</p>
+  </section>
+  <section class="card">
+    <h2>OBSTACLES (ToF)</h2>
+    <div class="row">
+      <button class="btn" id="tofbtn" disabled title="Forward speed is capped near an obstacle and stops before a table edge. Reverse is never limited.">Obstacle &amp; edge stop: –</button>
+    </div>
+    <div class="row"><span class="k">ahead</span><span id="tofstate">–</span></div>
+    <div class="tofgrid" id="tofgrid"></div>
+    <div class="tofpath"><span></span><span class="on"></span><span></span></div>
+    <p class="hint">The sensor's 8 × 8 view, looking ahead: left = the robot's left, top row = farthest.
+      Colour = distance (red near, blue far; numbers in cm). Outline: <span class="bad">obstacle</span>,
+      <span class="on">floor</span>, <span class="warn">floor dropped away</span>. The bar marks the drive path
+      (the columns the stop uses).</p>
   </section>
 </main>
 

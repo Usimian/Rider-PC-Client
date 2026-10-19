@@ -225,9 +225,10 @@ for the browser page) and the **web page** `pi/web/` → `/srv/rider-web/`, then
 broker. Deploy with the robot disabled. Page: `http://raspberrypi.local:9001/`. Full service description:
 [`BRIDGE_SETUP.md`](BRIDGE_SETUP.md).
 
-**Local deviation (2026-10-18, Marc):** `rider-tof-safety` was stopped and disabled at boot — it
-false-flagged cliffs/obstacles on a flat floor. The deploy re-enables it; disable it again
-(`sudo systemctl disable --now rider-tof-safety`) until that is fixed. See `docs/HANDOFF.md`.
+`rider-tof-safety` runs at boot like the others, but it only limits forward speed while switched on
+from the web page (retained `rider/safety/enable {"on": true}`); with nothing retained it is off.
+(2026-10-18 to -19 it was instead stopped + disabled by hand because of false triggers; the switch
+replaced that local deviation.)
 
 ## Card upkeep
 

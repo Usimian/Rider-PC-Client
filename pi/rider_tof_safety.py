@@ -6,10 +6,18 @@ Subscribes to the VL53L5CX frames (rider/tof) and the body state
 FLOOR-REFERENCED frame using the calibrated kinematic model, and publishes a
 FORWARD-speed factor on rider/safety/fwd_limit:
 
-    {"factor": 0.0..1.0, "reason": "clear|obstacle|cliff", "min_mm": <fwd dist>}
+    {"factor": 0.0..1.0, "reason": "none|obstacle|cliff", "min_mm": <fwd dist>,
+     "on": bool, "would": 0.0..1.0, "cls": "<64 zone classes>"}
 
 The DS4 controller (rider_controller.py) multiplies its FORWARD drive by factor
 -- reverse is never limited, so you can always back out of a wall OR off a cliff.
+
+ON/OFF (2026-10-19): the service always runs and always evaluates, but it only LIMITS when switched
+on by the RETAINED message rider/safety/enable {"on": true|false} (the web page's button). Off --
+the default until a retained 'on' arrives -- it publishes factor 1.0 while still reporting what it
+sees ("would" = the factor it would apply, "reason"/"min_mm", and the per-zone "cls"), so the page
+and LCD can show it. cls: one char per zone, row-major (row 0 = top/far, column 0 = robot's left):
+'o' obstacle, 'f' floor, 'd' floor dropped away, 'h' overhead, 'b' just below floor, '.' no return.
 
 Two stops, both forward-only:
   * OBSTACLE -- a return standing ABOVE the floor (z in [OBS_Z_MIN, OBS_Z_MAX])
@@ -33,6 +41,7 @@ BROKER, PORT = "localhost", 1883
 TOF_TOPIC = "rider/tof"
 TELEM_TOPIC = "rider/debug/telem"
 LIMIT_TOPIC = "rider/safety/fwd_limit"
+ENABLE_TOPIC = "rider/safety/enable"    # retained {"on": bool} from the web page; absent = off
 
 # --- calibrated kinematic model (tof_calib_solve.py) ---
 ROLL_SIGN, PITCH_SIGN = -1.0, -1.0      # IMU -> world sign convention
@@ -89,7 +98,7 @@ def _mv(M, v):
 
 R_MOUNT = _mm(_Rx(math.radians(BETA_ROLL)), _Ry(math.radians(BETA_PITCH)))
 
-_state = {"roll": 0.0, "pitch": 0.0, "legidx": LEG_IDX_DEFAULT, "cliff_run": 0}
+_state = {"roll": 0.0, "pitch": 0.0, "legidx": LEG_IDX_DEFAULT, "cliff_run": 0, "on": False}
 _running = True
 
 
@@ -117,6 +126,21 @@ def evaluate(d, s, roll, pitch, legidx):
     near_floor = 0              # near-band zones reading floor
     fwd_missing = 0             # forward-band zones with floor gone
     floor_edge = None           # farthest forward dist where floor is still seen (= the edge)
+    cls = ["."] * 64            # per-zone class, all 64 zones (for display); the stops use COLS only
+
+    for i in range(8):
+        for j in range(8):
+            k = i * 8 + j
+            if s[k] in VALID and d[k] > 0:
+                rng = d[k] / 1000.0
+                p = _mv(R, (rng * RAY[i][j][0], rng * RAY[i][j][1], rng * RAY[i][j][2]))
+                z = p[2] + H
+                if z <= -FLOOR_TOL:
+                    cls[k] = "d" if z < -CLIFF_DROP else "b"
+                elif z < FLOOR_TOL:
+                    cls[k] = "f"
+                else:
+                    cls[k] = "o" if z < OBS_Z_MAX else "h"
 
     for j in COLS:
         for i in range(8):
@@ -139,7 +163,7 @@ def evaluate(d, s, roll, pitch, legidx):
                 fwd_missing += 1               # no return where forward floor should be
 
     return {"nearest_obs": nearest_obs, "near_floor": near_floor,
-            "fwd_missing": fwd_missing, "floor_edge": floor_edge}
+            "fwd_missing": fwd_missing, "floor_edge": floor_edge, "cls": "".join(cls)}
 
 
 def main():
@@ -150,6 +174,7 @@ def main():
     def on_connect(c, u, flags, rc, properties=None):
         c.subscribe(TOF_TOPIC)
         c.subscribe(TELEM_TOPIC)
+        c.subscribe(ENABLE_TOPIC)
 
     def on_telem(payload):
         d = {}
@@ -193,10 +218,18 @@ def main():
             reason, mm = "none", -1
 
         c.publish(LIMIT_TOPIC,
-                  json.dumps({"factor": round(factor, 3), "reason": reason, "min_mm": mm}),
+                  json.dumps({"factor": round(factor, 3) if _state["on"] else 1.0, "reason": reason,
+                              "min_mm": mm, "on": _state["on"], "would": round(factor, 3), "cls": r["cls"]}),
                   qos=0, retain=True)
 
     def on_message(c, u, msg):
+        if msg.topic == ENABLE_TOPIC:
+            try:
+                _state["on"] = bool(json.loads(msg.payload).get("on", False))
+            except Exception:
+                _state["on"] = False
+            print("limiting", "ON" if _state["on"] else "off", flush=True)
+            return
         if msg.topic == TELEM_TOPIC:
             on_telem(msg.payload.decode())
             return
@@ -213,7 +246,8 @@ def main():
     while _running:
         signal.pause()
     # on exit, clear the limit so a stale retained stop can't strand the drive
-    mqc.publish(LIMIT_TOPIC, json.dumps({"factor": 1.0, "reason": "none", "min_mm": -1}),
+    mqc.publish(LIMIT_TOPIC, json.dumps({"factor": 1.0, "reason": "none", "min_mm": -1, "on": False,
+                                          "would": 1.0, "cls": "." * 64}),
                 qos=0, retain=True)
     mqc.loop_stop()
     mqc.disconnect()

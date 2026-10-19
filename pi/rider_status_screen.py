@@ -72,7 +72,7 @@ reset_last = 0.0                # reset last-press time (debounce)
 tel = {}
 cmd_q = queue.Queue()           # inbound MQTT -> ESP32 line commands
 # forward safety governor state (rider/safety/fwd_limit): obstacle/edge distance ahead
-g_safety = {"reason": "clear", "mm": -1, "factor": 1.0, "t": 0.0}
+g_safety = {"reason": "clear", "mm": -1, "factor": 1.0, "on": False, "t": 0.0}
 
 
 g_ctrl = "?"                    # active controller from telemetry: POL (policy) or LQR
@@ -192,6 +192,7 @@ def on_message(client, userdata, msg):
             g_safety["reason"] = str(p.get("reason", "clear"))
             g_safety["mm"] = int(p.get("min_mm", -1))
             g_safety["factor"] = float(p.get("factor", 1.0))
+            g_safety["on"] = bool(p.get("on", False))      # limiting switched on (web page); off = report only
             g_safety["t"] = time.time()
         except (TypeError, ValueError):
             pass
@@ -342,7 +343,6 @@ def render():
         lcd.ShowImage(img)
         return
     en = int(tel.get("en", 0))
-    mq_ok = mqc is not None and mqc.is_connected()
 
     # title turns blue when a controller (DS4) is connected, white otherwise
     d.text((10, 6), "RIDER",
@@ -369,9 +369,14 @@ def render():
 
     # forward path (ToF governor): OBSTACLE/EDGE distance ahead, or CLEAR. Red = stopped
     # (factor 0, <=~20cm), amber = slowing, green = clear, grey = governor offline (stale).
+    # Limiting switched OFF (web page): the distance still shows, in grey, prefixed "off".
     sf = g_safety
     if time.time() - sf["t"] > 3.0:
         s_txt, s_col = "FWD --", (110, 110, 110)                            # governor offline
+    elif not sf["on"]:
+        kind = {"obstacle": "OBST", "cliff": "EDGE"}.get(sf["reason"])
+        s_txt = "ToF off" + (" %s %dcm" % (kind, round(sf["mm"] / 10.0)) if kind and sf["mm"] >= 0 else "")
+        s_col = (110, 110, 110)
     elif sf["reason"] in ("obstacle", "cliff") and sf["mm"] >= 0:
         kind = "OBSTACLE" if sf["reason"] == "obstacle" else "EDGE"
         # green = clear ahead, amber = slowing, red = stopped (<=~20cm)
