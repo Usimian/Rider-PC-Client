@@ -70,8 +70,10 @@ TURN_DEADZONE = 0.40  # right stick (turn) resting offset has DRIFTED to ~0.32 (
                       # deadzone -> it kept commanding turnrate 0.03 and, with no heartbeat to refresh it, that
                       # value LATCHED in the firmware (robot turned on a centered stick). Widened to 0.40 to
                       # reject the worn-stick rest; the turn heartbeat below now clears/refreshes like drive.
-MAX_SPEED = 0.25     # m/s at full stick. ->0.25 (2026-06-19, LQR): matches firmware gPosVmax now that the dv-advance
-                     # fix + LQR drive the robot at real speed. Drive authority tops ~0.15 m/s; cap leaves headroom.
+MAX_SPEED = 0.30     # m/s at full stick (and the web slider's ceiling). ->0.30 (2026-10-19, Marc: "a little faster";
+                     # was 0.25). Must match the firmware's gPosVmax/gPosVmaxBack ('posvmax'/'posvmaxb'): set live to
+                     # 0.30 for the trial -- their compiled default is still 0.25, so after an ESP32 reboot the top
+                     # of the stick clips until the firmware default is raised too.
 MAX_YAW_RATE = 1.0   # rad/s commanded at full right-stick (firmware closes the loop on the gyro)
 TURN_SIGN = 1        # flip if right-stick-right turns the wrong way
 SEND_HZ = 20

@@ -33,9 +33,36 @@
     </div>
   </section>
   <section class="card">
-    <h2>CONTROLS</h2>
-    <p class="later">Balance, Roll Balance, controller switch, top speed, legs and camera arrive in steps 3-5
-      (docs/WEB_UI_DESIGN.md).</p>
+    <h2>BALANCE</h2>
+    <div class="row">
+      <button class="btn" id="balbtn" disabled>–</button>
+      <button class="btn" id="levbtn" disabled>Roll Balance: –</button>
+    </div>
+    <div class="row">
+      <span class="k">controller</span>
+      <span class="seg">
+        <button class="btn" id="ctrlpol" disabled>POLICY</button><button class="btn" id="ctrllqr" disabled>LQR</button>
+      </span>
+      <span class="hint" id="ctrlhint"></span>
+    </div>
+    <div class="row">
+      <span class="k">top speed</span>
+      <input type="range" id="speed" min="0.05" max="0.30" step="0.01" disabled>
+      <span class="num" id="speedval">–</span>
+    </div>
+    <div class="row">
+      <button class="btn" id="zero" disabled>Reset position</button>
+    </div>
+    <h2 style="margin-top:18px">LEGS</h2>
+    <div class="row">
+      <span class="k">height</span>
+      <input type="range" id="height" min="0" max="100" step="1" disabled title="Drag to the height you want, then let go">
+      <span class="num" id="hval">–</span>
+    </div>
+    <div class="row">
+      <button class="btn" id="leghome" disabled title="Back to the normal ride height (DS4 R3)">Ride height</button>
+    </div>
+    <p class="later">Camera arrives in step 5 (docs/WEB_UI_DESIGN.md).</p>
   </section>
 </main>
 
