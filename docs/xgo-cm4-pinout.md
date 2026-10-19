@@ -10,8 +10,8 @@ Mapped **by physical position** on 2026-06-14 (full press test, all four confirm
 
 | Position     | GPIO | XGO label | Use in this project                         |
 |--------------|------|-----------|---------------------------------------------|
-| upper-left   | 17   | C (key3)  | balance start/stop toggle (next to "RIDER") |
-| upper-right  | 22   | D (key4)  | **tap → `en 0` (STOP) to the ESP32**        |
+| upper-left   | 17   | C (key3)  | **balance / STOP**: idle → `en 1`; balancing → `en 0` + `leglimp` (legs limp too) |
+| upper-right  | 22   | D (key4)  | *reserved* — hotspot on/off (planned, `docs/WEB_UI_DESIGN.md`); unused since 2026-10-19 |
 | lower-left   | 23   | B (key2)  | **hold ~1.5 s → `sudo poweroff`**           |
 | lower-right  | 24   | A (key1)  | tap → `poszero` (reset distance: odom+target→0) |
 

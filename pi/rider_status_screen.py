@@ -44,21 +44,20 @@ ser = serial.Serial(PORT, 115200, timeout=0.1)
 
 # physical buttons on the XGO 2-inch board (active-low, pull-up). Mapped BY POSITION
 # on 2026-06-14 (GPIOs from the XGO CM4 key.py; labels A/B/C/D, but position is what we use):
-#   upper-left  = GPIO17 (C)  -> balance start/stop toggle (next to the RIDER text)
-#   upper-right = GPIO22 (D)  -> tap = STOP (en 0 + leglimp: balance off + legs torque-off) to the ESP32
+#   upper-left  = GPIO17 (C)  -> BALANCE / STOP: idle -> 'en 1'; balancing -> STOP = 'en 0' + 'leglimp'
+#                                (balance off AND legs torque-off). Merged 2026-10-19 (was two buttons).
+#   upper-right = GPIO22 (D)  -> RESERVED for the hotspot on/off toggle (docs/WEB_UI_DESIGN.md); unused now
 #   lower-left  = GPIO23 (B)  -> hold ~1.5s = sudo poweroff
 #   lower-right = GPIO24 (A)  -> tap = reset distance frame ('poszero'; odometer + target -> 0)
-BTN_BALANCE = 17                # upper-left  (C)
+BTN_BALANCE = 17                # upper-left  (C) -> balance / stop
 BTN_POWER   = 23                # lower-left  (B) -> poweroff on ~1.5s hold
 BTN_RESET   = 24                # lower-right (A) -> tap = reset distance ('poszero')
-BTN_STOP    = 22                # upper-right (D) -> tap = STOP (en 0) to the ESP32
 PWR_HOLD_S  = 1.5               # hold time before poweroff fires (also drives the LCD overlay)
 try:
     _chip = lgpio.gpiochip_open(0)
     lgpio.gpio_claim_input(_chip, BTN_BALANCE, lgpio.SET_PULL_UP)
     lgpio.gpio_claim_input(_chip, BTN_POWER,   lgpio.SET_PULL_UP)
     lgpio.gpio_claim_input(_chip, BTN_RESET,   lgpio.SET_PULL_UP)
-    lgpio.gpio_claim_input(_chip, BTN_STOP,    lgpio.SET_PULL_UP)
     btn_ok = True
 except Exception as e:
     print("button GPIO unavailable: %s" % e, flush=True)
@@ -69,8 +68,6 @@ pwr_down_t = 0.0                # power-button press-start time (0 = released)
 pwr_fired = False               # poweroff already triggered this hold
 reset_prev = 1                  # reset-distance button (lower-right) prev level
 reset_last = 0.0                # reset last-press time (debounce)
-stop_prev = 1                   # stop button (upper-right) prev level
-stop_last = 0.0                 # stop last-press time (debounce)
 
 tel = {}
 cmd_q = queue.Queue()           # inbound MQTT -> ESP32 line commands
@@ -237,7 +234,8 @@ def publish():
     status = {
         "controller_connected": controller_connected(),   # real DS4-over-BT state (was hardcoded True)
         "connection_status": "connected",
-        "roll_balance_enabled": bool(en),
+        "roll_balance_enabled": bool(en),   # = BALANCING on (legacy XGO name; the DS4 script reads it as such)
+        "roll_leveling_enabled": bool(int(tel.get("lev", 0))),   # firmware roll leveling (legs keep the body level)
         "battery_level": batt,
         "battery_voltage": vbat,
         "cpu_percent": psutil.cpu_percent(),
@@ -433,16 +431,19 @@ while True:
             ser.write((cmd_q.get_nowait() + "\n").encode())
         except Exception:
             break
-    # C button (upper-left, GPIO17): toggle balancing on each press
+    # C button (upper-left, GPIO17): BALANCE / STOP. Idle -> start balancing. Balancing -> STOP:
+    # 'en 0' (wheels off) + 'leglimp' (legs torque-off too), so the robot settles fully limp.
     if btn_ok:
         lvl = lgpio.gpio_read(_chip, BTN_BALANCE)
         tnow = time.time()
         if btn_prev == 1 and lvl == 0 and tnow - btn_last > 0.4:   # falling edge + debounce
             btn_last = tnow
             if int(tel.get("en", 0)) == 1:
-                ser.write(b"en 0\n")                                # balancing -> stop
+                ser.write(b"en 0\n")
+                ser.write(b"leglimp\n")
+                print("STOP requested (en 0 + leglimp)", flush=True)
             else:
-                ser.write(b"en 1\n")                               # idle -> enable (controller is compiled in)
+                ser.write(b"en 1\n")                               # idle -> balance (balance-on re-energizes the legs)
         btn_prev = lvl
         # power button (lower-left, GPIO23): HOLD ~1.5s -> sudo poweroff (hold, not tap,
         # so a stray press can't shut the robot down mid-use).
@@ -463,15 +464,6 @@ while True:
             ser.write(b"poszero\n")
             print("DIST RESET requested (poszero)", flush=True)
         reset_prev = glvl
-        # STOP button (upper-right, GPIO22): tap -> immediate 'en 0' to the ESP32 (estop) +
-        # 'leglimp' so the legs go torque-OFF too (the robot settles fully limp, not held).
-        slvl = lgpio.gpio_read(_chip, BTN_STOP)
-        if stop_prev == 1 and slvl == 0 and tnow - stop_last > 0.4:   # falling edge + debounce
-            stop_last = tnow
-            ser.write(b"en 0\n")
-            ser.write(b"leglimp\n")
-            print("STOP requested (en 0 + leglimp)", flush=True)
-        stop_prev = slvl
     now = time.time()
     if now - last_render >= 0.2:        # LCD ~5 Hz
         last_render = now
