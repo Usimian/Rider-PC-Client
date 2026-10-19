@@ -23,6 +23,25 @@ no disturbance); boots as the policy. Floor, same session, at hold: policy pitch
 filters/gains were tuned at 163 — try `loopus 6000` first. Also: LQR drive lags its target by
 15–20 cm (pos err −222 mm fwd / +148 mm rev).
 
+## 2026-10-18 evening: factory input filter sweep, turn fix, leg lock-up fix
+
+- **Factory input filter on the LQR** (`lqrinlp`, `lqrinslew`; default 0 = off): floor sweep at the
+  234 Hz loop — 0.3 feels unchanged, **0.5 falls at full-stick speed**. It cannot go on top of the
+  current LQR drive. Reason found: the LQR drives by letting its position target run ~20 cm ahead
+  (pos err −222 mm at full stick), so full speed = a large position-term lean; filter lag on top
+  overshoots it. **Next: rework LQR driving** — speed-proportional lean feedforward (`driveff`,
+  exists, 0) and a target that doesn't run far ahead — then redo the sweep (+ `loopus 6000`).
+- **Turn fix (verified):** the turn-start re-anchor of the target now only happens from a HOLD.
+  Mid-drive it wiped the target lead → LQR stopped, spun, re-accelerated. After: forward command
+  and speed carry through curves.
+- **Leg servos (RC08P, IDs 12/22) going deaf (verified fixed, one heavy run):** after heavy height
+  use a leg stopped answering the bus while holding its last goal, so STOP couldn't limp it; only
+  a power cycle freed it. Cause: per-cycle ADDRESSED goal writes drew replies that collided on the
+  shared bus (wheel rfail up to 4 % during leg moves). Fix: all leg goal updates go through
+  `legGoalWriter()` = one broadcast SYNC_WRITE for both legs (no reply), ≤ 25 Hz. After: 2.5 min of
+  end-to-end height while balancing, both legs answer, STOP limps both, rfail 0 %. **Watch for a
+  recurrence** — a single run is not proof. Free stuck legs with a power cycle.
+
 Marc's recollection of the factory firmware (for step 3 below): full-stick forward had a
 **slow start, then reached a decent speed** — consistent with its heavy input filter and
 rate-limited accumulating wheel command. That ramp is the target feel.

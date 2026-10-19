@@ -73,6 +73,9 @@ volatile float gLqrVx = -6.0f;      // velocity-error gain (damping). NEGATIVE (
                                     // ~4.7mm; cliff ~-7. Capped by quantization-noisy encoder velocity -> velocity
                                     // observer (gObsA/B below) gives a cleaner v -> allows more damping. 'lqrvx'.
 volatile float gLqrQ  = 32.0f;      // pitch-error gain (factory 32) -- balances; sign matches our working PD
+volatile float gLqrInLP   = 0.0f;   // FACTORY input filter on the LQR's pitch + rate: per-cycle LP coefficient
+                                    // (0 = off = June LQR; factory R-1.1.3 = 0.95 at 167 Hz). 'lqrinlp'
+volatile float gLqrInSlew = 5.0f;   // slew limit on the filtered pitch, deg/cycle (factory 5; 0 = none). 'lqrinslew'
 volatile float gLqrDq = 3.0f;       // pitch-rate gain. 1.6->3.0 (2026-06-19, FLOOR): factory 1.6 underdamps on our
                                     // plant -> push-fall AND falls on placement at boot. 3.0 survives pushes (mild ~20Hz
                                     // buzz, accepted). >=6 rings (rate-loop limit cycle). live-tune via 'lqrdq'.
@@ -203,6 +206,7 @@ volatile int   gWheelFault = 0;     // 0=ok; else ID of a wheel that dropped off
 volatile float tTheta=0, tRate=0, tU=0, tWheelX=0, tWheelVx=0;
 volatile float tPacc=0, tPraw=0;    // accel-pitch: comp-corrected vs raw (lever-arm comp verify)
 volatile float tVest=0;             // velocity-observer estimate (vs raw wv) -- observer verify
+volatile float tLqrInQ=0;           // pitch as the LQR sees it after the factory input filter ('lqrin')
 volatile float tRoll=0;                  // lateral tilt (deg), GYRO-FUSED (low-lag) -- feeds leg leveling
 volatile float tRollAcc=0;               // raw accel-only roll (deg), for verifying the fusion vs tRoll
 volatile float gRollGyroSign=-1.0f;      // roll gyro-fusion sign ('rollgsign'); -1 = bench-verified (fused tracks raw on a slow tilt, 2026-06-25)
@@ -511,7 +515,25 @@ static void legService(uint8_t id, int* tgt, bool* ener, int* wrote, int* setl, 
     legSetReg2(id,0x1E,*tgt); legSetReg2(id,0x20,LEG_SPEED); wheelSetReg(id,0x18,1);  // speed, torque on -> servo slews
     *ener=true; *wrote=*tgt; *setl=LEG_SETTLE;                    // to *tgt at LEG_SPEED. torque-on is a write (no reply
   } else if(*setl > 0){ (*setl)--; }                              // needed) -> a dropped read can't leave the leg limp.
-  else if(*tgt != *wrote){ legSetReg2(id,0x1E,*tgt); *wrote=*tgt; } // write the target goal (lands now)
+  // Goal UPDATES are no longer written here: legGoalWriter() sends both legs' targets in one rate-capped
+  // broadcast (2026-10-18). Per-cycle addressed writes each drew a reply that collided on the shared bus
+  // (wheel rfail rose during height moves) and left a leg servo deaf + holding until a power cycle.
+}
+// Send pending leg targets: ONE broadcast SYNC_WRITE for both legs (no reply -> nothing to collide), at most
+// every LEG_WRITE_MS. A leg that is energized+settled but whose partner isn't falls back to one addressed write,
+// under the same cap. The servo slews to each goal at LEG_SPEED, so a 25 Hz goal stream still moves smoothly.
+#define LEG_WRITE_MS 40
+static void legGoalWriter(){
+  static uint32_t lastMs = 0;
+  bool readyR = gLegEnerR && gLegSetlR==0 && gLegTgtR!=LEG_NONE;
+  bool readyL = gLegEnerL && gLegSetlL==0 && gLegTgtL!=LEG_NONE;
+  bool pendR = readyR && gLegTgtR != gLegWroteR;
+  bool pendL = readyL && gLegTgtL != gLegWroteL;
+  if(!(pendR || pendL) || millis() - lastMs < LEG_WRITE_MS) return;
+  if(readyR && readyL){ legGoalSync((int16_t)gLegTgtR, (int16_t)gLegTgtL); gLegWroteR = gLegTgtR; gLegWroteL = gLegTgtL; }
+  else if(pendR){ legSetReg2(RIGHT_LEG, 0x1E, gLegTgtR); gLegWroteR = gLegTgtR; }
+  else          { legSetReg2(LEFT_LEG,  0x1E, gLegTgtL); gLegWroteL = gLegTgtL; }
+  lastMs = millis();
 }
 static inline float clampf(float v,float lo,float hi){return v<lo?lo:(v>hi?hi:v);}
 
@@ -882,7 +904,10 @@ static void balanceTask(void*){
         // target is the spin center (not a stale far point), there's no wrong-way homing after
         // the turn -- which was the 2.5-turn "homes opposite" bug.
         bool turning = (fabsf(gYawRateCmd) > 0.001f);
-        if(turning && !wasTurning){ gPosTarget = wheel_x; gPosTargetEff = wheel_x; posErrInt = 0.0f; }
+        // Only for a turn from a HOLD (stick drive idle): mid-drive the re-anchor is pointless and, in
+        // the LQR, wipes the target lead that is driving the robot (stop-then-turn, 2026-10-18). The
+        // hold integral is KEPT: it carries the policy's bias cancel (see the stick-drive branch).
+        if(turning && !wasTurning && fabsf(gDriveVel) <= 0.001f){ gPosTarget = wheel_x; gPosTargetEff = wheel_x; }
         wasTurning = turning;
         if(fabsf(gDriveVel) > 0.001f){
           // ---- VELOCITY DRIVE (stick held) ----------------------------------------
@@ -994,6 +1019,7 @@ static void balanceTask(void*){
     // ===== LQR full-state controller =====
     // (lqrInit declared up top alongside polInit so the position-runaway cutout's posRef can read it)
     static float obsX=0, obsV=0; static bool obsInit=false;   // velocity-observer state (alpha-beta on wheel_x)
+    static float lqrInQ=0, lqrInDq=0; static bool lqrInInit=false;  // factory input-filter state (pitch, rate)
     static float lqrIx=0;                                     // position-error integral accumulator (m*s); homes steady-state pos error to 0
     if(gEnabled && !fallen){
       // ---- DRIVE MANAGEMENT: the SAME gDriveVel velocity-drive interface as the policy build, so
@@ -1006,7 +1032,10 @@ static void balanceTask(void*){
       else {
         float damax = gPosAmax * sdt;
         bool turning = (fabsf(gYawRateCmd) > 0.001f);
-        if(turning && !wasTurning){ gPosTarget=wheel_x; gPosTargetEff=wheel_x; lqrIx=0.0f; }  // re-anchor home at the spin center -> clear integral
+        // re-anchor home at the spin center -> clear integral; ONLY for a turn from a HOLD. Mid-drive the
+        // target leads the robot by ~20 cm and that lead IS the drive command: re-anchoring it collapsed u
+        // to ~0 at every turn start -> the robot stopped, spun, then re-accelerated (floor log 2026-10-18).
+        if(turning && !wasTurning && fabsf(gDriveVel) <= 0.001f){ gPosTarget=wheel_x; gPosTargetEff=wheel_x; lqrIx=0.0f; }
         wasTurning = turning;
         if(fabsf(gDriveVel) > 0.001f){                                   // VELOCITY DRIVE (stick held)
           float vtgt = clampf(gDriveVel, -gPosVmaxBack, gPosVmax);        // clamp BOTH dirs (forward was uncapped)
@@ -1045,10 +1074,25 @@ static void balanceTask(void*){
       lqrIx += lqr_x * odt;                             // INTEGRATE position error (factory has a Ki here -> exact homing)
       if(lqrIx >  gLqrIxMax) lqrIx =  gLqrIxMax; else if(lqrIx < -gLqrIxMax) lqrIx = -gLqrIxMax;  // anti-windup
       float lqr_vx = vel_est - vdes;                    // velocity error (m/s) -- observer or raw
-      float lqr_q  = pitch - clampf(gDriveFF*vdes, -6.0f, 6.0f);  // pitch err; LEAN-FF tilts the setpoint
+      // FACTORY INPUT FILTER (R-1.1.3 FUN_400d529c, Ghidra): low-pass pitch AND pitch rate per cycle,
+      // then slew-limit the smoothed pitch. Factory: 0.95 LP, 5 deg/cycle. Default OFF (gLqrInLP 0) =
+      // the LQR exactly as floor-tuned in June; step it up live ('lqrinlp'). Only the CONTROLLER sees
+      // the filtered signals -- the fall cutout above keeps using raw pitch, so the lag can't delay it.
+      float pitchIn = pitch, dqIn = dqf;
+      if(!lqrInInit){ lqrInQ = pitch; lqrInDq = dqf; lqrInInit = true; }   // seed at enable: no startup transient
+      if(gLqrInLP > 0.0f){
+        float tgt = gLqrInLP*lqrInQ + (1.0f-gLqrInLP)*pitch;
+        float step = tgt - lqrInQ;
+        if(gLqrInSlew > 0.0f) step = clampf(step, -gLqrInSlew, gLqrInSlew);  // deg per cycle
+        lqrInQ += step;
+        lqrInDq = gLqrInLP*lqrInDq + (1.0f-gLqrInLP)*dqf;
+        pitchIn = lqrInQ; dqIn = lqrInDq;
+      } else { lqrInQ = pitch; lqrInDq = dqf; }          // off: track raw so switching it on is seamless
+      tLqrInQ = pitchIn;                                 // telemetry: what the LQR actually sees ('lqrq')
+      float lqr_q  = pitchIn - clampf(gDriveFF*vdes, -6.0f, 6.0f);  // pitch err; LEAN-FF tilts the setpoint
                                                         // forward ~gDriveFF deg per m/s -> robot leans to cruise (works
                                                         // for the dv/joystick path; a command-FF gets cancelled by balance)
-      float lqr_dq = dqf;                               // pitch rate (deg/s)
+      float lqr_dq = dqIn;                              // pitch rate (deg/s)
       // Sign anchor: the pitch term -gLqrQ*q with q=+ pitch, plus the wheel L:+u/R:-u mapping below, is our
       // verified balance sign -- so it stays UP on the first arm. pos/vel gains floor-verified NEGATIVE.
       float uraw = -(gLqrX*lqr_x + gLqrXi*lqrIx + gLqrVx*lqr_vx + gLqrQ*lqr_q + gLqrDq*lqr_dq);  // +position integral; lean-FF in lqr_q
@@ -1057,6 +1101,7 @@ static void balanceTask(void*){
       u = clampf(uF, -(float)gUMax, (float)gUMax);
     } else {
       uF = 0.0f; lqrInit=false; obsInit=false; lqrIx=0.0f;      // reset output-LP + drive + observer + pos-integral for next enable
+      lqrInInit = false;                                         // + the factory input filter (re-seeded at enable)
       if(!gEnabled && gTestTor!=0) u = (float)gTestTor;          // stand-only debug
     }
     }  // end controller select (gCtrl)
@@ -1211,7 +1256,7 @@ static void balanceTask(void*){
         // write BOTH legs in ONE sync packet (simultaneous = smooth) once both are energized+settled;
         // until then fall back to the per-leg dispatch (gLegAbs) for the lazy safe-energize.
         if(gLegEnerR && gLegEnerL && gLegSetlR==0 && gLegSetlL==0){
-          if(tR!=gLegTgtR || tL!=gLegTgtL){ legGoalSync((int16_t)tR,(int16_t)tL); gLegTgtR=gLegWroteR=tR; gLegTgtL=gLegWroteL=tL; }
+          gLegTgtR = tR; gLegTgtL = tL;                           // legGoalWriter() sends both in one capped broadcast
         } else {
           if(gLegTgtR==LEG_NONE || tR!=gLegTgtR) gLegAbsR=tR;
           if(gLegTgtL==LEG_NONE || tL!=gLegTgtL) gLegAbsL=tL;
@@ -1226,6 +1271,7 @@ static void balanceTask(void*){
         legService(LEFT_LEG,  &gLegTgtL, &gLegEnerL, &gLegWroteL, &gLegSetlL, gLegAbsL, gLegStepL, LEG_L_MIN, LEG_L_MAX);
         gLegAbsL = LEG_NONE; gLegStepL = 0;
       }
+      if(!gLegLimped) legGoalWriter();                            // the ONLY place leg goal updates go on the bus
     }
 
     // dead-reckoned pose: project the change in fused forward distance through the
@@ -1322,6 +1368,8 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"lqrx"))  gLqrX=v;                 // LQR position-error gain (floor-tuned -500)
   else if (!strcmp(s,"lqrvx")) gLqrVx=v;                // LQR velocity-error gain (floor-tuned -6)
   else if (!strcmp(s,"lqrq"))  gLqrQ=v;                 // LQR pitch-error gain (32)
+  else if (!strcmp(s,"lqrinlp"))   gLqrInLP=clampf(v,0.0f,0.98f);   // factory input LP on LQR pitch+rate (0=off; factory 0.95)
+  else if (!strcmp(s,"lqrinslew")) gLqrInSlew=clampf(v,0.0f,90.0f); // filtered-pitch slew, deg/cycle (factory 5; 0=none)
   else if (!strcmp(s,"lqrdq")) gLqrDq=v;                // LQR pitch-rate gain (3)
   else if (!strcmp(s,"lqrxi")) gLqrXi=v;                // LQR position-INTEGRAL gain (0=off); homes steady-state pos error to 0
   else if (!strcmp(s,"lqrixmax")) gLqrIxMax=v;          // LQR position-integral anti-windup clamp (m*s)
@@ -1463,8 +1511,8 @@ void loop(){
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
     char b[704];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lev=%d racc=%.2f gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d\n",
-      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, gLevelOn, tRollAcc, gTurn, gHdgTarget, gYawRateCmd,
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d\n",
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gLevelOn, tRollAcc, gTurn, gHdgTarget, gYawRateCmd,
       (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID));
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     if(gPolJoint && k>0){                        // Stage-1 turn-policy diagnostics (obs + outputs)
