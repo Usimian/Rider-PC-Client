@@ -53,8 +53,15 @@ function status(s) {
   fill.setAttribute("fill", `hsl(${(1.2 * lvl).toFixed(0)} 80% 50%)`);       // 120 = green, 60 = yellow, 0 = red
   set("batt", `${s.battery_level} %`, lvl < 15 ? "num bad" : "num");
   $("battitem").title = `battery ${s.battery_level} %, ${Number(s.battery_voltage).toFixed(2)} V`;
-  $("ds4").setAttribute("class", "icon " + (s.controller_connected ? "on" : "off"));
-  $("ds4").parentElement.title = "DS4 controller " + (s.controller_connected ? "connected" : "not connected");
+  // DS4 icon: grey when not connected; connected, its body fills left to right with the CONTROLLER's charge,
+  // coloured like the robot battery (green -> yellow -> red); the unfilled part stays dim
+  const on = !!s.controller_connected, cb = s.controller_battery;
+  const clvl = on ? (cb == null ? 100 : Math.max(0, Math.min(100, Number(cb)))) : 0;
+  $("ds4").setAttribute("class", "icon " + (on ? "on" : "off"));
+  $("ds4fill").setAttribute("width", (32 * clvl / 100).toFixed(1));
+  $("ds4fill").setAttribute("fill", `hsl(${(1.2 * clvl).toFixed(0)} 80% 50%)`);
+  $("ds4").parentElement.title = !on ? "DS4 controller not connected" :
+    "DS4 controller connected" + (cb == null ? "" : `, battery ${cb} %` + (s.controller_charging ? " (charging)" : ""));
   set("ctrl", s.mode === "POL" ? "POLICY" : s.mode, s.mode === "POL" ? "pol" : "lqr");
   set("bal", s.roll_balance_enabled ? "ON" : "off", s.roll_balance_enabled ? "on" : "off");
   set("lev", s.roll_leveling_enabled ? "ON" : "off", s.roll_leveling_enabled ? "on" : "off");

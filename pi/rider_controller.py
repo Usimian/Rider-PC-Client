@@ -201,6 +201,8 @@ def main():
             if not ensure_js():
                 if drive_mode == "joystick":          # joystick gone -> fall back to computer
                     drive_mode = "computer"; pub_mode(drive_mode); beep(2)
+                    send("dv 0"); send("turnrate 0")  # and STOP: the firmware holds the last drive command
+                                                      # (2026-10-20: a controller that died mid-drive left dv 0.30)
                     print("joystick disconnected -> computer mode", flush=True)
                 time.sleep(1.0); continue
         try:

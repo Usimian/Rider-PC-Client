@@ -144,6 +144,21 @@ def controller_connected():
     return _ctrl["on"]
 
 
+def controller_battery():
+    """The DS4's own battery (kernel hid-playstation: /sys/class/power_supply/ps-controller-battery-<mac>) as
+    (percent, charging) -- (None, False) when no controller is attached."""
+    for d in glob.glob("/sys/class/power_supply/ps-controller-battery-*"):
+        try:
+            with open(d + "/capacity") as f:
+                pct = int(f.read().strip())
+            with open(d + "/status") as f:
+                st = f.read().strip()
+            return pct, st in ("Charging", "Full")
+        except (OSError, ValueError):
+            pass
+    return None, False
+
+
 g_power_msg = None              # set once a poweroff/reboot fires -> render() shows only this from then on
 
 
@@ -241,8 +256,12 @@ def publish():
     en = int(tel.get("en", 0))
     th = tel.get("th", 0.0); roll = tel.get("roll", 0.0); yaw = tel.get("yaw", 0.0)
     batt = int(tel.get("batt", 0)); vbat = round(tel.get("vbat", 0.0), 2)
+    on = controller_connected()
+    cpct, cchg = controller_battery() if on else (None, False)
     status = {
-        "controller_connected": controller_connected(),   # real DS4-over-BT state (was hardcoded True)
+        "controller_connected": on,                        # real DS4-over-BT state (was hardcoded True)
+        "controller_battery": cpct,                        # DS4 battery %, None when not connected
+        "controller_charging": cchg,
         "connection_status": "connected",
         "roll_balance_enabled": bool(en),   # = BALANCING on (legacy XGO name; the DS4 script reads it as such)
         "roll_leveling_enabled": bool(int(tel.get("lev", 0))),   # firmware roll leveling (legs keep the body level)

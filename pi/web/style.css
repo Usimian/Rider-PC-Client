@@ -18,7 +18,7 @@ header h1 { font-size: 18px; margin: 0; letter-spacing: .1em; }
 .spacer { flex: 1; }
 .icon { vertical-align: middle; color: var(--text); }
 .icon.off { color: #5a6185; }               /* DS4 not connected: grey */
-.icon.on  { color: var(--ok); }             /* DS4 connected: green */
+.icon.on  { color: var(--dim); }            /* DS4 connected: the empty part of its charge fill (app.js) */
 #battitem .icon { color: var(--dim); }
 #batt { margin-left: 4px; font-size: 13px; }
 
