@@ -24,6 +24,8 @@ RECIPE = ["--domain_rand", "--frame_stack", "2", "--drive_train", "--caps_lambda
 # 16-22 deg/s (two-wheel sim 5-7), LQR 2.6-3 (sim 1.4-1.9) -> a policy must spin within ~2x the sim LQR.
 TURNS = [("spin+", dict(yaw_cmd=1.0)), ("spin-", dict(yaw_cmd=-1.0)), ("turn-drive", dict(yaw_cmd=1.0, v=0.30))]
 SPIN_RATE_MAX = 3.5     # deg/s pitch-rate RMS while spinning in place
+LEAN_MAX = 2.5          # deg: the drive loop's lean bias at full speed, clean plant. Sim: ld8_s6 1.3-1.4 (floor: drives well),
+                        # tw2_s6 4.9-5.0 (floor 2026-10-20: rocked itself over at full speed, though the sim kept it calm)
 DRIVE = "lead"          # the stick-drive structure the screen runs (must match the recipe: --drive_lead -> 'lead')
 
 
@@ -33,10 +35,10 @@ def parse_seeds(s):
     return [int(x) for x in s.split(",")]
 
 
-def train(name, seed, steps, threads):
+def train(name, seed, steps, threads, add=()):
     env = dict(os.environ, OMP_NUM_THREADS=str(threads), MKL_NUM_THREADS=str(threads))
     log = open(os.path.join(LOGDIR, name + ".log"), "w")
-    cmd = [PY, "train.py", "--steps", str(steps), "--seed", str(seed), "--out", name] + RECIPE
+    cmd = [PY, "train.py", "--steps", str(steps), "--seed", str(seed), "--out", name] + RECIPE + list(add)
     log.write("# " + " ".join(cmd) + "\n"); log.flush()
     return subprocess.Popen(cmd, cwd=HERE, stdout=log, stderr=subprocess.STDOUT, env=env)
 
@@ -77,9 +79,10 @@ def screen(name):
             drv = L[:, 0] > ds.HOLD_S
             a99 = float(np.percentile(np.abs(L[drv, 3]), 99)) if drv.any() else 1.0
             spd = abs(float(np.mean(L[L[:, 0] > L[-1, 0] - 3.0, 4])))
+            lean = abs(float(np.mean(L[L[:, 0] > L[-1, 0] - 3.0, 5])))     # drive-loop lean bias (deg), last 3 s
             rows[plant + "-" + tag] = dict(up=fell is None, fell=fell, rate=s["rate_rms"], freq=s["freq"],
                                            prom=s["prom"], sat=s["act_sat"], pitch=s["pitch_std"],
-                                           travel=abs(s["travel"]), a99=a99, spd=spd)
+                                           travel=abs(s["travel"]), a99=a99, spd=spd, lean=lean)
     L, fell, dt = ds.simulate(infer, +1, 0.0, params=ss, fw_obs=True, drive=DRIVE)
     k = L[:, 0] > 2.0; pr = L[k, 2]
     f, prom = ds.dom_freq(pr, 1.0 / dt, 1.0, 6.0)
@@ -113,6 +116,7 @@ def verdict(m, rows):
         if r["rate"] > 60.0: reasons.append(t + "-rough")
         if 6.0 <= r["freq"] <= 12.0 and r["prom"] > 8: reasons.append(t + "-ring")
         if abs(r["spd"] - 0.30) > 0.05: reasons.append(t + "-speed")    # LQR holds the command within 0.01
+        if t in ("clean-fwd", "clean-rev") and r["lean"] > LEAN_MAX: reasons.append(t + "-lean")
         if t in ("clean-fwd", "clean-rev", "ss-fwd", "ss-rev") and r["a99"] > 0.90: reasons.append(t + "-nomargin")
     h = rows["hold"]
     if h["up"] and h["prom"] > 4.5 and h["freq"] < 3.5: reasons.append("hold-hunt")   # s5-style 2 Hz see-saw
@@ -128,6 +132,8 @@ def main():
     ap.add_argument("--tag", default="fw")
     ap.add_argument("--rescreen", action="store_true", help="skip training; re-screen existing exports")
     ap.add_argument("--extra", default="", help="comma-separated extra policy names to include in --rescreen")
+    ap.add_argument("--add", default="", help="extra train.py arguments for this sweep, e.g. a fine-tune: "
+                                              "'--init ppo_ld8_s6 --anchor_lambda 5 --lr 1e-4'")
     args = ap.parse_args()
     os.makedirs(LOGDIR, exist_ok=True)
     seeds = parse_seeds(args.seeds)
@@ -139,7 +145,7 @@ def main():
 
     def report(n, mins, m, rows):
         def cell(r):
-            return "%.2f %.2f %s" % (r["spd"], r["a99"], "up" if r["up"] else "F%.1f" % r["fell"])
+            return "%.2f %.2f %3.1f° %s" % (r["spd"], r["a99"], r["lean"], "up" if r["up"] else "F%.1f" % r["fell"])
         h = rows["hold"]
         turns = " ".join("%4.1f%s" % (rows[t]["rate"], "" if rows[t]["up"] else "F") for t, _ in TURNS)
         say("%-14s %5.0fm | %+6.2f %5.0f %6.1f | %s | %-22s | %-16s | %s" %
@@ -160,13 +166,13 @@ def main():
             m, rows = screen(n); report(n, 0, m, rows)
         return
 
-    say("\n=== seed sweep %s  seeds=%s  steps=%d  parallel=%d  recipe=%s ===" %
-        (time.strftime("%Y-%m-%d %H:%M"), seeds, args.steps, args.parallel, " ".join(RECIPE)))
+    say("\n=== seed sweep %s  seeds=%s  steps=%d  parallel=%d  recipe=%s %s ===" %
+        (time.strftime("%Y-%m-%d %H:%M"), seeds, args.steps, args.parallel, " ".join(RECIPE), args.add))
     say(header)
     for i in range(0, len(names), args.parallel):
         batch = list(zip(names[i:i + args.parallel], seeds[i:i + args.parallel]))
         t0 = time.time()
-        procs = [(n, train(n, s, args.steps, args.threads)) for n, s in batch]
+        procs = [(n, train(n, s, args.steps, args.threads, args.add.split())) for n, s in batch]
         for n, p in procs:
             p.wait()
         mins = (time.time() - t0) / 60.0

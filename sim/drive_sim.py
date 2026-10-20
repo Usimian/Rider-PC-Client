@@ -119,7 +119,8 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
       (the per-cycle encoder difference; the sim LQR before 2026-10-19).
     inject: t -> raw wheel-cmd added to the controller's output (the firmware's frequency sweep, 'chirp').
     twowheel: the two-wheel plant (rider_env_twowheel) with the firmware turn controller; yaw_cmd = the
-      'turnrate' (rad/s, full stick 1.0) held from yaw_from_s (default hold_s) -- a real spin."""
+      'turnrate' (rad/s, full stick 1.0) held from yaw_from_s (default hold_s) -- a real spin; or a function of t
+      (a stick sequence: turns on, off and reversed while driving)."""
     p = params or DEFAULT
     if latency_s is not None:
         p = replace(p, latency_s=latency_s)
@@ -242,7 +243,7 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
         inj = inject(t) if inject else 0.0                  # firmware 'chirp': known signal on the wheel command
         a = a + inj / POL_FULL_CMD
         if twowheel:
-            env.yaw_cmd = yaw_cmd if t >= yaw_from else 0.0         # the joystick's 'turnrate' (rad/s)
+            env.yaw_cmd = yaw_cmd(t) if callable(yaw_cmd) else (yaw_cmd if t >= yaw_from else 0.0)  # 'turnrate' (rad/s)
         _, _, term, _, _ = env.step(np.array([a], np.float32))
         log.append((t, pitch, prate_true, a, x_vel_true, bias_deg, x - x0, vdes_s, xvel, inj,   # xvel: encoder speed
                     env.last_turn if twowheel else 0.0, env.yaw_rate_turn() if twowheel else 0.0))

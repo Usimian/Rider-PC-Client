@@ -65,6 +65,14 @@ class RiderParams:
                                            # 2-5 Hz; tau rising 13 -> 45 ms with wheel speed reproduces both (sim:
                                            # 21-26 ms holding, 29-44 ms driving at 0.30).
     tau_speed_ref_rad_s: float = 2.0       # wheel speed (rad/s) at which the moving lag is fully in
+    latency_fast_extra_s: float = 0.015    # MEASURED 2026-10-20: extra pure delay at FULL speed. Floor sweeps at 0.32 m/s
+                                           # (two forward runs, ld8_s6, +/-30 cmd 1-6 Hz): the wheel keeps its gain but
+                                           # lags 12-25 deg more than the sim at 1-3 Hz (-43..-58 vs -23..-41); +15 ms
+                                           # delay fits, a slower first-order lag does not (it loses the gain). Ramps in
+                                           # linearly between fast_lat_from / fast_lat_full (the 0.11 m/s sweeps of
+                                           # 2026-10-19 need none).
+    fast_lat_from_rad_s: float = 3.7       # 0.11 m/s
+    fast_lat_full_rad_s: float = 10.7      # 0.32 m/s
     leg_flex_stiffness_Nm_rad: Optional[float] = None  # EXPERIMENT 2026-10-19 (off = None): give in the legs, a
                                            # torsional spring between the legs (wheel servo) and the torso (IMU).
                                            # Marc, by hand: the legs give noticeably when torqued; the robot sits

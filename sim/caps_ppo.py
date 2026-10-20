@@ -19,6 +19,15 @@ class CAPS_PPO(PPO):
         super().__init__(*args, **kwargs)
         self.caps_lambda = caps_lambda      # spatial-smoothness weight (ablate: too high -> can't balance)
         self.caps_sigma = caps_sigma        # state-perturbation std in (normalized) obs space
+        # ANCHOR (fine-tuning, 2026-10-20): keep the policy's mean action on a fixed set of states close to a
+        # reference policy's (loss += anchor_lambda * mean (mu(s) - mu_ref(s))^2). Set by train.py --anchor_lambda.
+        self.anchor_lambda = 0.0
+        self.anchor_obs = None              # (N, obs_dim) normalized observations
+        self.anchor_mu = None               # (N, act_dim) the reference policy's mean actions on them
+        self.anchor_batch = 1024
+
+    def _excluded_save_params(self):
+        return super()._excluded_save_params() + ["anchor_obs", "anchor_mu"]   # data, not model
 
     def train(self) -> None:
         self.policy.set_training_mode(True)
@@ -31,6 +40,7 @@ class CAPS_PPO(PPO):
         pg_losses, value_losses = [], []
         clip_fractions = []
         caps_losses = []
+        anchor_losses = []
         continue_training = True
 
         for epoch in range(self.n_epochs):
@@ -79,6 +89,12 @@ class CAPS_PPO(PPO):
 
                 loss = (policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
                         + self.caps_lambda * caps_loss)
+                if self.anchor_lambda > 0.0:
+                    idx = th.randint(0, self.anchor_obs.shape[0], (self.anchor_batch,))
+                    mu_a = self.policy.get_distribution(self.anchor_obs[idx]).distribution.mean
+                    anchor_loss = ((mu_a - self.anchor_mu[idx]) ** 2).sum(dim=1).mean()
+                    anchor_losses.append(anchor_loss.item())
+                    loss = loss + self.anchor_lambda * anchor_loss
 
                 with th.no_grad():
                     log_ratio = log_prob - rollout_data.old_log_prob
@@ -101,6 +117,8 @@ class CAPS_PPO(PPO):
         self.logger.record("train/policy_gradient_loss", np.mean(pg_losses))
         self.logger.record("train/value_loss", np.mean(value_losses))
         self.logger.record("train/caps_loss", np.mean(caps_losses))
+        if anchor_losses:
+            self.logger.record("train/anchor_loss", np.mean(anchor_losses))
         self.logger.record("train/approx_kl", np.mean(approx_kl_divs))
         self.logger.record("train/clip_fraction", np.mean(clip_fractions))
         self.logger.record("train/loss", loss.item())

@@ -43,6 +43,29 @@ def evaluate(model, vecnorm, frame_stack=1, n=20, fw_obs=True):
     return results
 
 
+def anchor_set(model, vecnorm, args):
+    """States for the --anchor_lambda penalty: the initial policy (sampled actions, for coverage) holding and driving
+    in the two-wheel plant WITHOUT turns, with the training randomization; its mean actions on them are the target."""
+    import torch as th
+    env = RiderTwoWheelEnv(add_noise=True, domain_rand=args.domain_rand, frame_stack=args.frame_stack,
+                           mirror_aug=not args.no_mirror, rate_dr=not args.no_rate_dr, rate_pen=args.rate_pen,
+                           drive_train=args.drive_train, drive_lead=args.drive_lead, pitch_dis=args.pitch_dis,
+                           spin_prob=0.0)
+    obs, _ = env.reset(seed=args.seed)
+    states = []
+    while len(states) < args.anchor_steps:
+        nobs = vecnorm.normalize_obs(obs)
+        states.append(nobs)
+        act, _ = model.predict(nobs, deterministic=False)
+        obs, _, term, trunc, _ = env.step(act)
+        if term or trunc:
+            obs, _ = env.reset()
+    s = th.as_tensor(np.array(states, np.float32))
+    with th.no_grad():
+        mu = model.policy.get_distribution(s).distribution.mean
+    return s, mu
+
+
 def summarize(results):
     stood = sum(1 for _, _, s in results if s)
     held = [x for _, x, s in results if s]
@@ -81,6 +104,14 @@ if __name__ == "__main__":
     ap.add_argument("--pitch_dis", action="store_true")        # randomize the floor's pitch errors (moved balance
                                                                # point by leg height, turn drift) into the fed pitch
     ap.add_argument("--seed", type=int, default=None)          # PPO + env + numpy seed (seed sweeps; None = unseeded)
+    ap.add_argument("--init", default=None)                    # FINE-TUNE from this saved policy (2026-10-20): its
+                                                               # weights and its FROZEN obs normalization (so the
+                                                               # export keeps the same input scaling)
+    ap.add_argument("--anchor_lambda", type=float, default=0.0)  # with --init: keep the policy's mean action close to
+                                                               # the initial policy's on states it visits driving and
+                                                               # holding WITHOUT turning (its floor-proven drive style)
+    ap.add_argument("--anchor_steps", type=int, default=60_000)  # how many such states to collect
+    ap.add_argument("--lr", type=float, default=3e-4)
     args = ap.parse_args()
     if args.seed is not None:
         np.random.seed(args.seed)                              # env sensor noise uses the global numpy RNG
@@ -92,15 +123,28 @@ if __name__ == "__main__":
                                  drive_train=args.drive_train, fw_obs=not args.legacy_obs,
                                  drive_lead=args.drive_lead, pitch_dis=args.pitch_dis, spin_prob=args.spin_prob),
                         n_envs=args.nenv, seed=args.seed)
-    venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
     common = dict(verbose=1, device="cpu", n_steps=1024, batch_size=2048, gamma=0.997,
-                  gae_lambda=0.95, learning_rate=3e-4, policy_kwargs=dict(net_arch=[64, 64]),
+                  gae_lambda=0.95, learning_rate=args.lr, policy_kwargs=dict(net_arch=[64, 64]),
                   tensorboard_log="./tb", seed=args.seed)
-    if args.caps_lambda > 0.0:
+    if args.init:
+        venv = VecNormalize.load(args.init + "_vecnorm.pkl", venv)
+        venv.training = False                                  # frozen: same input scaling as the initial policy
+        model = CAPS_PPO.load(args.init, env=venv, device="cpu", tensorboard_log="./tb",
+                              custom_objects=dict(learning_rate=args.lr, lr_schedule=lambda _: args.lr))
+        if args.seed is not None:
+            model.set_random_seed(args.seed)
+        print(f"fine-tuning {args.init} (lr {args.lr}, caps_lambda {model.caps_lambda}): {args.steps} steps")
+        if args.anchor_lambda > 0.0:
+            model.anchor_obs, model.anchor_mu = anchor_set(model, venv, args)
+            model.anchor_lambda = args.anchor_lambda
+            print(f"anchor: {len(model.anchor_obs)} drive/hold states, lambda {args.anchor_lambda}")
+    elif args.caps_lambda > 0.0:
+        venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
         model = CAPS_PPO("MlpPolicy", venv, caps_lambda=args.caps_lambda, caps_sigma=args.caps_sigma, **common)
         print(f"training CAPS-PPO (lambda={args.caps_lambda}, sigma={args.caps_sigma}): "
               f"{args.steps} steps, {args.nenv} envs, net [64,64] ...")
     else:
+        venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
         model = PPO("MlpPolicy", venv, **common)
         print(f"training PPO: {args.steps} steps, {args.nenv} envs, net [64,64] ...")
     model.learn(total_timesteps=args.steps, progress_bar=False)

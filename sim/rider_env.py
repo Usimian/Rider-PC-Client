@@ -29,6 +29,8 @@ DR_RANGES = {
                                        # lag == robot's 30-35 ms) -> ~20-40 ms effective so the policy learns real
                                        # margin. (0.015-0.028 before: double-counted the sim's own ~20 ms -> 64 ms
                                        # effective and a 4 Hz thrash the robot never shows; see rider_params)
+    "latency_fast_extra_s": (0.005, 0.025),  # the fast wheel's extra delay about the MEASURED 15 ms (2026-10-20, two
+                                       # sweeps; 12-25 deg of extra lag at 1-3 Hz)
     "deadband_frac":  (0.05, 0.15),    # breakaway about the floor-sweep value 0.08 (2026-10-19; was (0.10, 0.22)
                                        # about the 2026-09-16 cruise-fit 0.15). Wide: stick-slip varies.
     "mass_scale":     (0.85, 1.15),    # mass measured -> tighter
@@ -140,7 +142,11 @@ class ActuatorModel:
         # A deque of maxlen n returns the value appended n-1 calls ago (append drops the oldest, then
         # [0] is read) -> maxlen must be n_lat+1 for n_lat steps of delay. Fixed 2026-09-16: every
         # earlier run got one step LESS pure delay than its latency_s said (0.021 s -> 16 ms, not 20).
-        self._buf = deque([0.0] * (n_lat + 1), maxlen=n_lat + 1) if n_lat > 0 else None
+        # speed-dependent extra delay (latency_fast_extra_s): the buffer holds that many more steps, read further back
+        self._n_fast = max(0, round(getattr(p, "latency_fast_extra_s", 0.0) / dt))
+        n_buf = n_lat + self._n_fast
+        self._n_lat = n_lat
+        self._buf = deque([0.0] * (n_buf + 1), maxlen=n_buf + 1) if n_buf > 0 else None
 
     def reset(self):
         self.state = 0.0
@@ -150,9 +156,15 @@ class ActuatorModel:
 
     def __call__(self, cmd: float) -> float:
         cmd = float(np.clip(cmd, -self.p.cmd_limit, self.p.cmd_limit))
-        if self._buf is not None:                      # pure latency
+        if self._buf is not None:                      # pure latency (+ the fast-wheel extra, by the current speed)
             self._buf.append(cmd)
-            cmd = self._buf[0]
+            d = float(self._n_lat)
+            if self._n_fast:
+                p = self.p
+                k = (abs(self.state) - p.fast_lat_from_rad_s) / (p.fast_lat_full_rad_s - p.fast_lat_from_rad_s)
+                d += self._n_fast * min(1.0, max(0.0, k))
+            i = int(d); f = d - i                      # fractional steps: interpolate between neighbours
+            cmd = self._buf[-1 - i] if f == 0.0 else (1 - f) * self._buf[-1 - i] + f * self._buf[-2 - i]
         if getattr(self.p, "stick_slip", False):
             # LOADED hysteretic stick-slip, gated on ACTUAL wheel motion (self.state from the prev step),
             # NOT the instantaneous command -> a spinning wheel rides through zero-crossings in the
@@ -448,7 +460,8 @@ class RiderBalanceEnv(gym.Env):
                      vel_max_rad_s=self.p.vel_max_rad_s * u(*DR_RANGES["vel_gain"]),
                      actuator_tau_s=u(*DR_RANGES["actuator_tau_s"]),
                      deadband_frac=u(*DR_RANGES["deadband_frac"]),
-                     latency_s=u(*DR_RANGES["latency_s"]))
+                     latency_s=u(*DR_RANGES["latency_s"]),
+                     latency_fast_extra_s=u(*DR_RANGES["latency_fast_extra_s"]))
         self.act = ActuatorModel(ep, self.ctrl_dt)
         self.sense.couple = u(*DR_RANGES["accel_couple"])
 
