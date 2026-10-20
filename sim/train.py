@@ -78,8 +78,11 @@ def widen(init, venv, args, common):
 def anchor_set(model, vecnorm, args):
     """States for the --anchor_lambda penalty: the initial policy (sampled actions, for coverage) holding and driving
     in the two-wheel plant WITHOUT turns, with the training randomization; its mean actions on them are the target.
-    --anchor_drive_only: only states while it DRIVES (ramped stick speed > 0.05 m/s). A spin in place looks like
-    holding still to the policy, so anchoring the holds also froze its spin behaviour (2026-10-20 sweeps)."""
+    --anchor_drive_only: only states while the stick is PUSHED or the robot still MOVES (ramped speed > 0.05 m/s) --
+    starts, drives, stops and reversals; not holding still with the stick centred. A spin in place looks like holding
+    still to the policy, so anchoring the holds also froze its spin behaviour (2026-10-20 sweeps). Anchoring only
+    'moving' (without the stick) left starts and reversals free: ppo_da5_s0 learned a violent start and fell
+    backwards twice on the floor (full stick from standing, and full forward into reverse)."""
     import torch as th
     env = RiderTwoWheelEnv(add_noise=True, domain_rand=args.domain_rand, frame_stack=args.frame_stack,
                            mirror_aug=not args.no_mirror, rate_dr=not args.no_rate_dr, rate_pen=args.rate_pen,
@@ -89,7 +92,7 @@ def anchor_set(model, vecnorm, args):
     states = []
     while len(states) < args.anchor_steps:
         nobs = vecnorm.normalize_obs(obs)
-        if not args.anchor_drive_only or abs(env._vdes_s) > 0.05:
+        if not args.anchor_drive_only or abs(env._vdes_cmd) > 0.0 or abs(env._vdes_s) > 0.05:
             states.append(nobs)
         act, _ = model.predict(nobs, deterministic=False)
         obs, _, term, trunc, _ = env.step(act)
@@ -146,7 +149,7 @@ if __name__ == "__main__":
                                                                # the initial policy's on states it visits driving and
                                                                # holding WITHOUT turning (its floor-proven drive style)
     ap.add_argument("--anchor_steps", type=int, default=60_000)  # how many such states to collect
-    ap.add_argument("--anchor_drive_only", action="store_true")  # anchor only DRIVING states (not holds -- a spin
+    ap.add_argument("--anchor_drive_only", action="store_true")  # anchor only stick-pushed / moving states (not holds -- a spin
                                                                # looks like a hold, see anchor_set)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--turn_obs", action="store_true")         # 8th obs per frame: |turnrate command| (two-wheel env).
