@@ -26,6 +26,11 @@
 #include "rider_policy.h"   // auto-generated PPO policy weights (sim/export_policy.py)
 #include "rider_turn_policy.h"  // Stage-1 CAPS-smoothed balance+turn policy (POLT_*, sim/export_policy_turn.py)
 #include "rider_posaware_policy.h"  // POSITION-AWARE policy (POA_*): SEES x_err/x_int, owns position like the LQR
+#ifndef POL_FRAME
+#define POL_FRAME 7                 // inputs per frame: 7, or 8 with the turn input (headers from 2026-10-20 define it)
+#endif
+static_assert(POL_OBS == 2 * POL_FRAME && (POL_FRAME == 7 || POL_FRAME == 8), "policy frame: 2 frames of 7 or 8");
+static_assert(POA_OBS == 14, "position-aware policy: 2 frames of 7");
                                     // ('posaware 1' to A/B vs the default pure-balancer + code position hold)
 #include <Adafruit_NeoPixel.h>
 // status LEDs: 4x WS2812B daisy-chained on ESP32 IO27 (5V) -- see Rider-Pi_SCH.pdf / xgo-cm4-pinout.md
@@ -180,6 +185,12 @@ volatile float gTurnMax    = 250.0f;// clamp on |gTurn| (raw)
 volatile float gWheelDZ    = 5.0f;  // per-wheel anti-stiction floor (raw), applied DURING TURNS only: keeps
                                     // neither wheel in the stiction band so a turn can't go one-sided. live-tune 'wheeldz'
 volatile float gYawRateCmd = 0.0f;  // commanded yaw rate (rad/s) from the stick; full stick = +/-2 rad/s. set via 'turnrate'
+// DRIVE WATCHDOG (2026-10-20): 'dv' and 'turnrate' are heartbeat-fed like 'legrate' -- the DS4 service re-sends them
+// every 0.5 s while it drives. Not refreshed for DRIVE_CMD_TIMEOUT_MS -> zeroed (the robot stops and holds). Before
+// this, a controller that died mid-drive left 'dv 0.30' latched and the robot drove on into a wall.
+#define DRIVE_CMD_TIMEOUT_MS 1000
+volatile uint32_t gDriveMs = 0, gTurnMs = 0;   // when 'dv' / 'turnrate' last arrived
+volatile uint32_t gDriveWdTrips = 0;            // times the watchdog zeroed a stale command (telemetry 'dwd')
 volatile float gYawKp      = 40.0f; // wheel-differential (raw) per rad/s of yaw-rate error (FB trim; 120 oscillated)
 volatile float gYawFF      = 75.0f; // FEEDFORWARD differential (raw) per rad/s commanded -> firm turn open-loop, low FB gain stays stable
 volatile float gTurnLP     = 0.5f;  // low-pass on the turn output (0=off..0.95) -> smooths residual jitter
@@ -314,7 +325,7 @@ static uint8_t  dcWid[DCAP_N]; static int16_t dcP[DCAP_N]; static int16_t dcR[DC
 // extras (2026-10-19): final wheel cmds L/R, right-wheel speed, and the policy's inputs (0 under LQR)
 static int16_t dcL[DCAP_N], dcRc[DCAP_N], dcVR[DCAP_N], dcPP[DCAP_N], dcPR[DCAP_N], dcXV[DCAP_N], dcPI[DCAP_N], dcB[DCAP_N];
 // (2026-10-20) the accelerometer pitch and the yaw rate: the fused pitch's turn drift vs its accel reference
-static int16_t dcPA[DCAP_N], dcYR[DCAP_N];
+static int16_t dcPA[DCAP_N], dcYR[DCAP_N], dcYC[DCAP_N];   // + the turnrate command (the turn input), x1000
 
 // ---- wheel FREQUENCY SWEEP (2026-10-19): identify the loaded wheel's true response on the floor ----
 // While balancing (either controller), 'chirp 1' adds a known log-swept sine to the balance output (the forward
@@ -893,7 +904,7 @@ static void balanceTask(void*){
     float qErr  = pitch - gImuZero;                  // for fall/telemetry (lean error from base)
     static bool  polInit=false;          // neural-policy episode state (reset on disable)
     static bool  lqrInit=false;          // LQR drive-state init on enable; declared here (not in the LQR block) so the runaway cutout's posRef can read it
-    static float polIpitch=0,polPrevX=0,polPrevFrame[7]={0},posErrInt=0,xvelF=0,xvelP=0,uF=0,gPosTargetEff=0,vdesS=0;
+    static float polIpitch=0,polPrevX=0,polPrevFrame[8]={0},posErrInt=0,xvelF=0,xvelP=0,uF=0,gPosTargetEff=0,vdesS=0;
     static float posXInt=0;             // position-aware policy x_err integral (sim _x_int; clamp +/-2.0 m*s)
     static bool  wasVelDrive=false;     // edge-detect velocity-drive -> release, to latch the home cleanly
     static bool  wasTurning=false;      // edge-detect turn start -> re-anchor fore/aft home to the spin center
@@ -918,6 +929,10 @@ static void balanceTask(void*){
       gOdoReset = true;                        // dead-reckoned pose origin too
       gPosZeroReq = false;
     }
+    // drive watchdog (see DRIVE_CMD_TIMEOUT_MS): a stale stick command is zeroed -> release -> the robot holds
+    { uint32_t ms = millis();
+      if(gDriveVel != 0.0f && ms - gDriveMs > DRIVE_CMD_TIMEOUT_MS){ gDriveVel = 0.0f; gDriveWdTrips++; }
+      if(gYawRateCmd != 0.0f && ms - gTurnMs > DRIVE_CMD_TIMEOUT_MS){ gYawRateCmd = 0.0f; gDriveWdTrips++; } }
     float u = 0.0f;
     float turnPol = 0.0f;          // Stage-1 turn-policy turn output (raw wheel cmd); used by the output stage
     if(gCtrl == CTRL_POL){
@@ -1044,11 +1059,14 @@ static void balanceTask(void*){
         // the REAL posErr/posXInt (slots 2,6) so the policy owns position itself, like the LQR.
         float xe = gPosAware ? posErr  : 0.0f;
         float xi = gPosAware ? posXInt : 0.0f;
-        float frame[7]={pr_pitch,pr_rate,xe,xvelP,xvelP/POL_WHEEL_R,polIpitch,xi};
-        if(!polInit){ for(int k=0;k<7;k++) polPrevFrame[k]=frame[k]; polInit=true; }
-        float obs[POL_OBS];                            // frame_stack=2: [prev_frame, curr_frame]
-        for(int k=0;k<7;k++){ obs[k]=polPrevFrame[k]; obs[7+k]=frame[k]; }
-        for(int k=0;k<7;k++) polPrevFrame[k]=frame[k];
+        // 8th input (POL_FRAME 8, sim --turn_obs, 2026-10-20): |turnrate command| -- lets the balancer tell a spin
+        // from holding still. The position-aware policy keeps the 7-input frame.
+        float frame[8]={pr_pitch,pr_rate,xe,xvelP,xvelP/POL_WHEEL_R,polIpitch,xi, fminf(2.0f, fabsf(gYawRateCmd))};
+        int nf = gPosAware ? 7 : POL_FRAME;
+        if(!polInit){ for(int k=0;k<8;k++) polPrevFrame[k]=frame[k]; polInit=true; }
+        float obs[2*8];                                // frame_stack=2: [prev_frame, curr_frame]
+        for(int k=0;k<nf;k++){ obs[k]=polPrevFrame[k]; obs[nf+k]=frame[k]; }
+        for(int k=0;k<8;k++) polPrevFrame[k]=frame[k];
         float ainf = gPosAware ? policyInferA(obs) : policyInfer(obs);
         uraw = gPolSign * ainf * POL_VELMAX_RADS * POL_RAW_PER_RADS; // raw wheel velocity cmd
       }
@@ -1395,6 +1413,7 @@ static void balanceTask(void*){
       dcB[dcIdx] =pol ? (int16_t)(tPolBias*100.0f)        : 0;   // drive-loop bias, deg x100
       dcPA[dcIdx]=(int16_t)(pit_acc*100.0f);                     // accel pitch (lever-arm corrected), deg x100
       dcYR[dcIdx]=(int16_t)(yaw_rate*10.0f);                     // yaw rate, deg/s x10
+      dcYC[dcIdx]=(int16_t)(gYawRateCmd*1000.0f);                // turnrate command (stick), x1000
       dcIdx++;
       if(dcIdx>=DCAP_N){ gDcArm=false; gDcReady=true; }
     }
@@ -1551,7 +1570,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"posvmax"))  gPosVmax=v;          // move speed cap (m/s) for the target slew
   else if (!strcmp(s,"posvmaxb")) gPosVmaxBack=v;      // BACKWARD speed cap (m/s); lower = keep policy out of saturation
   else if (!strcmp(s,"posamax"))  gPosAmax=v;          // accel cap (m/s^2) on the drive-velocity ramp
-  else if (!strcmp(s,"turnrate")) gYawRateCmd=v;       // commanded yaw rate (rad/s); 0=straight
+  else if (!strcmp(s,"turnrate")) { gYawRateCmd=v; gTurnMs=millis(); }  // commanded yaw rate (rad/s); 0=straight; heartbeat (watchdog)
   else if (!strcmp(s,"yawkp"))    gYawKp=v;            // yaw-rate FB trim gain (raw per rad/s)
   else if (!strcmp(s,"yawff"))    gYawFF=v;            // yaw-rate FEEDFORWARD (raw per rad/s cmd) -> turn firmness
   else if (!strcmp(s,"turnlp"))   gTurnLP=clampf(v,0.0f,0.95f); // low-pass on turn output
@@ -1566,7 +1585,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"ledbright")) gLedBright=(int)clampf(v,0.0f,255.0f);  // global LED brightness 0..255 (scales the status colors)
   else if (!strcmp(s,"posvlp"))  gPosVelLP=clampf(v,0.0f,0.99f); // D-term velocity low-pass (0=off..0.99 heavy)
   else if (!strcmp(s,"ptgt"))    { gPosTarget=v; gDriveVel=0.0f; }   // position MOVE to v (m); cancels velocity drive
-  else if (!strcmp(s,"dv"))      gDriveVel=v;          // velocity-drive command (m/s); 0 = release -> latch home + hold
+  else if (!strcmp(s,"dv"))      { gDriveVel=v; gDriveMs=millis(); }   // velocity-drive command (m/s); 0 = release -> latch home + hold; heartbeat (watchdog)
   else if (!strcmp(s,"odoreset")) gOdoReset=true;      // zero dead-reckoned pose (px,py); heading zero is via gyro-cal
   else if (!strcmp(s,"poszero"))  gPosZeroReq=true;    // re-zero the distance frame (odometer+target) mid-balance, no drop
   else if (!strcmp(s,"legstep"))  gLegStepReq += (int)v; // BOTH legs mirrored (body raise/lower); +extend / -retract; clamped, in-loop
@@ -1649,9 +1668,9 @@ void loop(){
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
     char b[704];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d\n",
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u\n",
       tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gLevelOn, tRollAcc, gTurn, gHdgTarget, gYawRateCmd,
-      (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID));
+      (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID), (unsigned)gDriveWdTrips);
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     if(gPolJoint && k>0){                        // Stage-1 turn-policy diagnostics (obs + outputs)
       k--;                                       // drop trailing '\n'
@@ -1666,13 +1685,13 @@ void loop(){
   if(gLogDump){
     int n = (dcIdx>DCAP_N)?DCAP_N:dcIdx;                 // captured sample count, held since 'en 1'
     { char h[192]; int hk=snprintf(h,sizeof(h),"# dcap n=%d cols: i t_us u wid v th_x100 rate_x10 cmdL cmdR vR "
-                                   "pol_pitch_x100 pol_rate_x10 pol_xvel_mm pol_int_m pol_bias_x100 pacc_x100 yaw_x10\n",n);
+                                   "pol_pitch_x100 pol_rate_x10 pol_xvel_mm pol_int_m pol_bias_x100 pacc_x100 yaw_x10 yrc_x1000\n",n);
       emit(h,hk); }
     for(int i=0;i<n;i++){
-      char b[160]; int k=snprintf(b,sizeof(b),"# dcap %d %lu %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+      char b[168]; int k=snprintf(b,sizeof(b),"# dcap %d %lu %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
                                  i,(unsigned long)dcT[i],(int)dcCmd[i],(int)dcWid[i],(int)dcV[i],(int)dcP[i],(int)dcR[i],
                                  (int)dcL[i],(int)dcRc[i],(int)dcVR[i],(int)dcPP[i],(int)dcPR[i],(int)dcXV[i],(int)dcPI[i],
-                                 (int)dcB[i],(int)dcPA[i],(int)dcYR[i]);
+                                 (int)dcB[i],(int)dcPA[i],(int)dcYR[i],(int)dcYC[i]);
       emit(b,k);
       if((i & 15)==0){
         delay(1);
