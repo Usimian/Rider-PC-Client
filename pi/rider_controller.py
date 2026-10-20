@@ -85,8 +85,19 @@ BEEP_WAV = "/home/pi/beep.wav"
 BEEP_DEV = "plughw:CARD=wm8960soundcard,DEV=0"
 BEEP_GAP_S = 0.12   # silence between beeps. One aplay per beep put each aplay start-up in the gap (slow, uneven);
                     # n beeps are now ONE wav (built once per n, cached in /tmp) played by ONE aplay.
+def sound(name):
+    """A motorcycle sound, non-blocking (real recordings cut by pi/assets/cut_engine_sounds.py, installed by
+    deploy_bridge.sh):
+    engine_start = the robot is up, engine_rev = joystick mode, engine_stop = computer mode."""
+    try:
+        subprocess.Popen(["aplay", "-q", "-D", BEEP_DEV, "/home/pi/%s.wav" % name],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
 def beep(n):
-    """n short beeps, non-blocking: 1 = joystick mode, 2 = computer mode, 3 = boot ready,
+    """n short beeps, non-blocking -- the WARNINGS (kept distinct from the engine sounds):
     4 = controller battery low, 5 = controller battery too low to drive (the stick no longer drives)."""
     try:
         path = "/tmp/rider_beep_%d.wav" % n
@@ -222,7 +233,7 @@ def main():
 
     pygame.init()
     pygame.joystick.init()
-    beep(3)          # boot-ready signal: 3 beeps once the controller is up
+    sound("engine_start")   # boot-ready signal once the controller service is up (was 3 beeps)
     js = None
     live = Liveness()
     health = "ok"            # ok / silent / lowbatt: why the stick is (not) driving -- printed on each change
@@ -268,7 +279,7 @@ def main():
         if js is None:
             if not ensure_js():
                 if drive_mode == "joystick":          # joystick gone -> fall back to computer
-                    drive_mode = "computer"; pub_mode(drive_mode); beep(2)
+                    drive_mode = "computer"; pub_mode(drive_mode); sound("engine_stop")
                     send("dv 0"); send("turnrate 0")  # and STOP: the firmware holds the last drive command
                                                       # (2026-10-20: a controller that died mid-drive left dv 0.30)
                     print("joystick disconnected -> computer mode", flush=True)
@@ -334,7 +345,7 @@ def main():
         if edge(BTN_MODE):                     # Start/Options toggles drive source
             drive_mode = "computer" if drive_mode == "joystick" else "joystick"
             send("dv 0"); send("turnrate 0")   # clear any stick command on the switch
-            beep(2 if drive_mode == "computer" else 1)   # 1 beep=joystick, 2=computer
+            sound("engine_stop" if drive_mode == "computer" else "engine_rev")   # was 2 / 1 beeps
             pub_mode(drive_mode)               # -> LCD shows the active drive source
             print("drive_mode -> %s" % drive_mode, flush=True)
         prev_btn = {i: buttons[i] for i in range(len(buttons))}

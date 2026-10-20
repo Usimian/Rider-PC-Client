@@ -18,7 +18,7 @@ set -euo pipefail
 PI="${1:-rider}"                     # ssh-config alias (never a hardcoded IP)
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-echo "==> copying bridge + controller + camera + ToF + beep + units + broker conf + web page to $PI"
+echo "==> copying bridge + controller + camera + ToF + beep + engine sounds + units + broker conf + web page to $PI"
 scp "$HERE/mosquitto-rider.conf"   "$PI:/tmp/mosquitto-rider.conf"
 ssh "$PI" 'rm -rf /tmp/rider-web && mkdir -p /tmp/rider-web'
 scp "$HERE"/web/*                  "$PI:/tmp/rider-web/"
@@ -26,6 +26,7 @@ scp "$HERE/rider_status_screen.py" "$PI:/home/pi/rider_status_screen.py"
 scp "$HERE/rider_controller.py"    "$PI:/home/pi/rider_controller.py"
 scp "$HERE/rider_camera.py"        "$PI:/home/pi/rider_camera.py"
 scp "$HERE/assets/beep.wav"        "$PI:/home/pi/beep.wav"
+scp "$HERE"/assets/engine_*.wav    "$PI:/home/pi/"    # motorcycle sounds (assets/cut_engine_sounds.py)
 scp "$HERE/rider_tof.py"           "$PI:/home/pi/rider_tof.py"
 scp "$HERE/rider_tof_safety.py"    "$PI:/home/pi/rider_tof_safety.py"
 scp "$HERE/rider-bridge.service"   "$PI:/tmp/rider-bridge.service"
