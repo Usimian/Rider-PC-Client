@@ -86,7 +86,8 @@ BEEP_DEV = "plughw:CARD=wm8960soundcard,DEV=0"
 BEEP_GAP_S = 0.12   # silence between beeps. One aplay per beep put each aplay start-up in the gap (slow, uneven);
                     # n beeps are now ONE wav (built once per n, cached in /tmp) played by ONE aplay.
 def beep(n):
-    """n short beeps, non-blocking: 1 = joystick mode, 2 = computer mode, 3 = boot ready."""
+    """n short beeps, non-blocking: 1 = joystick mode, 2 = computer mode, 3 = boot ready,
+    4 = controller battery low, 5 = controller battery too low to drive (the stick no longer drives)."""
     try:
         path = "/tmp/rider_beep_%d.wav" % n
         if not os.path.exists(path):
@@ -101,8 +102,67 @@ def beep(n):
     except Exception:
         pass
 
+# --- controller health (2026-10-20: a DS4 whose battery died mid-drive drove the robot into a wall: Bluetooth took
+#     ~10 s to declare it gone, and meanwhile pygame kept reporting the last stick position, which we kept sending) ---
+SILENT_S = 0.5       # no data from the DS4's motion sensors this long -> treat the controller as gone: stop the drive.
+                     # hid-playstation streams that input device continuously (~550 events/s measured, even at rest)
+BATT_WARN = 25       # DS4 battery % (it reports 5, 15, 25 ... 95; 100 while on the charger) at/below which, unplugged,
+                     # the robot beeps 4 times
+BATT_STOP = 15       # ... and at/below which the stick no longer drives or turns (the robot holds; 5 beeps)
+
+
+class Liveness:
+    """Watches the DS4's 'Motion Sensors' input device. Silence = the controller died or lost its link, seconds
+    before Bluetooth declares it gone. Not found (another gamepad) -> no check (alive() stays True)."""
+
+    def __init__(self):
+        self.fd, self.last = None, 0.0
+
+    def attach(self):
+        self.close()
+        try:
+            with open("/proc/bus/input/devices") as f:
+                blocks = f.read().split("\n\n")
+        except OSError:
+            return
+        for b in blocks:
+            if "Wireless Controller Motion Sensors" in b:
+                ev = [w for line in b.splitlines() if line.startswith("H: Handlers=")
+                      for w in line.split("=", 1)[1].split() if w.startswith("event")]
+                if ev:
+                    try:
+                        self.fd = os.open("/dev/input/" + ev[0], os.O_RDONLY | os.O_NONBLOCK)
+                        self.last = time.time()
+                        print("liveness: watching", ev[0], flush=True)
+                    except OSError as e:
+                        print("liveness: cannot open", ev[0], e, flush=True)
+                return
+
+    def close(self):
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+        self.fd = None
+
+    def alive(self, now):
+        if self.fd is None:
+            return True
+        try:
+            while os.read(self.fd, 4096):        # drain; any data = alive
+                self.last = now
+        except BlockingIOError:
+            pass
+        except OSError:                          # device gone (the controller disconnected)
+            self.close()
+            return False
+        return now - self.last < SILENT_S
+
+
 state = {"en": 0, "pos": 0.0, "fwd_factor": 1.0,   # fwd_factor: ToF safety cap (1=clear..0=stop)
-         "max_speed": MAX_SPEED}                     # full-stick speed (m/s), from TOPIC_MAXSPEED
+         "max_speed": MAX_SPEED,                     # full-stick speed (m/s), from TOPIC_MAXSPEED
+         "cbatt": None, "cchg": False}               # DS4 battery % / charging, from rider/status (the bridge)
 
 
 def on_message(client, userdata, msg):
@@ -125,6 +185,9 @@ def on_message(client, userdata, msg):
         return
     if "roll_balance_enabled" in p:
         state["en"] = 1 if p["roll_balance_enabled"] else 0
+    if "controller_battery" in p:
+        state["cbatt"] = p["controller_battery"]
+        state["cchg"] = bool(p.get("controller_charging", False))
     if "position" in p:
         try:
             state["pos"] = float(p["position"])
@@ -161,14 +224,19 @@ def main():
     pygame.joystick.init()
     beep(3)          # boot-ready signal: 3 beeps once the controller is up
     js = None
+    live = Liveness()
+    health = "ok"            # ok / silent / lowbatt: why the stick is (not) driving -- printed on each change
+    warned = False           # the low-battery warning beeped (re-armed once charged above BATT_WARN or on the charger)
 
     def ensure_js():
         nonlocal js
         if pygame.joystick.get_count() > 0:
             js = pygame.joystick.Joystick(0); js.init()
             print("joystick:", js.get_name(), "axes", js.get_numaxes(), "buttons", js.get_numbuttons(), flush=True)
+            live.attach()
             return True
         js = None
+        live.close()
         return False
 
     last_vel = None
@@ -220,6 +288,26 @@ def main():
 
         now = time.time()
 
+        # controller health: a silent DS4 (dead battery / lost link, before Bluetooth notices) or a nearly flat one
+        # must not keep driving the robot -> drive + turn held at 0 (the robot stops and holds); a silent one also
+        # stops the legs. Low battery counts only unplugged (on the charger it reports 100 -- and can't die).
+        alive = live.alive(now)
+        cb = state["cbatt"] if not state["cchg"] else None
+        now_health = "silent" if not alive else ("lowbatt" if cb is not None and cb <= BATT_STOP else "ok")
+        if now_health != health:
+            health = now_health
+            print("controller health -> %s%s" % (health, "" if cb is None else " (battery %d %%)" % cb), flush=True)
+            if health == "lowbatt":
+                beep(5)
+        if cb is not None and cb <= BATT_WARN and not warned:
+            warned = True
+            if health == "ok":
+                beep(4)
+            print("controller battery low: %d %%" % cb, flush=True)
+        elif cb is None or cb > BATT_WARN:
+            warned = False
+        hold = health != "ok"
+
         def edge(idx):
             cur = buttons[idx] if idx < len(buttons) else 0
             return cur and not prev_btn.get(idx, 0)
@@ -257,7 +345,7 @@ def main():
         # return to 0) plus a heartbeat while moving; the firmware stops the legs if the heartbeat stops.
         hy = -axes[AXIS_HEIGHT] if AXIS_HEIGHT < len(axes) else 0.0      # stick up = positive = body up
         hx = axes[AXIS_TURN] if AXIS_TURN < len(axes) else 0.0
-        h = dz(hy, HEIGHT_DEADZONE) if abs(hy) > 1.5 * abs(hx) else 0.0
+        h = dz(hy, HEIGHT_DEADZONE) if abs(hy) > 1.5 * abs(hx) and alive else 0.0
         rate = round(h * HEIGHT_RATE, 1)
         if ((rate != last_height_rate) or (rate != 0.0 and now - last_height_send >= 1.0 / HEIGHT_HZ)) \
                 and now - last_height_send >= send_period:
@@ -272,7 +360,7 @@ def main():
             # Firmware drives at this speed while non-zero and latches the current position as
             # the hold-home the instant it returns to 0 (-> drives smooth, stops where you let
             # go, no windup/overshoot). 'ptgt' position moves are still honored separately.
-            d = dz(-axes[AXIS_DRIVE]) if AXIS_DRIVE < len(axes) else 0.0   # stick up = forward
+            d = dz(-axes[AXIS_DRIVE]) if AXIS_DRIVE < len(axes) and not hold else 0.0   # stick up = forward
             vel = d * state["max_speed"]                # full stick = the web page's top speed
             if vel > 0.0:                       # ToF safety governor: cap FORWARD only (reverse = escape)
                 vel *= state["fwd_factor"]
@@ -283,7 +371,7 @@ def main():
                 last_vel = vel
                 send("dv %.3f" % vel)
             # turn: right stick X -> commanded yaw rate (rad/s); send on change incl. return to 0
-            tn = dz(axes[AXIS_TURN], TURN_DEADZONE) if AXIS_TURN < len(axes) else 0.0
+            tn = dz(axes[AXIS_TURN], TURN_DEADZONE) if AXIS_TURN < len(axes) and not hold else 0.0
             yaw_cmd = TURN_SIGN * tn * MAX_YAW_RATE
             # send on meaningful change (incl. all the way to 0) OR a 0.5s heartbeat -- the SAME logic as
             # drive above. The old change>0.05-only rule with no heartbeat let a small turn value LATCH in
