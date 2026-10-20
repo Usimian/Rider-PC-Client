@@ -77,7 +77,9 @@ def widen(init, venv, args, common):
 
 def anchor_set(model, vecnorm, args):
     """States for the --anchor_lambda penalty: the initial policy (sampled actions, for coverage) holding and driving
-    in the two-wheel plant WITHOUT turns, with the training randomization; its mean actions on them are the target."""
+    in the two-wheel plant WITHOUT turns, with the training randomization; its mean actions on them are the target.
+    --anchor_drive_only: only states while it DRIVES (ramped stick speed > 0.05 m/s). A spin in place looks like
+    holding still to the policy, so anchoring the holds also froze its spin behaviour (2026-10-20 sweeps)."""
     import torch as th
     env = RiderTwoWheelEnv(add_noise=True, domain_rand=args.domain_rand, frame_stack=args.frame_stack,
                            mirror_aug=not args.no_mirror, rate_dr=not args.no_rate_dr, rate_pen=args.rate_pen,
@@ -87,7 +89,8 @@ def anchor_set(model, vecnorm, args):
     states = []
     while len(states) < args.anchor_steps:
         nobs = vecnorm.normalize_obs(obs)
-        states.append(nobs)
+        if not args.anchor_drive_only or abs(env._vdes_s) > 0.05:
+            states.append(nobs)
         act, _ = model.predict(nobs, deterministic=False)
         obs, _, term, trunc, _ = env.step(act)
         if term or trunc:
@@ -143,6 +146,8 @@ if __name__ == "__main__":
                                                                # the initial policy's on states it visits driving and
                                                                # holding WITHOUT turning (its floor-proven drive style)
     ap.add_argument("--anchor_steps", type=int, default=60_000)  # how many such states to collect
+    ap.add_argument("--anchor_drive_only", action="store_true")  # anchor only DRIVING states (not holds -- a spin
+                                                               # looks like a hold, see anchor_set)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--turn_obs", action="store_true")         # 8th obs per frame: |turnrate command| (two-wheel env).
                                                                # With --init of a 7-obs policy, its network is WIDENED
@@ -176,7 +181,8 @@ if __name__ == "__main__":
         if args.anchor_lambda > 0.0:
             model.anchor_obs, model.anchor_mu = anchor_set(model, venv, args)
             model.anchor_lambda = args.anchor_lambda
-            print(f"anchor: {len(model.anchor_obs)} drive/hold states, lambda {args.anchor_lambda}")
+            print(f"anchor: {len(model.anchor_obs)} {'driving' if args.anchor_drive_only else 'drive/hold'} states, "
+                  f"lambda {args.anchor_lambda}")
     elif args.caps_lambda > 0.0:
         venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
         model = CAPS_PPO("MlpPolicy", venv, caps_lambda=args.caps_lambda, caps_sigma=args.caps_sigma, **common)

@@ -26,6 +26,8 @@ TURNS = [("spin+", dict(yaw_cmd=1.0)), ("spin-", dict(yaw_cmd=-1.0)), ("turn-dri
 SPIN_RATE_MAX = 3.5     # deg/s pitch-rate RMS while spinning in place
 LEAN_MAX = 2.5          # deg: the drive loop's lean bias at full speed, clean plant. Sim: ld8_s6 1.3-1.4 (floor: drives well),
                         # tw2_s6 4.9-5.0 (floor 2026-10-20: rocked itself over at full speed, though the sim kept it calm)
+FLOOR_SPINS = "floor_spins_ld8s6_2026-10-20.csv"   # ld8_s6 spinning on the floor (see floor_spin_gain)
+FLOOR4_MAX = 0.80       # its 4 Hz response relative to ld8_s6 must be below this (tw2_s6 0.75 halved the floor shimmy)
 DRIVE = "lead"          # the stick-drive structure the screen runs (must match the recipe: --drive_lead -> 'lead')
 
 
@@ -94,7 +96,36 @@ def screen(name):
         k = L[:, 0] > 3.0
         pr = L[k, 2] if k.sum() > 32 else L[:, 2]
         rows[tag] = dict(up=fell is None, fell=fell, rate=np.degrees(np.sqrt((pr ** 2).mean())))
+    m["floor4"] = floor_spin_gain(infer)
     return m, rows
+
+
+def floor_spin_gain(infer):
+    """FLOOR-REPLAY check (2026-10-20): ld8_s6's floor spins (FLOOR_SPINS, its policy inputs at loop rate) fed to the
+    candidate, open loop; returns its response to the 4 Hz shimmy relative to ld8_s6's own recorded output (pitch-rate
+    -> output cross-spectrum, 3.5-4.8 Hz). The sim's own spin number did not predict the floor; this did, on the two
+    floor results: tt25_s4 0.95x -> floor spin unchanged (21 deg/s), tw2_s6 0.75x -> floor spin halved (8.5)."""
+    import csv
+    import numpy as np
+    eps = {}
+    for r in csv.DictReader(open(os.path.join(HERE, FLOOR_SPINS))):
+        eps.setdefault(r["spin"], []).append(r)
+    gains = []
+    for rs in eps.values():
+        g = lambda k, s=1.0: np.array([float(r[k]) for r in rs]) * s
+        pp, pr = np.radians(g("pol_pitch_x100", 0.01)), np.radians(g("pol_rate_x10", 0.1))
+        xv, ip = g("pol_xvel_mm", 1e-3), g("pol_int_m", 1e-3)
+        cols = [pp, pr, 0 * pp, xv, xv / 0.03, ip, 0 * pp]
+        if getattr(infer, "turn_obs", False):
+            cols.append(np.minimum(2.0, np.abs(g("yrc_x1000", 1e-3))))
+        fr = np.stack(cols, 1)
+        u1 = np.array([infer(np.concatenate([fr[i - 1], fr[i]])) * 30 * 7.764 for i in range(1, len(fr))])
+        u0, pr = g("cmd")[1:], pr[1:]
+        f = np.fft.rfftfreq(len(u0), np.median(np.diff(g("t_us", 1e-6))))
+        P, U0, U1 = (np.fft.rfft((x - x.mean()) * np.hanning(len(x))) for x in (pr, u0, u1))
+        k = (f >= 3.5) & (f <= 4.8)
+        gains.append(abs(np.sum(np.conj(P[k]) * U1[k])) / abs(np.sum(np.conj(P[k]) * U0[k])))
+    return float(np.mean(gains))
 
 
 def verdict(m, rows):
@@ -106,6 +137,7 @@ def verdict(m, rows):
     for t in ("spin+", "spin-"):
         if rows[t]["up"] and rows[t]["rate"] > SPIN_RATE_MAX: reasons.append(t + "-shimmy")
     if not rows["hold"]["up"]: reasons.append("hold-falls")
+    if m["floor4"] > FLOOR4_MAX: reasons.append("floor-shimmy")
     if abs(m["a_op"]) > 0.5: reasons.append("a_op")
     if m["gRatio"] > 2.0: reasons.append("gain-asym")
     if m["sat"] > 0.10: reasons.append("clipped")
@@ -147,7 +179,8 @@ def main():
         def cell(r):
             return "%.2f %.2f %3.1f° %s" % (r["spd"], r["a99"], r["lean"], "up" if r["up"] else "F%.1f" % r["fell"])
         h = rows["hold"]
-        turns = " ".join("%4.1f%s" % (rows[t]["rate"], "" if rows[t]["up"] else "F") for t, _ in TURNS)
+        turns = " ".join("%4.1f%s" % (rows[t]["rate"], "" if rows[t]["up"] else "F") for t, _ in TURNS) + \
+            " fl4 %.2f" % m["floor4"]
         say("%-14s %5.0fm | %+6.2f %5.0f %6.1f | %s | %-22s | %-16s | %s" %
             (n, mins, m["a_op"], 100 * m["sat"], m["gRatio"],
              " | ".join(cell(rows[pl + "-fwd"]) + " / " + cell(rows[pl + "-rev"])
@@ -159,7 +192,7 @@ def main():
         ("policy", "train", "a_op", "sat%", "gRatio",
          " | ".join("%-25s" % (pl + " FWD/REV spd a99") for pl in ("clean", "stick-slip", "weak x0.85", "low legs -3",
                                                                     "turn drift -2")),
-         "ss HOLD std rate f x", "2W spin+/-/turn", "verdict")
+         "ss HOLD std rate f x", "2W spin+/-/turn  floor4", "verdict")
     if args.rescreen:
         say("\n=== rescreen %s ===" % time.strftime("%Y-%m-%d %H:%M")); say(header)
         for n in ([x for x in args.extra.split(",") if x] + names):
