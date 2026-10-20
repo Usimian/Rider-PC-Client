@@ -32,7 +32,8 @@ THR = 0.12
 f = open(OUT, "w", buffering=1)
 # the firmware's '# dcap' fields, in order (main.cpp logdump; 'cmd' = the balance output u)
 COLS = ["i", "t_us", "cmd", "wid", "v", "pitch_cdeg", "rate_x10", "cmdL", "cmdR", "vR",
-        "pol_pitch_x100", "pol_rate_x10", "pol_xvel_mm", "pol_int_m", "pol_bias_x100", "pacc_x100", "yaw_x10"]
+        "pol_pitch_x100", "pol_rate_x10", "pol_xvel_mm", "pol_int_m", "pol_bias_x100", "pacc_x100", "yaw_x10",
+        "yrc_x1000"]
 f.write("episode,dir," + ",".join(COLS) + "\n")
 st = {"ep": 0, "last": 0.0, "cap": False, "dir": "", "rows": [], "seen": False,
       "armed": 0.0, "dumped": True}
@@ -57,7 +58,7 @@ def on_message(c, u, m):
                 hist.clear(); hspin.clear()
         elif pl.startswith("# dcap ") and st["cap"]:
             p = pl.split()
-            if len(p) == 2 + len(COLS):      # '# dcap' + the fields (fw 2026-10-19 added cmdL..pol_bias_x100, 10-20 pacc + yaw)
+            if len(p) == 2 + len(COLS):      # '# dcap' + the fields (fw 2026-10-19 added cmdL..pol_bias_x100, 10-20 pacc, yaw, yrc)
                 st["rows"].append(",".join(p[2:]))
         return
     if not pl.startswith("th="):
