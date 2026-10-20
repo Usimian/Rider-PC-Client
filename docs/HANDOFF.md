@@ -1,50 +1,40 @@
 # Handoff: the RL balance policy (live investigation)
 
-Read at session start. Facts live in the repo (commit messages of 2026-10-19 carry the numbers,
+Read at session start. Facts live in the repo (commit messages of 2026-10-19/20 carry the numbers,
 `sim/rider_params.py` the provenance); this is only the running story, the open list, and what not to trust.
 
-## Where it stands (2026-10-19 evening)
+## Where it stands (2026-10-20 afternoon)
 
-- **Flashed:** `ppo_ld8_s6` + the LQR-like policy stick drive (`polleash` 0.25 m, bias clamp 8°) + the
-  frequency-sweep firmware (`chirp`). Floor: drives 0.30 m/s both ways, holds speed through turns, reverses
-  cleanly. Marc: "that works great". LQR mode unchanged and works well.
-- **The one open defect: a 4 Hz shimmy while SPINNING in place, policy only.** Measured (loop-rate captures,
-  `data/captures/2026-10-19_*`, gitignored): pitch-rate RMS 16-22 °/s, ~95 % at 3-6 Hz, balance output ±20-25;
-  LQR spins at 2.6-3.0 °/s with output ±6-14. Slow-mo video (`data/video/spin_policy_2026-10-19.mov`):
-  the whole body rocks in pitch (front/back white arms see-saw, wheels shuffle) -- not visible leg flex.
-  Marc's goal: fix it in the POLICY (no LQR hand-over).
-- **Ruled out (sim or floor):** the turn output (steady ±2-3), gyro / fused-pitch offsets, "weaker/later
-  spinning wheel" (a misreading -- the sweeps show the same wheel spinning or straight), output smoothing
-  (`polulp 0.5` made it slightly worse: 17.1 -> 18.6 °/s, 4.0 -> 3.4 Hz -- delay feeds it), leg give or free
-  play in the 2-D sim (they shake the sim LQR as much or more, unlike the floor).
-- **Sim now matches the floor** on: wheel response holding (sweep) and moving (lag 36-56 ms), s9's falls,
-  ld8_s6 / LQR drives, LQR calm (servo-style speed). Marc checked the mechanics: nothing loose.
-- **Two-wheel sim** (`sim/rider_env_twowheel.py`, drive_sim `twowheel=True`): firmware turn controller, tyre
-  scrub calibrated (turn 66 / yaw 1.22 rad/s = floor). Spinning, ld8_s6 rocks more than LQR (as on the floor)
-  but ~1/3 the floor size (5-7 vs 16-22 deg/s). Training in it (`--spin_prob 0.3`, sweep `ppo_tw2_*`):
-  **candidate `ppo_tw2_s6`** spins at 2.0 deg/s in the sim (ld8_s6 5.5, LQR 1.4-1.9), drives 0.30 both ways,
-  deep_check 150 runs clean except a weak wheel at 0.35; TRADE-OFF: reverse with low legs / turn drift only
-  0.15 / 0.19 m/s (ld8_s6 0.31).
+- **Flashed:** `ppo_ld8_s6` (committed `rider_policy.h`) + the drive watchdog. Drives 0.30 m/s both ways, turns,
+  reverses; full-forward-into-full-reverse is a smooth ~2 s lean-back (LQR does it in 0.25 s with a 20° lurch).
+- **The one open defect: a 4 Hz shimmy while SPINNING in place, policy only** (floor 16-22 °/s pitch-rate RMS,
+  ~95 % at 3-6 Hz; LQR 3-4). Goal stays: fix it in the POLICY.
+- **2026-10-20, what did not fix it (all floor-tested):**
+  - `ppo_tw2_s6` (trained in the two-wheel sim): spin 8.5 °/s, but it drives with a 5° lean and rocked itself
+    over at full speed (several falls). Sim kept it calm -> the screen now has a LEAN check (`LEAN_MAX` 2.5°).
+  - `ppo_tt25_s4` (ld8_s6 fine-tuned with an anchor + a new |turn command| input): spin 20.7/20.9 °/s, unchanged.
+    The replay shows the robot computed it exactly and the turn input moved its spin output by only ~3 raw.
+- **Conclusion so far:** the sim calms the spin when the policy changes, the floor does not -> the floor's
+  spin shimmy has a cause the sim does not contain. Checked and matching floor<->sim: policy computation
+  (replay), body pitch dynamics (sweep), wheel response standing and at full speed (sweeps; the sim now has the
+  measured +15 ms fast-wheel delay), drive lean/speed/output, turn drift (<0.7°, settles -- smaller than the
+  sim's 2° test). No training until the missing mechanism is found.
 
 ## Open list, in order
 
-1. **Floor-test `ppo_tw2_s6`** (ask before flashing; stand + USB-C; copy `sim/ppo_tw2_s6_policy.h` ->
-   `firmware/esp32_rider_fw/src/rider_policy.h`): spins both ways WITH the capture running
-   (`tools/capture/drivecap_capture.py out.csv --spin`, then `shimmy_meter`-style numbers vs ld8_s6's 17-19
-   deg/s), straight 0.30 both ways, turns while driving, reverse with the legs lowered. ld8_s6 stays the
-   committed fallback (`git show 0cf57b3:firmware/esp32_rider_fw/src/rider_policy.h`).
-2. If tw2_s6 still shimmies on the floor: the two-wheel sim understates it ~3x -- find the missing factor
-   (compare the policy's captured spin inputs with the sim's), then retrain.
-3. Under-voltage on boot (5 V rail ~4.94 V idle) -- see HARDWARE.md Power; `/home/pi/riderlog.txt` is never
-   rotated (archive + truncate when large, as on 2026-10-19).
-4. ToF obstacle/edge stop runs but is OFF by default (web page switch). It false-flagged a flat floor before;
-   the page's ToF card shows zone classes -- check them while driving before leaving it on.
+1. **Find the spin-shimmy mechanism the sim lacks.** Ideas not yet tried: a frequency sweep WHILE SPINNING
+   (`chirp` with a held turnrate -- does the wheel/body response change when the wheels counter-rotate?);
+   compare the policy's captured spin inputs (`drivecap` now has accel pitch, yaw rate, turn command) with the
+   two-wheel sim's for the same spin; tyre/caster scrub dynamics in the spin.
+2. ToF obstacle/edge stop runs but is OFF by default (web switch); check its zone classes while driving before
+   leaving it on.
+3. Under-voltage on boot (5 V rail ~4.94 V idle); `/home/pi/riderlog.txt` is never rotated (195 MB on 10-20).
+4. The controller low-battery cutoff (<= 15 %, unplugged) is untested -- it will show the first time a DS4 runs low.
 
 ## Do not trust
 
-- The leg-give / free-play sim options (`leg_flex_*`, `leg_play_deg`): experiments, off by default, none
-  matched the floor.
-- Closed-loop estimates of the wheel's lag without an injected signal (they read 35-40 ms holding; the
-  sweep shows 7-18) -- use `sim/wheel_sweep.py` + the firmware `chirp`.
-- The DualShock button indices in `pi/rider_controller.py` for any other gamepad (Xbox pad stays with the
-  Hover -- one controller per robot, Marc 2026-10-18).
+- Sim spin numbers as a floor prediction: ld8_s6 6 vs floor 18; tt25_s4 3.6 vs floor 21.
+- Closed-loop fits of plant dynamics from drive recordings without an injected signal (they gave nonsense
+  pendulum constants) -- use the `chirp` sweeps.
+- 10 Hz telemetry for anything at 1-5 Hz (it aliases the rocking) -- use `drivecap` / `chirp` captures.
+- The leg-give / free-play sim options (`leg_flex_*`, `leg_play_deg`): experiments, off, never matched.
