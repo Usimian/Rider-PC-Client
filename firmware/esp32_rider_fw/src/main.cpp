@@ -313,6 +313,8 @@ static uint32_t dcT[DCAP_N]; static int16_t dcCmd[DCAP_N]; static int16_t dcV[DC
 static uint8_t  dcWid[DCAP_N]; static int16_t dcP[DCAP_N]; static int16_t dcR[DCAP_N]; static int dcIdx=0;
 // extras (2026-10-19): final wheel cmds L/R, right-wheel speed, and the policy's inputs (0 under LQR)
 static int16_t dcL[DCAP_N], dcRc[DCAP_N], dcVR[DCAP_N], dcPP[DCAP_N], dcPR[DCAP_N], dcXV[DCAP_N], dcPI[DCAP_N], dcB[DCAP_N];
+// (2026-10-20) the accelerometer pitch and the yaw rate: the fused pitch's turn drift vs its accel reference
+static int16_t dcPA[DCAP_N], dcYR[DCAP_N];
 
 // ---- wheel FREQUENCY SWEEP (2026-10-19): identify the loaded wheel's true response on the floor ----
 // While balancing (either controller), 'chirp 1' adds a known log-swept sine to the balance output (the forward
@@ -1391,6 +1393,8 @@ static void balanceTask(void*){
       dcXV[dcIdx]=pol ? (int16_t)(tPolXV*1000.0f)         : 0;   // fed velocity, mm/s
       dcPI[dcIdx]=pol ? (int16_t)(tPolPI*1000.0f)         : 0;   // pitch integral, mrad*s
       dcB[dcIdx] =pol ? (int16_t)(tPolBias*100.0f)        : 0;   // drive-loop bias, deg x100
+      dcPA[dcIdx]=(int16_t)(pit_acc*100.0f);                     // accel pitch (lever-arm corrected), deg x100
+      dcYR[dcIdx]=(int16_t)(yaw_rate*10.0f);                     // yaw rate, deg/s x10
       dcIdx++;
       if(dcIdx>=DCAP_N){ gDcArm=false; gDcReady=true; }
     }
@@ -1662,12 +1666,13 @@ void loop(){
   if(gLogDump){
     int n = (dcIdx>DCAP_N)?DCAP_N:dcIdx;                 // captured sample count, held since 'en 1'
     { char h[192]; int hk=snprintf(h,sizeof(h),"# dcap n=%d cols: i t_us u wid v th_x100 rate_x10 cmdL cmdR vR "
-                                   "pol_pitch_x100 pol_rate_x10 pol_xvel_mm pol_int_m pol_bias_x100\n",n); emit(h,hk); }
+                                   "pol_pitch_x100 pol_rate_x10 pol_xvel_mm pol_int_m pol_bias_x100 pacc_x100 yaw_x10\n",n);
+      emit(h,hk); }
     for(int i=0;i<n;i++){
-      char b[128]; int k=snprintf(b,sizeof(b),"# dcap %d %lu %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+      char b[160]; int k=snprintf(b,sizeof(b),"# dcap %d %lu %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
                                  i,(unsigned long)dcT[i],(int)dcCmd[i],(int)dcWid[i],(int)dcV[i],(int)dcP[i],(int)dcR[i],
                                  (int)dcL[i],(int)dcRc[i],(int)dcVR[i],(int)dcPP[i],(int)dcPR[i],(int)dcXV[i],(int)dcPI[i],
-                                 (int)dcB[i]);
+                                 (int)dcB[i],(int)dcPA[i],(int)dcYR[i]);
       emit(b,k);
       if((i & 15)==0){
         delay(1);
