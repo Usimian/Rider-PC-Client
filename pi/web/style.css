@@ -20,6 +20,7 @@ header h1 { font-size: 18px; margin: 0; letter-spacing: .1em; }
 .icon.off { color: #5a6185; }               /* DS4 not connected: grey */
 .icon.on  { color: var(--dim); }            /* DS4 connected: the empty part of its charge fill (app.js) */
 #battitem .icon { color: var(--dim); }
+.icon.chg { color: #ffd23f; margin-left: 1px; }   /* DS4 charging: lightning bolt */
 #batt { margin-left: 4px; font-size: 13px; }
 
 #estop {

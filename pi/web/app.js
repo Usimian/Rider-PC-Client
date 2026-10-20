@@ -60,6 +60,7 @@ function status(s) {
   $("ds4").setAttribute("class", "icon " + (on ? "on" : "off"));
   $("ds4fill").setAttribute("width", (32 * clvl / 100).toFixed(1));
   $("ds4fill").setAttribute("fill", `hsl(${(1.2 * clvl).toFixed(0)} 80% 50%)`);
+  $("ds4chg").style.display = on && s.controller_charging ? "" : "none";     // lightning bolt while charging
   $("ds4").parentElement.title = !on ? "DS4 controller not connected" :
     "DS4 controller connected" + (cb == null ? "" : `, battery ${cb} %` + (s.controller_charging ? " (charging)" : ""));
   set("ctrl", s.mode === "POL" ? "POLICY" : s.mode, s.mode === "POL" ? "pol" : "lqr");
