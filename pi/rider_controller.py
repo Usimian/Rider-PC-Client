@@ -88,7 +88,7 @@ BEEP_GAP_S = 0.12   # silence between beeps. One aplay per beep put each aplay s
 def sound(name):
     """A motorcycle sound, non-blocking (real recordings cut by pi/assets/cut_engine_sounds.py, installed by
     deploy_bridge.sh):
-    engine_start = the robot is up, engine_rev = joystick mode, engine_stop = computer mode."""
+    engine_start = the robot is up, engine_rev = joystick mode (computer mode is silent)."""
     try:
         subprocess.Popen(["aplay", "-q", "-D", BEEP_DEV, "/home/pi/%s.wav" % name],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -279,7 +279,7 @@ def main():
         if js is None:
             if not ensure_js():
                 if drive_mode == "joystick":          # joystick gone -> fall back to computer
-                    drive_mode = "computer"; pub_mode(drive_mode); sound("engine_stop")
+                    drive_mode = "computer"; pub_mode(drive_mode)
                     send("dv 0"); send("turnrate 0")  # and STOP: the firmware holds the last drive command
                                                       # (2026-10-20: a controller that died mid-drive left dv 0.30)
                     print("joystick disconnected -> computer mode", flush=True)
@@ -345,7 +345,8 @@ def main():
         if edge(BTN_MODE):                     # Start/Options toggles drive source
             drive_mode = "computer" if drive_mode == "joystick" else "joystick"
             send("dv 0"); send("turnrate 0")   # clear any stick command on the switch
-            sound("engine_stop" if drive_mode == "computer" else "engine_rev")   # was 2 / 1 beeps
+            if drive_mode == "joystick":
+                sound("engine_rev")            # computer mode: silent (was 2 beeps)
             pub_mode(drive_mode)               # -> LCD shows the active drive source
             print("drive_mode -> %s" % drive_mode, flush=True)
         prev_btn = {i: buttons[i] for i in range(len(buttons))}
