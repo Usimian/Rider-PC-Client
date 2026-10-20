@@ -234,8 +234,11 @@ class RiderBalanceEnv(gym.Env):
                  mirror_aug: bool = False, vel_pen: float = 0.0, rate_dr: bool = True,
                  pos_anchor: float = 0.0, pos_weight: float = 0.75, rate_pen: float = 0.30,
                  drive_train: bool = False, fw_obs: bool = True, drive_lead: bool = False,
-                 pitch_dis: bool = False):
+                 pitch_dis: bool = False, turn_obs: bool = False):
         super().__init__()
+        # turn_obs (2026-10-20): an 8th obs per frame, |turnrate command| (full stick 1.0) -- the policy can tell a
+        # spin from holding still. Mirror-invariant (it is a size). Always 0 in the 2-D env (no turns).
+        self.turn_obs = turn_obs
         # fw_obs: feed the policy what the FIRMWARE feeds it (FirmwareSensing: encoder-differenced +
         # low-passed velocity, low-passed pitch rate) instead of clean physics state. Default ON since
         # 2026-09-16; fw_obs=False reproduces the older recipes (ppo_v_pure ... ppo_drive34_l4).
@@ -325,7 +328,7 @@ class RiderBalanceEnv(gym.Env):
         # the derivative of the commanded velocity, so static feedback can't stabilize
         # -- integral (PI-like) state can. Both are trivial to accumulate on the ESP32.
         self._int_clip = (1.0, 2.0)        # clamps (rad*s, m*s) to prevent windup
-        high1 = np.array([np.pi, 50.0, 5.0, 10.0, 200.0, 1.0, 2.0], np.float32)
+        high1 = np.array([np.pi, 50.0, 5.0, 10.0, 200.0, 1.0, 2.0] + ([2.0] if turn_obs else []), np.float32)
         high = np.tile(high1, self.frame_stack)
         self.observation_space = spaces.Box(-high, high, dtype=np.float32)
         self._stack = deque(maxlen=self.frame_stack)
@@ -384,7 +387,13 @@ class RiderBalanceEnv(gym.Env):
         # firmware feeds pr_pitch = biasDeg - pitch. bias_rad is 0 when not drive_train (pure balance).
         o = np.array([pitch + self._bias_rad, pitch_rate, xerr, x_vel, wheel_vel,
                       self._pitch_int, xint], np.float32)
-        return (self.mirror * o).astype(np.float32)   # all 7 obs are odd under the mirror
+        o = self.mirror * o                            # all 7 obs are odd under the mirror
+        if self.turn_obs:
+            o = np.append(o, self._turn_size())        # ... the turn size is not
+        return o.astype(np.float32)
+
+    def _turn_size(self):
+        return 0.0                                     # the two-wheel env overrides: |turnrate command|
 
     def _drive_bias(self):
         """Run the firmware setpoint-tilt loop (main.cpp / drive_sim.py) for one control step and

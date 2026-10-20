@@ -8,7 +8,7 @@ Deterministic policy:
     a = clip( W3 @ tanh(W2 @ tanh(W1 @ z + b1) + b2) + b3, -1, 1 )
 
 The ESP32 must, each control step, assemble `obs` = frame_stack copies of
-[pitch, pitch_rate, x_err, x_vel, wheel_vel, INT_pitch, INT_x] (oldest..newest),
+[pitch, pitch_rate, x_err, x_vel, wheel_vel, INT_pitch, INT_x] (+ |turnrate cmd| with --turn_obs) (oldest..newest),
 accumulating the two integrals (clamped) and the stack, then run the above.
 """
 import sys
@@ -24,8 +24,14 @@ PFX = sys.argv[3] if len(sys.argv) > 3 else "POL"   # C macro/array prefix (POA 
 POS_AWARE = "--posaware" in sys.argv                  # validate in the position-aware env (policy SEES x_err/x_int)
 
 model = PPO.load(name, device="cpu")
-vn = VecNormalize.load(name + "_vecnorm.pkl",
-                       DummyVecEnv([lambda: RiderBalanceEnv(frame_stack=FS, pure_balance=not POS_AWARE)]))
+# 8 obs per frame = the turn input (train.py --turn_obs, 2026-10-20): validate in the two-wheel env, turning
+TURN = model.observation_space.shape[0] // FS == 8
+if TURN:
+    from rider_env_twowheel import RiderTwoWheelEnv
+    mk = lambda: RiderTwoWheelEnv(frame_stack=FS, add_noise=False, turn_obs=True)
+else:
+    mk = lambda: RiderBalanceEnv(frame_stack=FS, add_noise=False, pure_balance=not POS_AWARE)
+vn = VecNormalize.load(name + "_vecnorm.pkl", DummyVecEnv([mk]))
 
 # --- extract weights: hidden Linears (policy_net) + output (action_net) ---
 layers = []
@@ -55,10 +61,12 @@ def npforward(raw_obs):
 
 
 # --- validate against SB3 over real rollouts ---
-env = RiderBalanceEnv(frame_stack=FS, add_noise=False, pure_balance=not POS_AWARE)
+env = mk()
 maxerr, nsteps = 0.0, 0
 for s in range(20):
     obs, _ = env.reset(seed=s)
+    if TURN:
+        env.yaw_cmd = (0.0, 0.5, -1.0, 0.8)[s % 4]       # exercise the turn input too
     for _ in range(40):
         a_sb3, _ = model.predict(vn.normalize_obs(obs), deterministic=True)
         a_np = npforward(obs.astype(np.float64))
@@ -68,7 +76,8 @@ for s in range(20):
         if term or trunc:
             break
 
-print(f"obs_dim={obs_dim} (frame_stack={FS} x 7)  hidden={[W.shape[0] for W,_ in layers[:-1]]}")
+FRAME = "[pitch,prate,x_err,x_vel,wheel_vel,INT_pitch,INT_x" + (",|turnrate cmd|]" if TURN else "]")
+print(f"obs_dim={obs_dim} (frame_stack={FS} x {obs_dim // FS})  hidden={[W.shape[0] for W,_ in layers[:-1]]}")
 print(f"numpy-vs-SB3 max |action| error over {nsteps} steps: {maxerr:.2e}  "
       f"{'OK (portable)' if maxerr < 1e-5 else 'MISMATCH'}")
 
@@ -95,8 +104,8 @@ def carr(a):
 with open(name + "_policy.h", "w") as f:
     kind = "POSITION-AWARE (sees x_err/x_int)" if POS_AWARE else "deterministic"
     f.write(f"// auto-generated from {name} -- {kind} PPO policy for ESP32 ({PFX}_*)\n")
-    f.write(f"// obs (len {obs_dim}) = {FS} frames of [pitch,prate,x_err,x_vel,wheel_vel,INT_pitch,INT_x]\n")
-    f.write(f"#define {PFX}_OBS {obs_dim}\n#define {PFX}_FS {FS}\n")
+    f.write(f"// obs (len {obs_dim}) = {FS} frames of {FRAME}\n")
+    f.write(f"#define {PFX}_OBS {obs_dim}\n#define {PFX}_FS {FS}\n#define {PFX}_FRAME {obs_dim // FS}\n")
     f.write(f"#define {PFX}_CLIP {clip:.1f}f\n#define {PFX}_EPS {eps:.8g}f\n")
     f.write(f"static const float {PFX}_MEAN[{obs_dim}]={carr(mean)};\n")
     f.write(f"static const float {PFX}_VAR[{obs_dim}]={carr(var)};\n")

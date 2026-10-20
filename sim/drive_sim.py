@@ -63,6 +63,7 @@ def load_policy(name):
         z = np.clip((o - mean) / np.sqrt(var + eps), -clip, clip)
         x = np.tanh(W0 @ z + b0); x = np.tanh(W1 @ x + b1)
         return float(np.clip((W2 @ x + b2)[0], -1.0, 1.0))
+    infer.turn_obs = mean.shape[0] // int(d["frame_stack"]) == 8      # trained with the turn input (--turn_obs)
     return infer
 
 
@@ -233,7 +234,10 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
             bias_rad = bias_deg * DEG2RAD
             pr_pitch = pitch_obs + bias_rad                 # setpoint-tilted (possibly accel-corrupted) pitch obs
             pint = float(np.clip(pint + pr_pitch * dt, -1.0, 1.0))
-            frame = np.array([pr_pitch, prate, 0.0, x_vel, wheel_vel, pint, 0.0], np.float32)
+            frame = [pr_pitch, prate, 0.0, x_vel, wheel_vel, pint, 0.0]
+            if getattr(infer, "turn_obs", False):          # |turnrate cmd| (firmware: |gYawRateCmd|)
+                frame.append(min(2.0, abs(env.yaw_cmd)) if twowheel else 0.0)
+            frame = np.array(frame, np.float32)
             if i == 0:
                 for _ in range(2): stack.append(frame)
             else:

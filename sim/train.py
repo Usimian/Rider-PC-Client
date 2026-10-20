@@ -16,17 +16,18 @@ from caps_ppo import CAPS_PPO       # PPO + spatial action-smoothness (used when
 
 def make_env(domain_rand=False, frame_stack=1, vel_pen=0.0, mirror_aug=True, rate_dr=True,
              pos_anchor=0.0, pure_balance=True, pos_weight=0.75, rate_pen=0.30, drive_train=False,
-             fw_obs=True, drive_lead=False, pitch_dis=False, spin_prob=0.0):
+             fw_obs=True, drive_lead=False, pitch_dis=False, spin_prob=0.0, turn_obs=False):
     # spin_prob > 0: the TWO-WHEEL env (rider_env_twowheel) -- real turns/spins through the firmware turn controller
     cls, extra = (RiderTwoWheelEnv, dict(spin_prob=spin_prob)) if spin_prob > 0.0 else (RiderBalanceEnv, {})
     return lambda: cls(add_noise=True, domain_rand=domain_rand, frame_stack=frame_stack,
                        mirror_aug=mirror_aug, vel_pen=vel_pen, rate_dr=rate_dr, rate_pen=rate_pen,
                        pos_anchor=pos_anchor, pure_balance=pure_balance, pos_weight=pos_weight,
-                       drive_train=drive_train, fw_obs=fw_obs, drive_lead=drive_lead, pitch_dis=pitch_dis, **extra)
+                       drive_train=drive_train, fw_obs=fw_obs, drive_lead=drive_lead, pitch_dis=pitch_dis,
+                       turn_obs=turn_obs, **extra)
 
 
-def evaluate(model, vecnorm, frame_stack=1, n=20, fw_obs=True):
-    env = RiderBalanceEnv(add_noise=False, frame_stack=frame_stack, fw_obs=fw_obs)
+def evaluate(model, vecnorm, frame_stack=1, n=20, fw_obs=True, turn_obs=False):
+    env = RiderBalanceEnv(add_noise=False, frame_stack=frame_stack, fw_obs=fw_obs, turn_obs=turn_obs)
     results = []
     for s in range(n):
         obs, _ = env.reset(seed=100 + s)
@@ -43,6 +44,37 @@ def evaluate(model, vecnorm, frame_stack=1, n=20, fw_obs=True):
     return results
 
 
+def widen(init, venv, args, common):
+    """A 7-obs-per-frame policy -> the same policy with an 8th input per frame (turn_obs) whose weights are ZERO,
+    so it computes exactly what `init` does until training moves them. Obs normalization: init's, frozen; the new
+    input gets mean 0 / var 1. Returns (model, normalized venv)."""
+    import pickle
+    import torch as th
+    old = CAPS_PPO.load(init, device="cpu")
+    with open(init + "_vecnorm.pkl", "rb") as fh:
+        old_vn = pickle.load(fh)
+    fs = args.frame_stack
+    n_old = old.observation_space.shape[0] // fs                   # 7
+    n_new = venv.observation_space.shape[0] // fs                  # 8
+    keep = [f * n_new + i for f in range(fs) for i in range(n_old)]    # where the old inputs land
+    vn = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=old_vn.clip_obs, gamma=old_vn.gamma)
+    vn.obs_rms.mean[:] = 0.0; vn.obs_rms.var[:] = 1.0
+    vn.obs_rms.mean[keep] = old_vn.obs_rms.mean; vn.obs_rms.var[keep] = old_vn.obs_rms.var
+    vn.obs_rms.count = old_vn.obs_rms.count
+    vn.ret_rms = old_vn.ret_rms
+    vn.training = False                                            # frozen, as for any fine-tune
+    model = CAPS_PPO("MlpPolicy", vn, caps_lambda=old.caps_lambda, caps_sigma=old.caps_sigma, **common)
+    sd_old, sd = old.policy.state_dict(), model.policy.state_dict()
+    for k in sd:
+        w = sd_old[k]
+        if sd[k].shape != w.shape:                                 # a first layer: spread the old columns out
+            assert sd[k].dim() == 2 and sd[k].shape[1] == n_new * fs and w.shape[1] == n_old * fs, k
+            nw = th.zeros_like(sd[k]); nw[:, keep] = w; w = nw
+        sd[k] = w.clone()
+    model.policy.load_state_dict(sd)
+    return model, vn
+
+
 def anchor_set(model, vecnorm, args):
     """States for the --anchor_lambda penalty: the initial policy (sampled actions, for coverage) holding and driving
     in the two-wheel plant WITHOUT turns, with the training randomization; its mean actions on them are the target."""
@@ -50,7 +82,7 @@ def anchor_set(model, vecnorm, args):
     env = RiderTwoWheelEnv(add_noise=True, domain_rand=args.domain_rand, frame_stack=args.frame_stack,
                            mirror_aug=not args.no_mirror, rate_dr=not args.no_rate_dr, rate_pen=args.rate_pen,
                            drive_train=args.drive_train, drive_lead=args.drive_lead, pitch_dis=args.pitch_dis,
-                           spin_prob=0.0)
+                           spin_prob=0.0, turn_obs=args.turn_obs)
     obs, _ = env.reset(seed=args.seed)
     states = []
     while len(states) < args.anchor_steps:
@@ -112,6 +144,9 @@ if __name__ == "__main__":
                                                                # holding WITHOUT turning (its floor-proven drive style)
     ap.add_argument("--anchor_steps", type=int, default=60_000)  # how many such states to collect
     ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--turn_obs", action="store_true")         # 8th obs per frame: |turnrate command| (two-wheel env).
+                                                               # With --init of a 7-obs policy, its network is WIDENED
+                                                               # with zero weights -> it starts as exactly that policy
     args = ap.parse_args()
     if args.seed is not None:
         np.random.seed(args.seed)                              # env sensor noise uses the global numpy RNG
@@ -121,16 +156,20 @@ if __name__ == "__main__":
                                  pos_anchor=args.pos_anchor, pure_balance=not args.pos_aware,
                                  pos_weight=args.pos_weight, rate_pen=args.rate_pen,
                                  drive_train=args.drive_train, fw_obs=not args.legacy_obs,
-                                 drive_lead=args.drive_lead, pitch_dis=args.pitch_dis, spin_prob=args.spin_prob),
+                                 drive_lead=args.drive_lead, pitch_dis=args.pitch_dis, spin_prob=args.spin_prob,
+                                 turn_obs=args.turn_obs),
                         n_envs=args.nenv, seed=args.seed)
     common = dict(verbose=1, device="cpu", n_steps=1024, batch_size=2048, gamma=0.997,
                   gae_lambda=0.95, learning_rate=args.lr, policy_kwargs=dict(net_arch=[64, 64]),
                   tensorboard_log="./tb", seed=args.seed)
-    if args.init:
+    if args.init and args.turn_obs:
+        model, venv = widen(args.init, venv, args, common)
+    elif args.init:
         venv = VecNormalize.load(args.init + "_vecnorm.pkl", venv)
         venv.training = False                                  # frozen: same input scaling as the initial policy
         model = CAPS_PPO.load(args.init, env=venv, device="cpu", tensorboard_log="./tb",
                               custom_objects=dict(learning_rate=args.lr, lr_schedule=lambda _: args.lr))
+    if args.init:
         if args.seed is not None:
             model.set_random_seed(args.seed)
         print(f"fine-tuning {args.init} (lr {args.lr}, caps_lambda {model.caps_lambda}): {args.steps} steps")
@@ -154,5 +193,5 @@ if __name__ == "__main__":
 
     venv.training = False
     print("eval (deterministic, noise off, 20 seeds):")
-    res = evaluate(model, venv, args.frame_stack, fw_obs=not args.legacy_obs)
+    res = evaluate(model, venv, args.frame_stack, fw_obs=not args.legacy_obs, turn_obs=args.turn_obs)
     summarize(res)

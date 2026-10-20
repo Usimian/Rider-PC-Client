@@ -35,11 +35,12 @@ def metrics(npz):
     mean, var, eps, clip, layers = load(npz)
     infer = make_infer(mean, var, eps, clip, layers)
     a_op = infer(mean)
-    # pitch-error sweep about the operating point (obs idx 0 and 7 = pitch, both frames)
+    # pitch-error sweep about the operating point (obs idx 0 and k = pitch, both frames; k = 7, or 8 with the turn input)
+    k = len(mean) // 2
     pe = np.linspace(-0.3, 0.3, 241)
     a = []
     for v in pe:
-        o = mean.copy(); o[0] += v; o[7] += v; a.append(infer(o))
+        o = mean.copy(); o[0] += v; o[k] += v; a.append(infer(o))
     a = np.array(a)
     sat = np.mean(np.abs(a) >= 0.99)
     pos = pe > 0
@@ -51,8 +52,8 @@ def metrics(npz):
     sym_err = np.sqrt(np.mean((a_pos[:n] + a_neg[:n]) ** 2))
     # local gains at +/-0.05 rad
     def slope(center):
-        o1 = mean.copy(); o1[0] += center + 0.02; o1[7] += center + 0.02
-        o2 = mean.copy(); o2[0] += center - 0.02; o2[7] += center - 0.02
+        o1 = mean.copy(); o1[0] += center + 0.02; o1[k] += center + 0.02
+        o2 = mean.copy(); o2[0] += center - 0.02; o2[k] += center - 0.02
         return (infer(o1) - infer(o2)) / 0.04
     gNeg, gPos = slope(-0.05), slope(0.05)
     lo, hi = sorted([abs(gNeg), abs(gPos)])

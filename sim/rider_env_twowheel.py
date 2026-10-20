@@ -149,6 +149,9 @@ class RiderTwoWheelEnv(RiderBalanceEnv):
         cl, cr = self._counts()
         return 0.5 * (cl + cr) * (2 * np.pi / 1024.0)            # firmware wheel_x: mean of the two encoders
 
+    def _turn_size(self):
+        return min(2.0, abs(self.yaw_cmd))                         # the turn_obs input (firmware: |gYawRateCmd|)
+
     def yaw_rate_turn(self):
         """Yaw rate in the firmware's turn sense: positive when the LEFT wheel runs faster (L = u + tn)."""
         return -self.data.qvel[self.d_yaw]
