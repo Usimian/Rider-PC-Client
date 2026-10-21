@@ -107,6 +107,23 @@ position at rest — the fault only showed mid-range under motion, so a static r
   4.72 V / min 4.70 V (was 4.70 / 4.65), **clock held 2.0 GHz** (was dropping to 1.0 GHz), but still 3
   brief under-voltage events in the minute at 100 % CPU; 73.6 °C at the end (sustained 2.0 GHz). In
   normal use (~10-15 % CPU) it should stay clear. Setpoint / lead fixes remain the real margin.
+- **2026-10-21: a bad contact in the 5 V lead, not the load.** The cap's quiet spell (0 alarms in ~20
+  boots, 10-19 09:39 to 10-20 08:56, floor driving included) ended at the 10-20 09:43 power-up with no
+  software change; every boot after had alarms (2-20), the first ~6 s after boot. Same 60 s 4-core test
+  (robot disabled, on the stand), CM5 sensor sampled every ~0.5 s:
+
+  | | median | min | samples in under-voltage | clock |
+  |---|---|---|---|---|
+  | before reseat, USB-C in | 4.81 V | 4.61 V | 65/133 | throttled, ~1.5 GHz |
+  | before reseat, battery only | 4.79 V | 4.60 V | 69/133 | throttled, ~1.5 GHz |
+  | **after reseating both ends of the 5 V lead**, battery only | 4.75 V | 4.72 V | **0/135** | 2.0 GHz |
+
+  The DC level barely moved; the deep dips went away -> an intermittent connector contact. USB-C makes
+  no difference. The 10-19 quiet spell likely began when that day's meter probing reseated the same
+  connectors. All three WiFi failures on record (slow joins 10-18 18:51 and 10-21 07:49, the silent
+  dropout 10-21 06:41) fell in alarm periods; none in the quiet spell. The connector will work loose
+  again under driving vibration: secure it or replace the lead. Test (robot disabled):
+  `tools/diag/pi_5v_load_test.py`.
 
 ## Camera / input
 - **CSI camera** OV5647 via picamera2 (`pi/rider_camera.py`). **NoIR module — no infrared-cut filter**
