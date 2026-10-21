@@ -16,12 +16,13 @@ rebuild, and this is the whole list:
 | Secret | What it's for | Where used |
 |---|---|---|
 | `NICOU_WIFI_PSK` | the `nicou` 5 GHz WiFi passphrase (WPA2-PSK) | step 5 |
+| `PHONE_HOTSPOT_SSID`, `PHONE_HOTSPOT_PSK` | Marc's iPhone hotspot name + password (the field network) | step 5b |
 
 Set it up once, at the start:
 
 ```bash
 cp pi/secrets.env.example pi/secrets.env   # pi/secrets.env is gitignored
-$EDITOR pi/secrets.env                      # fill in NICOU_WIFI_PSK
+$EDITOR pi/secrets.env                      # fill in every value
 set -a; . pi/secrets.env; set +a            # export it for the steps below
 ```
 
@@ -157,6 +158,24 @@ sudo systemctl restart NetworkManager
 timeouts. **Open caveat:** 5 GHz cold-boot reliability isn't fully validated; if a headless
 cold boot comes up with no WiFi, `journalctl -b -1` for `reason=15`, and the fallback is
 `nmcli con mod nicou 802-11-wireless.band bg`.
+
+### 5b. Field network: the phone's hotspot
+
+Away from home the Pi joins Marc's iPhone Personal Hotspot; the phone's browser then opens the Rider
+page at the Pi's address on that network (the LCD shows it, right of the ToF line; iPhone hotspots hand
+out `172.20.10.x`, `http://raspberrypi.local` usually works too). Home wins whenever both are in range
+(autoconnect priority 10 vs 5). The WiFi watchdog needs nothing: the phone is the router it pings.
+
+```bash
+sudo nmcli connection add type wifi con-name phone ifname wlan0 ssid "$PHONE_HOTSPOT_SSID"
+sudo nmcli connection modify phone \
+  802-11-wireless-security.key-mgmt wpa-psk wifi-sec.psk "$PHONE_HOTSPOT_PSK" \
+  connection.autoconnect yes connection.autoconnect-priority 5
+sudo nmcli connection modify nicou connection.autoconnect-priority 10
+```
+
+No band pin: with "Maximize Compatibility" on, the iPhone offers 2.4 GHz only. Turn the hotspot on
+(and keep its settings screen open) before powering the Rider -- iOS stops advertising it when idle.
 
 ## 6. Persistent logging
 

@@ -18,6 +18,7 @@ import re
 import glob
 import json
 import queue
+import socket
 import subprocess
 import serial
 import psutil
@@ -213,11 +214,12 @@ def do_reboot():
 
 # ---------------- MQTT (republish + relay) ----------------
 g_drivemode = "computer"   # joystick / computer -- boot default is computer; controller publishes on change
+g_wifi_state = None       # rider/wifi (the WiFi watchdog, which pings the router): "up" / "down" / "starting"
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
     for t in ("rider/control/line", "rider/control/system",
               "rider/control/movement", "rider/control/settings", "rider/control/drivemode",
-              "rider/safety/fwd_limit"):
+              "rider/safety/fwd_limit", "rider/wifi"):
         client.subscribe(t)
 
 
@@ -236,6 +238,10 @@ def on_message(client, userdata, msg):
             g_safety["t"] = time.time()
         except (TypeError, ValueError):
             pass
+        return
+    if t == "rider/wifi":
+        global g_wifi_state
+        g_wifi_state = p.get("state")
         return
     if t == "rider/control/drivemode":
         global g_drivemode
@@ -378,6 +384,17 @@ def wifi_connected():
     return False
 
 
+def wifi_ip():
+    """The Pi's IPv4 address on wlan0, or 'no WiFi'. psutil reads the kernel's table -- no subprocess."""
+    try:
+        for a in psutil.net_if_addrs().get("wlan0", []):
+            if a.family == socket.AF_INET:
+                return a.address
+    except Exception:
+        pass
+    return "no WiFi"
+
+
 def render():
     img = Image.new("RGB", (320, 240), BG)
     d = ImageDraw.Draw(img)
@@ -392,8 +409,14 @@ def render():
     # title turns blue when a controller (DS4) is connected, white otherwise
     d.text((10, 6), "RIDER",
            fill=(80, 160, 255) if controller_connected() else (255, 255, 255), font=f_l)
-    # WiFi link dot (next to RIDER): green = wlan associated, grey = down -- the "can I reach the Pi" signal
-    d.ellipse((92, 18, 104, 30), fill=(0, 200, 120) if wifi_connected() else (110, 110, 110))
+    # WiFi dot (next to RIDER) -- the "can I reach the Pi" signal. It follows the WiFi watchdog's router
+    # ping (green = answering, amber = starting up, grey = no answer for 15 s), since "associated" stayed
+    # true through the silent dropout of 2026-10-21; without a watchdog message yet, the link state.
+    if g_wifi_state is None:
+        dot = (0, 200, 120) if wifi_connected() else (110, 110, 110)
+    else:
+        dot = {"up": (0, 200, 120), "starting": (255, 170, 60)}.get(g_wifi_state, (110, 110, 110))
+    d.ellipse((92, 18, 104, 30), fill=dot)
     # battery (header, between title and badge): iPhone-style icon, % inside, no voltage
     batt = int(tel.get("batt", 0))
     draw_battery(d, 112, 11, batt, f_s)
@@ -431,6 +454,9 @@ def render():
     else:
         s_txt, s_col = "---", (110, 110, 110)                               # nothing within range
     d.text((10, 90), s_txt, fill=s_col, font=f_m)
+    # the Pi's WiFi address, right-justified: where a phone finds the web page (home 10.0.0.x, phone hotspot 172.20.10.x)
+    ip = wifi_ip()
+    d.text((312 - _text_w(d, ip, f_s), 94), ip, fill=(150, 165, 205), font=f_s)
 
     wp1 = tel.get("wp1", 0.0); wp2 = tel.get("wp2", 0.0)
     wx = tel.get("wx", 0.0); tg = tel.get("ptgt", 0.0); err = wx - tg

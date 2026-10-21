@@ -76,7 +76,15 @@ restart_driver() {      # Bluetooth is a separate driver (hci_uart) and is not t
 }
 
 reconnect() {           # NetworkManager may hold the connection off after the outage (it did after a
-                        # 'disconnect' on 2026-10-21: new device, autoconnect never fired) -- ask it outright
+                        # 'disconnect' on 2026-10-21: new device, autoconnect never fired) -- ask it outright.
+                        # But first give its own autoconnect 15 s: it picks by priority (home before the phone
+                        # hotspot), while 'device connect' takes the last-used network (it moved home -> phone).
+  local i c
+  for i in $(seq 15); do
+    c=$(nmcli -t -f DEVICE,STATE,CONNECTION device | awk -F: '$1=="wlan0" && $2=="connected" {print $3}')
+    [ -n "$c" ] && { echo "NetworkManager reconnected on its own ($c)"; return; }
+    sleep 1
+  done
   nmcli --wait 30 device connect wlan0 2>&1 | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' | tr '\n' ' '   # drop nmcli's progress-line escapes
 }
 
