@@ -25,9 +25,15 @@ class CAPS_PPO(PPO):
         self.anchor_obs = None              # (N, obs_dim) normalized observations
         self.anchor_mu = None               # (N, act_dim) the reference policy's mean actions on them
         self.anchor_batch = 1024
+        # LEAD (2026-10-20): on recorded floor states, pull the mean action towards a target recorded slightly LATER
+        # (loss += lead_lambda * mean (mu(s) - target)^2) -> the policy reacts earlier there. Set by train.py --lead_lambda.
+        self.lead_lambda = 0.0
+        self.lead_obs = None                # (N, obs_dim) normalized observations
+        self.lead_target = None             # (N, act_dim) target actions
+        self.lead_batch = 512
 
     def _excluded_save_params(self):
-        return super()._excluded_save_params() + ["anchor_obs", "anchor_mu"]   # data, not model
+        return super()._excluded_save_params() + ["anchor_obs", "anchor_mu", "lead_obs", "lead_target"]  # data
 
     def train(self) -> None:
         self.policy.set_training_mode(True)
@@ -41,6 +47,7 @@ class CAPS_PPO(PPO):
         clip_fractions = []
         caps_losses = []
         anchor_losses = []
+        lead_losses = []
         continue_training = True
 
         for epoch in range(self.n_epochs):
@@ -95,6 +102,12 @@ class CAPS_PPO(PPO):
                     anchor_loss = ((mu_a - self.anchor_mu[idx]) ** 2).sum(dim=1).mean()
                     anchor_losses.append(anchor_loss.item())
                     loss = loss + self.anchor_lambda * anchor_loss
+                if self.lead_lambda > 0.0:
+                    idx = th.randint(0, self.lead_obs.shape[0], (self.lead_batch,))
+                    mu_l = self.policy.get_distribution(self.lead_obs[idx]).distribution.mean
+                    lead_loss = ((mu_l - self.lead_target[idx]) ** 2).sum(dim=1).mean()
+                    lead_losses.append(lead_loss.item())
+                    loss = loss + self.lead_lambda * lead_loss
 
                 with th.no_grad():
                     log_ratio = log_prob - rollout_data.old_log_prob
@@ -119,6 +132,8 @@ class CAPS_PPO(PPO):
         self.logger.record("train/caps_loss", np.mean(caps_losses))
         if anchor_losses:
             self.logger.record("train/anchor_loss", np.mean(anchor_losses))
+        if lead_losses:
+            self.logger.record("train/lead_loss", np.mean(lead_losses))
         self.logger.record("train/approx_kl", np.mean(approx_kl_divs))
         self.logger.record("train/clip_fraction", np.mean(clip_fractions))
         self.logger.record("train/loss", loss.item())

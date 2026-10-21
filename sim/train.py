@@ -4,6 +4,7 @@ net_arch is intentionally small ([64, 64]) so the policy fits on the ESP32 and
 runs in microseconds at 250 Hz.
 """
 import argparse
+import os
 import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
@@ -104,6 +105,30 @@ def anchor_set(model, vecnorm, args):
     return s, mu
 
 
+def lead_set(vecnorm, args):
+    """States + targets for the --lead_lambda loss: ld8_s6's FLOOR spins (args.lead_data, the policy inputs at loop
+    rate) and, as the target at each moment, the output it actually commanded --lead_s LATER. Matching a future output
+    from the present inputs means reacting earlier: on the floor, policies whose 4 Hz response led ld8_s6's by +34 and
+    +76 deg halved the spin shimmy, +4 / +10 did not (seed_sweep.floor_spin_response). 20 ms ~ +29 deg at 4 Hz."""
+    import csv
+    import torch as th
+    eps = {}
+    for r in csv.DictReader(open(args.lead_data)):
+        eps.setdefault(r["spin"], []).append(r)
+    obs, tgt = [], []
+    full = 30.0 * 7.764                                     # raw wheel-cmd per action unit (firmware POL_*)
+    for rs in eps.values():
+        g = lambda k, s=1.0: np.array([float(r[k]) for r in rs]) * s
+        pp, pr = np.radians(g("pol_pitch_x100", 0.01)), np.radians(g("pol_rate_x10", 0.1))
+        xv, ip, u = g("pol_xvel_mm", 1e-3), g("pol_int_m", 1e-3), g("cmd") / full
+        fr = np.stack([pp, pr, 0 * pp, xv, xv / 0.03, ip, 0 * pp], 1)
+        n = int(round(args.lead_s / np.median(np.diff(g("t_us", 1e-6)))))   # samples ahead
+        for i in range(1, len(fr) - n):
+            obs.append(vecnorm.normalize_obs(np.concatenate([fr[i - 1], fr[i]]).astype(np.float32)))
+            tgt.append([u[i + n]])
+    return th.as_tensor(np.array(obs, np.float32)), th.as_tensor(np.array(tgt, np.float32))
+
+
 def summarize(results):
     stood = sum(1 for _, _, s in results if s)
     held = [x for _, x, s in results if s]
@@ -151,6 +176,11 @@ if __name__ == "__main__":
     ap.add_argument("--anchor_steps", type=int, default=60_000)  # how many such states to collect
     ap.add_argument("--anchor_drive_only", action="store_true")  # anchor only stick-pushed / moving states (not holds -- a spin
                                                                # looks like a hold, see anchor_set)
+    ap.add_argument("--lead_lambda", type=float, default=0.0)  # with --init: on ld8_s6's floor spins, pull the output
+                                                               # towards what it commanded --lead_s later (see lead_set)
+    ap.add_argument("--lead_s", type=float, default=0.020)
+    ap.add_argument("--lead_data", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                         "floor_spins_ld8s6_2026-10-20.csv"))
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--turn_obs", action="store_true")         # 8th obs per frame: |turnrate command| (two-wheel env).
                                                                # With --init of a 7-obs policy, its network is WIDENED
@@ -186,6 +216,11 @@ if __name__ == "__main__":
             model.anchor_lambda = args.anchor_lambda
             print(f"anchor: {len(model.anchor_obs)} {'driving' if args.anchor_drive_only else 'drive/hold'} states, "
                   f"lambda {args.anchor_lambda}")
+        if args.lead_lambda > 0.0:
+            model.lead_obs, model.lead_target = lead_set(venv, args)
+            model.lead_lambda = args.lead_lambda
+            print(f"lead: {len(model.lead_obs)} floor spin states, {args.lead_s * 1000:.0f} ms ahead, "
+                  f"lambda {args.lead_lambda}")
     elif args.caps_lambda > 0.0:
         venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
         model = CAPS_PPO("MlpPolicy", venv, caps_lambda=args.caps_lambda, caps_sigma=args.caps_sigma, **common)
