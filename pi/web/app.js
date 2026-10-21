@@ -49,10 +49,13 @@ function wifi(w) {
   wifiFault = n === 0 ? "" : `WiFi: ${n} dropout${n > 1 ? "s" : ""} today · ${w.last_event.slice(11)}`;
   fault();
 }
+// Pi under-voltage alarms count since the Pi booted (a loose 5 V lead connector shows up here first)
 function fault() {
   const wheel = S && S.fault ? `wheel ${S.fault} off bus` : "";
-  const text = [wheel, wifiFault].filter(Boolean).join(" · ");
-  set("fault", text || "none", wheel ? "bad" : wifiFault ? "warn" : "off");
+  const n = S ? Number(S.undervolt_alarms) || 0 : 0;
+  const volt = n ? `Pi 5 V low: ${n} alarm${n > 1 ? "s" : ""} since boot` : "";
+  const text = [wheel, volt, wifiFault].filter(Boolean).join(" · ");
+  set("fault", text || "none", wheel ? "bad" : (volt || wifiFault) ? "warn" : "off");
 }
 
 function status(s) {

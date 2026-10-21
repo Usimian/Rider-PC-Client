@@ -87,6 +87,31 @@ def parse(line):
         g_ctrl = m.group(1)
 
 
+# Under-voltage alarms since the Pi booted (the 5 V lead's connector came loose once -- docs/HARDWARE.md ->
+# Power). Starts from the kernel's own count for this boot, then counts rising edges of the rpi_volt alarm,
+# which the kernel latches for >= 2 s per event, so the 3 Hz poll in publish() sees every one.
+UV_ALARM = next((f"{h}/in0_lcrit_alarm" for h in glob.glob("/sys/class/hwmon/hwmon*")
+                 if open(f"{h}/name").read().strip() == "rpi_volt"), None)
+def _uv_now():
+    try:
+        return open(UV_ALARM).read().strip() == "1"
+    except Exception:
+        return False
+try:
+    uv_count = int(subprocess.run("journalctl -k -b --no-pager | grep -c 'Undervoltage detected'", shell=True,
+                                  capture_output=True, text=True).stdout.strip() or 0)
+except Exception:
+    uv_count = 0
+uv_prev = _uv_now()                     # an alarm already on is in the kernel count -- don't count it twice
+def undervolt_alarms():
+    global uv_count, uv_prev
+    now = _uv_now()
+    if now and not uv_prev:
+        uv_count += 1
+    uv_prev = now
+    return uv_count
+
+
 def cpu_temp_c():
     try:
         return float(open("/sys/class/thermal/thermal_zone0/temp").read()) / 1000.0
@@ -272,6 +297,7 @@ def publish():
         "power_w": round(cm5_power_w(), 2),
         "loop_hz": int(tel.get("lhz", 0)),
         "fault": int(tel.get("fault", 0)),
+        "undervolt_alarms": undervolt_alarms(),   # Pi 5 V under-voltage alarms since the Pi booted
         "read_fails": int(tel.get("rfails", 0)),   # failed wheel reads since the ESP32 booted (count)
         "mode": g_ctrl,                 # compiled-in controller ("LQR"/"POL"), parsed from telem ctrl=; firmware picks it at build time (was derived from the removed 'polrun')
         "position": tel.get("wx", 0.0),

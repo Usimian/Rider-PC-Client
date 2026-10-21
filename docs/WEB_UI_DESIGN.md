@@ -42,7 +42,7 @@ bus (see the pairing plan in the Hover project).
 
 | topic | rate | content the page uses |
 |---|---|---|
-| `rider/status` | ~3 Hz | `roll_balance_enabled` (= **balancing on**), `roll_leveling_enabled`, `mode` (POL/LQR), `battery_level`, `battery_voltage`, `cpu_percent`, `cpu_temp`, `power_w`, `loop_hz`, `read_fails` (failed wheel reads since ESP32 boot), `fault`, `controller_connected` (DS4), `controller_battery` (DS4 %, null when not connected), `controller_charging`, `position`, `target`, `pose_x/y` |
+| `rider/status` | ~3 Hz | `roll_balance_enabled` (= **balancing on**), `roll_leveling_enabled`, `mode` (POL/LQR), `battery_level`, `battery_voltage`, `cpu_percent`, `cpu_temp`, `power_w`, `loop_hz`, `read_fails` (failed wheel reads since ESP32 boot), `fault`, `undervolt_alarms` (Pi 5 V under-voltage alarms since Pi boot), `controller_connected` (DS4), `controller_battery` (DS4 %, null when not connected), `controller_charging`, `position`, `target`, `pose_x/y` |
 | `rider/status/imu` | ~3 Hz | `roll`, `pitch`, `yaw` |
 | `rider/status/odom` | ~3 Hz | `x`, `y`, `heading` |
 | `rider/control/drivemode` | retained | `{"mode": "joystick"|"computer"}` (DS4 Options toggles it) |
