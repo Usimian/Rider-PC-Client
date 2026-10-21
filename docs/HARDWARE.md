@@ -83,6 +83,7 @@ position at rest — the fault only showed mid-range under motion, so a static r
 - **The CM5 is fed from this 5 V rail** over the white 4-pin "5V" connector and a wire lead into the
   **4-pin connector at the bottom of the carrier** (Marc, 2026-10-19; the carrier's parts list names a
   JVT1505W4T-04GAR-S, 1.5 mm pitch, and no power inductor — the carrier makes no 5 V of its own).
+  Both ends of the lead use the same connector (Marc, 2026-10-21).
   Pin assignment (how many contacts carry 5 V / GND, and whether the UART shares it) NOT yet checked.
 - **Under-voltage on every boot** (5-34 events) is NOT a regulator-rating problem (6 A). **MEASURED
   2026-10-19** (Marc's meter + `vcgencmd pmic_read_adc EXT5V_V`, robot disabled, 60 s 4-core CPU load,
