@@ -354,7 +354,10 @@ volatile float gVbatK=3.0f;              // GPIO33 divider ratio: pack = pin*K. 
 // 2S pack (net VCC8.4V): 8.4V full, 6.0V empty -> linear % for display.
 static const float VBAT_FULL=8.4f, VBAT_EMPTY=6.0f;
 volatile float tLoopHz=0;                // measured control-loop rate
-volatile uint32_t tReadFails=0;          // failed wheel reads since boot (an event count, not a rate)
+volatile uint32_t tReadFails=0;          // failed wheel reads since start-up (an event count, not a rate)
+volatile uint32_t tRfL=0, tRfR=0, tRfFirstMs=0, tRfLastMs=0;   // per wheel + when (ms since boot) the first/last counted
+#define READ_FAIL_GRACE_MS 5000           // a wheel counts once it has answered, or from this long after boot:
+                                          // at power-up the wheels answer ~1 s late (~500 failed reads every boot)
 volatile float tDtMaxMs=0;               // worst-case cycle period (ms) since last report (ground-truth stall detector)
 volatile float tReadMaxMs=0, tWorkMaxMs=0; // INSTRUMENT: worst wheel-read time + total cycle work (ms) per report window
 volatile float tPostMaxMs=0;             // INSTRUMENT: post-read work (control/policy + output) ms per window
@@ -836,17 +839,19 @@ static void balanceTask(void*){
     //     phase lag in the balance loop = the shimmy). gPollLock still narrows to one
     //     wheel for bench diagnostics (stepcap). ---
     static int failL=0, failR=0;            // consecutive per-wheel read failures
+    static bool upL=false, upR=false;       // wheel has answered at least once (start of its read-fail count)
+    bool countAll = millis() > READ_FAIL_GRACE_MS;
     int p=0,v=0; uint8_t rdWid=LEFT_W; bool ok=false;
     bool pollBoth = (gPollLock==0);
     uint32_t trd0=micros();                 // INSTRUMENT: time the wheel-read block (both reads)
     if(pollBoth || gPollLock==LEFT_W){
       int pL=0,vL=0; bool okL=wheelRead(LEFT_W,&pL,&vL);
-      if(okL){ odomUpdate(LEFT_W,pL,vL); failL=0; } else { failL++; tReadFails++; }
+      if(okL){ odomUpdate(LEFT_W,pL,vL); failL=0; upL=true; } else { failL++; if(upL || countAll){ tReadFails++; tRfL++; tRfLastMs=millis(); if(!tRfFirstMs) tRfFirstMs=tRfLastMs; } }
       rdWid=LEFT_W; p=pL; v=vL; ok=okL;     // drivecap / dumpread sample = left wheel
     }
     if(pollBoth || gPollLock==RIGHT_W){
       int pR=0,vR=0; bool okR=wheelRead(RIGHT_W,&pR,&vR);
-      if(okR){ odomUpdate(RIGHT_W,pR,vR); failR=0; tVR=vR; } else { failR++; tReadFails++; }
+      if(okR){ odomUpdate(RIGHT_W,pR,vR); failR=0; tVR=vR; upR=true; } else { failR++; if(upR || countAll){ tReadFails++; tRfR++; tRfLastMs=millis(); if(!tRfFirstMs) tRfFirstMs=tRfLastMs; } }
       if(gPollLock==RIGHT_W){ rdWid=RIGHT_W; p=pR; v=vR; ok=okR; }
     }
     { float rdms=(micros()-trd0)*1e-3f; if(rdms>rdMaxAcc) rdMaxAcc=rdms; }   // INSTRUMENT: read-block ms
@@ -1702,9 +1707,9 @@ void loop(){
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
     char b[704];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u\n",
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u rfL=%u rfR=%u rft0=%u rft1=%u ms=%u\n",
       tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gLevelOn, tRollAcc, gTurn, gHdgTarget, gYawRateCmd,
-      (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID), (unsigned)gDriveWdTrips, (unsigned)tLegRetryL, (unsigned)tLegRetryR, (unsigned)tLegFailL, (unsigned)tLegFailR);
+      (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID), (unsigned)gDriveWdTrips, (unsigned)tLegRetryL, (unsigned)tLegRetryR, (unsigned)tLegFailL, (unsigned)tLegFailR, (unsigned)tRfL, (unsigned)tRfR, (unsigned)tRfFirstMs, (unsigned)tRfLastMs, (unsigned)millis());
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     if(gPolJoint && k>0){                        // Stage-1 turn-policy diagnostics (obs + outputs)
       k--;                                       // drop trailing '\n'
