@@ -27,7 +27,8 @@ SPIN_RATE_MAX = 3.5     # deg/s pitch-rate RMS while spinning in place
 LEAN_MAX = 2.5          # deg: the drive loop's lean bias at full speed, clean plant. Sim: ld8_s6 1.3-1.4 (floor: drives well),
                         # tw2_s6 4.9-5.0 (floor 2026-10-20: rocked itself over at full speed, though the sim kept it calm)
 FLOOR_SPINS = "floor_spins_ld8s6_2026-10-20.csv"   # ld8_s6 spinning on the floor (see floor_spin_gain)
-FLOOR4_MAX = 0.80       # its 4 Hz response relative to ld8_s6 must be below this (tw2_s6 0.75 halved the floor shimmy)
+LEAD4_MIN = 25.0        # deg: its 4 Hz response must LEAD ld8_s6's by this much (see floor_spin_response: +34/+76 halved
+                        # the floor shimmy, +4/+10 did not)
 DRIVE = "lead"          # the stick-drive structure the screen runs (must match the recipe: --drive_lead -> 'lead')
 
 
@@ -96,15 +97,17 @@ def screen(name):
         k = L[:, 0] > 3.0
         pr = L[k, 2] if k.sum() > 32 else L[:, 2]
         rows[tag] = dict(up=fell is None, fell=fell, rate=np.degrees(np.sqrt((pr ** 2).mean())))
-    m["floor4"] = floor_spin_gain(infer)
+    m["floor4"], m["lead4"] = floor_spin_response(infer)
     return m, rows
 
 
-def floor_spin_gain(infer):
+def floor_spin_response(infer):
     """FLOOR-REPLAY check (2026-10-20): ld8_s6's floor spins (FLOOR_SPINS, its policy inputs at loop rate) fed to the
     candidate, open loop; returns its response to the 4 Hz shimmy relative to ld8_s6's own recorded output (pitch-rate
-    -> output cross-spectrum, 3.5-4.8 Hz). The sim's own spin number did not predict the floor; this did, on the two
-    floor results: tt25_s4 0.95x -> floor spin unchanged (21 deg/s), tw2_s6 0.75x -> floor spin halved (8.5)."""
+    -> output cross-spectrum, 3.5-4.8 Hz) as (gain, phase lead in degrees). The sim's own spin number did not predict
+    the floor; the PHASE LEAD does, on four floor results (floor spin pitch-rate RMS; ld8_s6 16-22 deg/s):
+      tt25_s4 0.96x +4 deg -> 21     sa5_s1 0.68x +10 deg -> 17     da5_s0 0.62x +34 deg -> 8.9     tw2_s6 0.76x +76 -> 8.5
+    The gain alone does not (sa5_s1). Reacting earlier is what breaks a 4 Hz oscillation born of loop delay."""
     import csv
     import numpy as np
     eps = {}
@@ -124,8 +127,9 @@ def floor_spin_gain(infer):
         f = np.fft.rfftfreq(len(u0), np.median(np.diff(g("t_us", 1e-6))))
         P, U0, U1 = (np.fft.rfft((x - x.mean()) * np.hanning(len(x))) for x in (pr, u0, u1))
         k = (f >= 3.5) & (f <= 4.8)
-        gains.append(abs(np.sum(np.conj(P[k]) * U1[k])) / abs(np.sum(np.conj(P[k]) * U0[k])))
-    return float(np.mean(gains))
+        gains.append(np.sum(np.conj(P[k]) * U1[k]) / np.sum(np.conj(P[k]) * U0[k]))
+    h = np.mean(gains)
+    return float(abs(h)), float(np.degrees(np.angle(h)))
 
 
 def verdict(m, rows):
@@ -137,7 +141,7 @@ def verdict(m, rows):
     for t in ("spin+", "spin-"):
         if rows[t]["up"] and rows[t]["rate"] > SPIN_RATE_MAX: reasons.append(t + "-shimmy")
     if not rows["hold"]["up"]: reasons.append("hold-falls")
-    if m["floor4"] > FLOOR4_MAX: reasons.append("floor-shimmy")
+    if m["lead4"] < LEAD4_MIN: reasons.append("floor-shimmy")
     if abs(m["a_op"]) > 0.5: reasons.append("a_op")
     if m["gRatio"] > 2.0: reasons.append("gain-asym")
     if m["sat"] > 0.10: reasons.append("clipped")
@@ -180,7 +184,7 @@ def main():
             return "%.2f %.2f %3.1f° %s" % (r["spd"], r["a99"], r["lean"], "up" if r["up"] else "F%.1f" % r["fell"])
         h = rows["hold"]
         turns = " ".join("%4.1f%s" % (rows[t]["rate"], "" if rows[t]["up"] else "F") for t, _ in TURNS) + \
-            " fl4 %.2f" % m["floor4"]
+            " fl4 %.2fx%+3.0f" % (m["floor4"], m["lead4"])
         say("%-14s %5.0fm | %+6.2f %5.0f %6.1f | %s | %-22s | %-16s | %s" %
             (n, mins, m["a_op"], 100 * m["sat"], m["gRatio"],
              " | ".join(cell(rows[pl + "-fwd"]) + " / " + cell(rows[pl + "-rev"])
