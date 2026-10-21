@@ -3,6 +3,7 @@
 #   rider-bridge (LCD + serial owner) | rider-joystick (DS4) | rider-camera (CSI)
 #   rider-tof (VL53L5CX publisher)    | rider-tof-safety (forward governor)
 #   rider-recorder (always-on telemetry log -> /home/pi/riderlog.txt)
+#   rider-wifi-watchdog (restarts a dead WiFi link; every dropout -> /home/pi/wifi_events.log + rider/wifi)
 # Idempotent + recreate-from-scratch: installs deps, the programs, their systemd autostart
 # units, retires the old rider-controller autostart, and enables + starts them all.
 #
@@ -29,12 +30,14 @@ scp "$HERE/assets/beep.wav"        "$PI:/home/pi/beep.wav"
 scp "$HERE"/assets/engine_*.wav    "$PI:/home/pi/"    # motorcycle sounds (assets/cut_engine_sounds.py)
 scp "$HERE/rider_tof.py"           "$PI:/home/pi/rider_tof.py"
 scp "$HERE/rider_tof_safety.py"    "$PI:/home/pi/rider_tof_safety.py"
+scp "$HERE/rider_wifi_watchdog.sh" "$PI:/home/pi/rider_wifi_watchdog.sh"
 scp "$HERE/rider-bridge.service"   "$PI:/tmp/rider-bridge.service"
 scp "$HERE/rider-joystick.service" "$PI:/tmp/rider-joystick.service"
 scp "$HERE/rider-camera.service"   "$PI:/tmp/rider-camera.service"
 scp "$HERE/rider-tof.service"      "$PI:/tmp/rider-tof.service"
 scp "$HERE/rider-tof-safety.service" "$PI:/tmp/rider-tof-safety.service"
 scp "$HERE/rider-recorder.service" "$PI:/tmp/rider-recorder.service"
+scp "$HERE/rider-wifi-watchdog.service" "$PI:/tmp/rider-wifi-watchdog.service"
 
 echo "==> installing on $PI"
 ssh "$PI" 'bash -s' <<'REMOTE'
@@ -75,8 +78,10 @@ sudo install -m 644 /tmp/rider-camera.service      /etc/systemd/system/rider-cam
 sudo install -m 644 /tmp/rider-tof.service         /etc/systemd/system/rider-tof.service
 sudo install -m 644 /tmp/rider-tof-safety.service  /etc/systemd/system/rider-tof-safety.service
 sudo install -m 644 /tmp/rider-recorder.service    /etc/systemd/system/rider-recorder.service
+sudo install -m 644 /tmp/rider-wifi-watchdog.service /etc/systemd/system/rider-wifi-watchdog.service
 rm -f /tmp/rider-bridge.service /tmp/rider-joystick.service /tmp/rider-camera.service \
-      /tmp/rider-tof.service /tmp/rider-tof-safety.service /tmp/rider-recorder.service
+      /tmp/rider-tof.service /tmp/rider-tof-safety.service /tmp/rider-recorder.service \
+      /tmp/rider-wifi-watchdog.service
 sudo systemctl daemon-reload
 # 4. retire the old (xgolib) controller autostart if present
 if systemctl list-unit-files 2>/dev/null | grep -q '^rider-controller.service'; then
@@ -90,9 +95,11 @@ if [ ! -x /usr/bin/mosquitto_sub ]; then
   echo "        Install mosquitto-clients, then re-run this deploy."
 fi
 sudo systemctl enable rider-bridge.service rider-joystick.service rider-camera.service \
-                      rider-tof.service rider-tof-safety.service rider-recorder.service >/dev/null
+                      rider-tof.service rider-tof-safety.service rider-recorder.service \
+                      rider-wifi-watchdog.service >/dev/null
 sudo systemctl restart rider-bridge.service rider-joystick.service rider-camera.service \
-                       rider-tof.service rider-tof-safety.service rider-recorder.service
+                       rider-tof.service rider-tof-safety.service rider-recorder.service \
+                       rider-wifi-watchdog.service
 sleep 2
 echo "  bridge  : $(systemctl is-active rider-bridge.service)/$(systemctl is-enabled rider-bridge.service)"
 echo "  joystick: $(systemctl is-active rider-joystick.service)/$(systemctl is-enabled rider-joystick.service)"
@@ -100,6 +107,7 @@ echo "  camera  : $(systemctl is-active rider-camera.service)/$(systemctl is-ena
 echo "  tof     : $(systemctl is-active rider-tof.service)/$(systemctl is-enabled rider-tof.service)"
 echo "  tof-safe: $(systemctl is-active rider-tof-safety.service)/$(systemctl is-enabled rider-tof-safety.service)"
 echo "  recorder: $(systemctl is-active rider-recorder.service)/$(systemctl is-enabled rider-recorder.service)"
+echo "  wifi-wd : $(systemctl is-active rider-wifi-watchdog.service)/$(systemctl is-enabled rider-wifi-watchdog.service)"
 echo "  old     : rider-controller = $(systemctl is-enabled rider-controller.service 2>&1)"
 REMOTE
 echo "==> done"

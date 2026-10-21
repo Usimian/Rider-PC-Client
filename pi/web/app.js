@@ -35,11 +35,25 @@ const client = new MqttLite("ws://" + location.host + "/", {
     else if (topic === "rider/response/image_capture") camFrame(p);
     else if (topic === "rider/tof") tofFrame(p);
     else if (topic === "rider/safety/fwd_limit") tofSafety(p);
+    else if (topic === "rider/wifi") wifi(p);
   },
 });
 for (const t of ["rider/status", "rider/status/imu", "rider/status/odom", "rider/control/drivemode",
                  "rider/control/maxspeed", "rider/debug/telem", "rider/tof", "rider/safety/fwd_limit",
-                 "rider/response/image_capture"]) client.subscribe(t);
+                 "rider/response/image_capture", "rider/wifi"]) client.subscribe(t);
+
+// WiFi watchdog (retained rider/wifi): today's dropouts and the latest one go in the fault item, spelled out
+let wifiFault = "";
+function wifi(w) {
+  const n = Number(w.dropouts_today) || 0;
+  wifiFault = n === 0 ? "" : `WiFi: ${n} dropout${n > 1 ? "s" : ""} today · ${w.last_event.slice(11)}`;
+  fault();
+}
+function fault() {
+  const wheel = S && S.fault ? `wheel ${S.fault} off bus` : "";
+  const text = [wheel, wifiFault].filter(Boolean).join(" · ");
+  set("fault", text || "none", wheel ? "bad" : wifiFault ? "warn" : "off");
+}
 
 function status(s) {
   lastStatus = Date.now();
@@ -72,8 +86,8 @@ function status(s) {
   set("temp", `${Number(s.cpu_temp).toFixed(0)} °C`, s.cpu_temp >= 80 ? "num bad" : s.cpu_temp >= 70 ? "num warn" : "num");
   set("pw", `${Number(s.power_w).toFixed(1)} W`);
   set("hz", `${s.loop_hz} Hz`);
-  set("rfail", `${Number(s.rfail).toFixed(1)} %`, s.rfail > 0 ? "num warn" : "num");
-  set("fault", s.fault ? `wheel ${s.fault} off bus` : "none", s.fault ? "bad" : "off");
+  set("rfail", `${s.read_fails}`, s.read_fails > 0 ? "num warn" : "num");     // failed wheel reads since ESP32 boot
+  fault();
 }
 
 // Link = live status within the last 2 s (design rule), not merely an open socket. E-STOP is

@@ -276,6 +276,15 @@ static int    gLegTgtL=LEG_NONE, gLegTgtR=LEG_NONE; // target goal per leg (LEG_
 static bool   gLegEnerL=false,   gLegEnerR=false;   // leg torque on?
 static int    gLegWroteL=0,      gLegWroteR=0;      // last goal written to the servo (skip redundant writes)
 static int    gLegSetlL=0,       gLegSetlR=0;       // post-torque-on settle countdown
+// VERIFIED ENERGIZE (2026-10-21): the three energize writes go out on separate visits (never back-to-back: a
+// write sent into the previous servo's reply is lost -- the limp path spaces + verifies for the same reason),
+// then torque + goal are read back; a mismatch starts over. Seen: the left leg stayed limp after a balance-on.
+enum { LEG_EN_GOAL=0, LEG_EN_SPEED, LEG_EN_TORQUE, LEG_EN_VERIFY, LEG_EN_FAILED };
+#define LEG_EN_TRIES 5                               // failed verifies before the leg is left alone (until next balance-on)
+struct LegEn { uint8_t stage, tries; int sent; };    // energize progress; sent = goal written in LEG_EN_GOAL
+static LegEn  gLegEnL={LEG_EN_GOAL,0,0}, gLegEnR={LEG_EN_GOAL,0,0};
+volatile uint32_t tLegRetryL=0, tLegRetryR=0;        // energize retries since boot (telemetry legretry=L/R)
+volatile uint32_t tLegFailL=0,  tLegFailR=0;         // energize give-ups since boot (telemetry legfail=L/R)
 static int    gLegStepL=0,       gLegStepR=0;       // per-leg accumulated pending step (shared 'legstep' distributed here)
 static uint8_t gLegTurn=0;                           // alternate which leg gets the bus each cycle (NO same-cycle contention)
 // ---- leg LEVELING: keep the body level laterally by a SAME-SIGN differential on the legs ----
@@ -344,7 +353,8 @@ volatile float gYawBias=0.0f;             // gyro-Z zero-rate bias (deg/s), from
 volatile float gVbatK=3.0f;              // GPIO33 divider ratio: pack = pin*K. Schematic R8=20K(top)/R7=10K(bot) => x3.0
 // 2S pack (net VCC8.4V): 8.4V full, 6.0V empty -> linear % for display.
 static const float VBAT_FULL=8.4f, VBAT_EMPTY=6.0f;
-volatile float tLoopHz=0, tReadFail=0;   // measured control-loop rate & read-fail %
+volatile float tLoopHz=0;                // measured control-loop rate
+volatile uint32_t tReadFails=0;          // failed wheel reads since boot (an event count, not a rate)
 volatile float tDtMaxMs=0;               // worst-case cycle period (ms) since last report (ground-truth stall detector)
 volatile float tReadMaxMs=0, tWorkMaxMs=0; // INSTRUMENT: worst wheel-read time + total cycle work (ms) per report window
 volatile float tPostMaxMs=0;             // INSTRUMENT: post-read work (control/policy + output) ms per window
@@ -524,38 +534,48 @@ static void legGoalSync(int16_t goalR, int16_t goalL){
   while(Serial2.available()) Serial2.read();
   Serial2.write(buf,14); busSettle();
 }
-// Read leg present position (reg 0x24). Legs reply with a STANDARD frame (unlike the wheels'
-// non-standard one), so pos sits right after ERR. Skip the half-duplex echo (LEN==0x04 = our request).
-static bool legReadPos(uint8_t id, int* pos){
-  uint8_t ck = ~(id + 0x04 + 0x02 + 0x24 + 0x06);
-  uint8_t req[8] = {0xFF,0xFF,id,0x04,0x02,0x24,0x06, ck};
+// Read 'len' bytes from leg register 'reg'. Legs reply with a STANDARD frame (unlike the wheels'
+// non-standard one), so data sits right after ERR. Skips the half-duplex echo (LEN==0x04 = our request)
+// and keeps reading until a COMPLETE, checksummed reply is in (or 2 ms): the reply trails the echo, and
+// servoReadN does not fit legs: its byte-count exit can stop on the echo alone, and its wheel-frame guess
+// (2nd data byte == 0x02) misreads a leg goal like 0x0217. Both failed the first verified-energize test.
+static bool legRead(uint8_t id, uint8_t reg, uint8_t len, uint8_t* out){
+  uint8_t ck = ~(id + 0x04 + 0x02 + reg + len);
+  uint8_t req[8] = {0xFF,0xFF,id,0x04,0x02,reg,len, ck};
   while(Serial2.available()) Serial2.read();
   Serial2.write(req,8); Serial2.flush();
   uint8_t buf[48]; int n=0; uint32_t t0=micros();
   while(micros()-t0 < 2000 && n < 48){
+    if(!Serial2.available()) continue;
     while(Serial2.available() && n < 48) buf[n++]=Serial2.read();
-    if(n >= 20) break;
-  }
-  for(int i=0;i+6 < n;i++){
-    if(buf[i]==0xFF && buf[i+1]==0xFF && buf[i+2]==id){
+    for(int i=0;i+3 < n;i++){
+      if(buf[i]!=0xFF || buf[i+1]!=0xFF || buf[i+2]!=id) continue;
+      if(i+8 <= n && memcmp(buf+i, req, 8) == 0){ i += 7; continue; }   // our own echo (a 2-byte reply has its LEN 0x04 too)
       int LEN = buf[i+3];
-      if(LEN==0x04) continue;                 // echoed request -> skip (reply LEN is 0x08 for a 6-byte read)
+      if(LEN != len+2) continue;               // not our reply
       int cks = i+LEN+3;
-      if(cks >= n) continue;                   // frame incomplete
+      if(cks >= n) break;                      // our reply, not all in yet -> read more
       uint8_t sum=0; for(int j=i+2;j<cks;j++) sum+=buf[j];
       if((uint8_t)~sum != buf[cks]) continue;  // bad checksum -> ignore
-      *pos = (buf[i+5] | (buf[i+6]<<8)) & 0x3FF;   // present position (head data, 10-bit)
+      for(int k=0;k<len;k++) out[k]=buf[i+5+k];
       return true;
     }
   }
   return false;
 }
-// Drive ONE leg toward its target with energize + post-torque-on settle. Energize is WRITE-ONLY: seed
-// the goal to the TARGET, then torque on -- the servo slews there at LEG_SPEED (gentle, no snap). It does
-// NOT read present position first: a dropped read on the busy bus used to leave the leg permanently limp
-// (energize was gated on the read). reqAbs=LEG_NONE/reqStep=0 -> no new request (continue any deferred
-// write). Pointers = this leg's persistent state.
-static void legService(uint8_t id, int* tgt, bool* ener, int* wrote, int* setl, int reqAbs, int reqStep, int lo, int hi){
+static bool legReadPos(uint8_t id, int* pos){   // present position (reg 0x24, 10-bit)
+  uint8_t d[6];
+  if(!legRead(id,0x24,6,d)) return false;
+  *pos = (d[0] | (d[1]<<8)) & 0x3FF;
+  return true;
+}
+// Drive ONE leg toward its target with energize + post-torque-on settle. Energize seeds the goal to the
+// TARGET, then torque on -- the servo slews there at LEG_SPEED (gentle, no snap) -- one write per visit,
+// then reads back torque + goal (VERIFIED ENERGIZE above). It does NOT read present position first: a
+// dropped read on the busy bus used to leave the leg permanently limp (energize was gated on the read).
+// reqAbs=LEG_NONE/reqStep=0 -> no new request (continue any deferred write). Pointers = this leg's state.
+static void legService(uint8_t id, int* tgt, bool* ener, int* wrote, int* setl, LegEn* en, volatile uint32_t* retries,
+                       volatile uint32_t* fails, int reqAbs, int reqStep, int lo, int hi){
   int nt = *tgt;
   if(reqAbs != LEG_NONE) nt = reqAbs;                              // absolute request (legL/legR)
   else if(reqStep != 0){                                          // relative request (legstep)
@@ -566,10 +586,21 @@ static void legService(uint8_t id, int* tgt, bool* ener, int* wrote, int* setl, 
   if(nt != LEG_NONE){ if(nt<lo) nt=lo; else if(nt>hi) nt=hi; }     // clamp to this leg's limits
   *tgt = nt;
   if(*tgt == LEG_NONE) return;                                    // leg inactive -> nothing on the bus
-  if(!*ener){                                                     // ENERGIZE write-only (NO read-gate): seed goal=TARGET,
-    legSetReg2(id,0x1E,*tgt); legSetReg2(id,0x20,LEG_SPEED); wheelSetReg(id,0x18,1);  // speed, torque on -> servo slews
-    *ener=true; *wrote=*tgt; *setl=LEG_SETTLE;                    // to *tgt at LEG_SPEED. torque-on is a write (no reply
-  } else if(*setl > 0){ (*setl)--; }                              // needed) -> a dropped read can't leave the leg limp.
+  if(!*ener){                                                     // ENERGIZE: one write per visit, then verify
+    switch(en->stage){
+      case LEG_EN_GOAL:   en->sent = *tgt; legSetReg2(id,0x1E,en->sent); en->stage = LEG_EN_SPEED;  break;  // goal = TARGET
+      case LEG_EN_SPEED:  legSetReg2(id,0x20,LEG_SPEED);                 en->stage = LEG_EN_TORQUE; break;
+      case LEG_EN_TORQUE: wheelSetReg(id,0x18,1);                        en->stage = LEG_EN_VERIFY; break;  // -> servo slews
+      case LEG_EN_VERIFY: {
+        uint8_t tq = 0, g[2] = {0,0};
+        bool ok = legRead(id,0x18,1,&tq) && tq==1 && legRead(id,0x1E,2,g) && (g[0] | (g[1]<<8)) == en->sent;
+        if(ok){ *ener=true; *wrote=en->sent; *setl=LEG_SETTLE; en->stage=LEG_EN_GOAL; en->tries=0; }  // legGoalWriter
+        else if(++en->tries >= LEG_EN_TRIES){ en->stage=LEG_EN_FAILED; (*fails)++; }                 // sends any newer *tgt
+        else { (*retries)++; en->stage=LEG_EN_GOAL; }
+      } break;
+      default: break;                                             // LEG_EN_FAILED: off the bus until the next balance-on
+    }
+  } else if(*setl > 0){ (*setl)--; }
   // Goal UPDATES are no longer written here: legGoalWriter() sends both legs' targets in one rate-capped
   // broadcast (2026-10-18). Per-cycle addressed writes each drew a reply that collided on the shared bus
   // (wheel rfail rose during height moves) and left a leg servo deaf + holding until a power cycle.
@@ -742,7 +773,7 @@ static void balanceTask(void*){
                                     // boot measurement on a moving robot can never break balance startup. 'gcal' re-measures both.
   float theta=0, dqf=0; bool primed=false;
   uint32_t lastUs = micros(); uint32_t n=0;
-  uint32_t hzN=0, hzFail=0, hzT=millis();   // loop-rate / read-fail measurement
+  uint32_t hzN=0, hzT=millis();             // loop-rate measurement
   float dtMaxAcc=0;                          // worst-case raw cycle period this report window
   float rdMaxAcc=0, workMaxAcc=0, postMaxAcc=0, inferMaxAcc=0; // INSTRUMENT: read + work + post-read + inference time this window
   for(;;){
@@ -792,7 +823,7 @@ static void balanceTask(void*){
     if(dt > dtMaxAcc) dtMaxAcc = dt;            // capture RAW period BEFORE the safety clamp below
     if(dt <= 0 || dt > 0.05f) dt = 0.006f;
     hzN++;
-    if(millis()-hzT >= 250){ uint32_t el=millis()-hzT; tLoopHz=hzN*1000.0f/el; tReadFail=hzFail*100.0f/hzN; tDtMaxMs=dtMaxAcc*1000.0f; tReadMaxMs=rdMaxAcc; tWorkMaxMs=workMaxAcc; tPostMaxMs=postMaxAcc; tInferMaxMs=inferMaxAcc; dtMaxAcc=0; rdMaxAcc=0; workMaxAcc=0; postMaxAcc=0; inferMaxAcc=0; hzN=0; hzFail=0; hzT=millis(); }
+    if(millis()-hzT >= 250){ uint32_t el=millis()-hzT; tLoopHz=hzN*1000.0f/el; tDtMaxMs=dtMaxAcc*1000.0f; tReadMaxMs=rdMaxAcc; tWorkMaxMs=workMaxAcc; tPostMaxMs=postMaxAcc; tInferMaxMs=inferMaxAcc; dtMaxAcc=0; rdMaxAcc=0; workMaxAcc=0; postMaxAcc=0; inferMaxAcc=0; hzN=0; hzT=millis(); }
 
     // --- IMU read MOVED below the wheel read (2026-06-16): the 4.4ms wheel read used to sit
     //     BETWEEN sensing pitch and writing the command, so the controller acted on ~4.9ms-stale
@@ -810,12 +841,12 @@ static void balanceTask(void*){
     uint32_t trd0=micros();                 // INSTRUMENT: time the wheel-read block (both reads)
     if(pollBoth || gPollLock==LEFT_W){
       int pL=0,vL=0; bool okL=wheelRead(LEFT_W,&pL,&vL);
-      if(okL){ odomUpdate(LEFT_W,pL,vL); failL=0; } else { hzFail++; failL++; }
+      if(okL){ odomUpdate(LEFT_W,pL,vL); failL=0; } else { failL++; tReadFails++; }
       rdWid=LEFT_W; p=pL; v=vL; ok=okL;     // drivecap / dumpread sample = left wheel
     }
     if(pollBoth || gPollLock==RIGHT_W){
       int pR=0,vR=0; bool okR=wheelRead(RIGHT_W,&pR,&vR);
-      if(okR){ odomUpdate(RIGHT_W,pR,vR); failR=0; tVR=vR; } else { hzFail++; failR++; }
+      if(okR){ odomUpdate(RIGHT_W,pR,vR); failR=0; tVR=vR; } else { failR++; tReadFails++; }
       if(gPollLock==RIGHT_W){ rdWid=RIGHT_W; p=pR; v=vR; ok=okR; }
     }
     { float rdms=(micros()-trd0)*1e-3f; if(rdms>rdMaxAcc) rdMaxAcc=rdms; }   // INSTRUMENT: read-block ms
@@ -1281,17 +1312,20 @@ static void balanceTask(void*){
           uint8_t id = leg ? RIGHT_LEG : LEFT_LEG;
           for(int t=0; t<4; t++){
             legTorqueOff(id); vTaskDelay(2);                     // write, then let the bus settle
-            uint8_t tq; if(servoReadN(id,0x18,1,&tq) && tq==0) break;   // confirmed limp -> next leg
+            uint8_t tq; if(legRead(id,0x18,1,&tq) && tq==0) break;      // confirmed limp -> next leg
           }
         }
         gLegTgtR=gLegTgtL=LEG_NONE; gLegEnerR=gLegEnerL=false;    // legs forget they were energized
+        gLegEnR=gLegEnL=LegEn{LEG_EN_GOAL,0,0};                  // ...and any half-done energize
         gLegAbsR=gLegAbsL=LEG_NONE; gLegStepR=gLegStepL=0;        // clear PENDING per-leg targets/steps: a stale gLegAbs
                                                                  // left by the balance-off equalize would otherwise
                                                                  // re-energize that leg in the dispatch below (the
                                                                  // one-leg-not-limp bug -- only one leg serviced/cycle)
         gLegHoming=false; gLegStepReq=0; gLegLimped=true; gLegLimpReq=false;
       }
-      if(driving && !drvPrev) gLegLimped=false;                  // re-enabling balance un-limps the legs
+      if(driving && !drvPrev){ gLegLimped=false;                 // re-enabling balance un-limps the legs
+        if(gLegEnR.stage==LEG_EN_FAILED) gLegEnR=LegEn{LEG_EN_GOAL,0,0};   // ...and gives a given-up leg fresh tries
+        if(gLegEnL.stage==LEG_EN_FAILED) gLegEnL=LegEn{LEG_EN_GOAL,0,0}; }
       if(gLegLimped){ drvPrev=driving; levPrev=gLevelOn; gLegHomeReq=false; }  // stay limp: skip the machine (a 'leghome' while limp is dropped)
       else {
       // balance ON, or 'leghome' (DS4 R3) -> slew both legs to the ride height (MID), slowly
@@ -1380,10 +1414,10 @@ static void balanceTask(void*){
       }  // end !gLegLimped
       gLegTurn ^= 1;
       if(gLegTurn){
-        legService(RIGHT_LEG, &gLegTgtR, &gLegEnerR, &gLegWroteR, &gLegSetlR, gLegAbsR, gLegStepR, LEG_R_MIN, LEG_R_MAX);
+        legService(RIGHT_LEG, &gLegTgtR, &gLegEnerR, &gLegWroteR, &gLegSetlR, &gLegEnR, &tLegRetryR, &tLegFailR, gLegAbsR, gLegStepR, LEG_R_MIN, LEG_R_MAX);
         gLegAbsR = LEG_NONE; gLegStepR = 0;
       } else {
-        legService(LEFT_LEG,  &gLegTgtL, &gLegEnerL, &gLegWroteL, &gLegSetlL, gLegAbsL, gLegStepL, LEG_L_MIN, LEG_L_MAX);
+        legService(LEFT_LEG,  &gLegTgtL, &gLegEnerL, &gLegWroteL, &gLegSetlL, &gLegEnL, &tLegRetryL, &tLegFailL, gLegAbsL, gLegStepL, LEG_L_MIN, LEG_L_MAX);
         gLegAbsL = LEG_NONE; gLegStepL = 0;
       }
       if(!gLegLimped) legGoalWriter();                            // the ONLY place leg goal updates go on the bus
@@ -1668,9 +1702,9 @@ void loop(){
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
     char b[704];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfail=%.0f ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u\n",
-      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, tReadFail, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gLevelOn, tRollAcc, gTurn, gHdgTarget, gYawRateCmd,
-      (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID), (unsigned)gDriveWdTrips);
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u\n",
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gLevelOn, tRollAcc, gTurn, gHdgTarget, gYawRateCmd,
+      (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID), (unsigned)gDriveWdTrips, (unsigned)tLegRetryL, (unsigned)tLegRetryR, (unsigned)tLegFailL, (unsigned)tLegFailR);
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     if(gPolJoint && k>0){                        // Stage-1 turn-policy diagnostics (obs + outputs)
       k--;                                       // drop trailing '\n'

@@ -1,0 +1,13 @@
+[Unit]
+Description=Rider WiFi watchdog (notice a dead WiFi link, restart the driver, log every dropout)
+After=NetworkManager.service mosquitto.service
+Wants=mosquitto.service
+
+[Service]
+# root: restarting the WiFi driver needs modprobe
+ExecStart=/bin/bash /home/pi/rider_wifi_watchdog.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

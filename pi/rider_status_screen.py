@@ -272,7 +272,7 @@ def publish():
         "power_w": round(cm5_power_w(), 2),
         "loop_hz": int(tel.get("lhz", 0)),
         "fault": int(tel.get("fault", 0)),
-        "rfail": tel.get("rfail", 0.0),
+        "read_fails": int(tel.get("rfails", 0)),   # failed wheel reads since the ESP32 booted (count)
         "mode": g_ctrl,                 # compiled-in controller ("LQR"/"POL"), parsed from telem ctrl=; firmware picks it at build time (was derived from the removed 'polrun')
         "position": tel.get("wx", 0.0),
         "target": tel.get("ptgt", 0.0),
