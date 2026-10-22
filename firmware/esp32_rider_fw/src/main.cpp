@@ -278,13 +278,23 @@ static int    gLegWroteL=0,      gLegWroteR=0;      // last goal written to the 
 static int    gLegSetlL=0,       gLegSetlR=0;       // post-torque-on settle countdown
 // VERIFIED ENERGIZE (2026-10-21): the three energize writes go out on separate visits (never back-to-back: a
 // write sent into the previous servo's reply is lost -- the limp path spaces + verifies for the same reason),
-// then torque + goal are read back; a mismatch starts over. Seen: the left leg stayed limp after a balance-on.
+// then torque, goal and speed are read back; a mismatch starts over. Seen: the left leg stayed limp after a
+// balance-on. The speed is checked too: it reads 0 at servo power-up, and a lost speed write could leave a
+// leg powered but not moving -- a later balance-on works because the servo keeps the value.
 enum { LEG_EN_GOAL=0, LEG_EN_SPEED, LEG_EN_TORQUE, LEG_EN_VERIFY, LEG_EN_FAILED };
 #define LEG_EN_TRIES 5                               // failed verifies before the leg is left alone (until next balance-on)
 struct LegEn { uint8_t stage, tries; int sent; };    // energize progress; sent = goal written in LEG_EN_GOAL
 static LegEn  gLegEnL={LEG_EN_GOAL,0,0}, gLegEnR={LEG_EN_GOAL,0,0};
 volatile uint32_t tLegRetryL=0, tLegRetryR=0;        // energize retries since boot (telemetry legretry=L/R)
 volatile uint32_t tLegFailL=0,  tLegFailR=0;         // energize give-ups since boot (telemetry legfail=L/R)
+// ARRIVAL CHECK (2026-10-21): 1 s after a slow leg move (ride height / equalize) ends, each powered leg's
+// position is read back. A leg more than LEG_ARRIVE_TOL counts off its target counts as stuck (telemetry
+// legstkL/R) and its registers 0x18-0x27 go out as '# leg' (recorded in riderlog). Seen: the first
+// balance-on after boot rolled the body 10 deg -- one leg rose, the other didn't -- with energize verified.
+#define LEG_ARRIVE_TOL 25                  // on the stand a settled leg sits ~8-9 counts short (gravity on a P-only servo);
+                                          // the 10 deg roll of the incident is ~50 counts of leg difference
+#define LEG_ARRIVE_MS 2000                 // at speed 100 a leg was still ~12 counts short 1 s after a 55-count move
+volatile uint32_t tLegStuckL=0, tLegStuckR=0;
 static int    gLegStepL=0,       gLegStepR=0;       // per-leg accumulated pending step (shared 'legstep' distributed here)
 static uint8_t gLegTurn=0;                           // alternate which leg gets the bus each cycle (NO same-cycle contention)
 // ---- leg LEVELING: keep the body level laterally by a SAME-SIGN differential on the legs ----
@@ -591,12 +601,15 @@ static void legService(uint8_t id, int* tgt, bool* ener, int* wrote, int* setl, 
   if(*tgt == LEG_NONE) return;                                    // leg inactive -> nothing on the bus
   if(!*ener){                                                     // ENERGIZE: one write per visit, then verify
     switch(en->stage){
-      case LEG_EN_GOAL:   en->sent = *tgt; legSetReg2(id,0x1E,en->sent); en->stage = LEG_EN_SPEED;  break;  // goal = TARGET
+      case LEG_EN_GOAL:   en->sent = *tgt; legSetReg2(id,0x1E,en->sent); en->stage = LEG_EN_SPEED;   // goal = TARGET
+                          { char b[48]; int k = snprintf(b, sizeof(b), "# leg %d energize tgt=%d\n", id, *tgt); emit(b, k); }  // DIAG
+                          break;
       case LEG_EN_SPEED:  legSetReg2(id,0x20,LEG_SPEED);                 en->stage = LEG_EN_TORQUE; break;
       case LEG_EN_TORQUE: wheelSetReg(id,0x18,1);                        en->stage = LEG_EN_VERIFY; break;  // -> servo slews
       case LEG_EN_VERIFY: {
-        uint8_t tq = 0, g[2] = {0,0};
-        bool ok = legRead(id,0x18,1,&tq) && tq==1 && legRead(id,0x1E,2,g) && (g[0] | (g[1]<<8)) == en->sent;
+        uint8_t tq = 0, g[4] = {0,0,0,0};                          // goal 0x1E + speed 0x20 (power-up speed is 0)
+        bool ok = legRead(id,0x18,1,&tq) && tq==1 && legRead(id,0x1E,4,g)
+                  && (g[0] | (g[1]<<8)) == en->sent && (g[2] | (g[3]<<8)) == LEG_SPEED;
         if(ok){ *ener=true; *wrote=en->sent; *setl=LEG_SETTLE; en->stage=LEG_EN_GOAL; en->tries=0; }  // legGoalWriter
         else if(++en->tries >= LEG_EN_TRIES){ en->stage=LEG_EN_FAILED; (*fails)++; }                 // sends any newer *tgt
         else { (*retries)++; en->stage=LEG_EN_GOAL; }
@@ -612,6 +625,21 @@ static void legService(uint8_t id, int* tgt, bool* ener, int* wrote, int* setl, 
 // every LEG_WRITE_MS. A leg that is energized+settled but whose partner isn't falls back to one addressed write,
 // under the same cap. The servo slews to each goal at LEG_SPEED, so a 25 Hz goal stream still moves smoothly.
 #define LEG_WRITE_MS 40
+// ARRIVAL CHECK for one leg (see LEG_ARRIVE_TOL): read registers 0x18-0x27 (torque, goal 0x1E, speed 0x20,
+// present position 0x24 ...), report '# leg <id> ok|STUCK tgt= pos= regs=<hex>'; stuck -> count it.
+static void legArrivalCheck(uint8_t id, bool ener, int tgt, volatile uint32_t* stuck){
+  if(!ener || tgt == LEG_NONE) return;
+  uint8_t r[16];
+  char b[120]; int k;
+  if(!legRead(id, 0x18, 16, r)){ k = snprintf(b, sizeof(b), "# leg %d noread tgt=%d\n", id, tgt); emit(b, k); return; }
+  int pos = (r[0x24-0x18] | (r[0x25-0x18] << 8)) & 0x3FF;
+  bool bad = abs(pos - tgt) > LEG_ARRIVE_TOL;
+  if(bad) (*stuck)++;
+  k = snprintf(b, sizeof(b), "# leg %d %s tgt=%d pos=%d regs=", id, bad ? "STUCK" : "ok", tgt, pos);
+  for(int i = 0; i < 16; i++) k += snprintf(b + k, sizeof(b) - k, "%02X", r[i]);
+  k += snprintf(b + k, sizeof(b) - k, "\n");
+  emit(b, k);
+}
 static void legGoalWriter(){
   static uint32_t lastMs = 0;
   bool readyR = gLegEnerR && gLegSetlR==0 && gLegTgtR!=LEG_NONE;
@@ -760,6 +788,15 @@ static void policyInferT(const float* obs, float* out){
   for(int j=0;j<64;j++){ float s=tB1[j]; for(int i=0;i<64;i++)      s+=tW1[j][i]*h0[i]; h1[j]=ftanh(s); }
   for(int o=0;o<POLT_OUT;o++){ float a=tB2[o]; for(int i=0;i<64;i++) a+=tW2[o][i]*h1[i];
                                out[o]= a>1.0f?1.0f:(a<-1.0f?-1.0f:a); }
+}
+
+// Stick RELEASE (both controllers, 2026-10-21): keep the current drive speed and set the home where the
+// gPosAmax ramp brings it to rest; the hold trapezoid then decelerates from that speed. It used to zero
+// the speed and latch the home at the release spot -- a full-strength emergency stop, and a stick FLIP
+// passes through the dead zone, so every full reversal began with one (floor: a 12.8 deg backward lurch
+// at ride height, a fall at full leg height). Now a flip just ramps through zero into reverse.
+static float releaseStop(float tgtEff, float v){   // -> the new home
+  return tgtEff + ((v >= 0.0f) ? 1.0f : -1.0f) * v * v / (2.0f * gPosAmax);
 }
 
 // ---------------- balance task (core 1) ----------------
@@ -1002,7 +1039,7 @@ static void balanceTask(void*){
         // Only for a turn from a HOLD (stick drive idle): mid-drive the re-anchor is pointless and, in
         // the LQR, wipes the target lead that is driving the robot (stop-then-turn, 2026-10-18). The
         // hold integral is KEPT: it carries the policy's bias cancel (see the stick-drive branch).
-        if(turning && !wasTurning && fabsf(gDriveVel) <= 0.001f){ gPosTarget = wheel_x; gPosTargetEff = wheel_x; }
+        if(turning && !wasTurning && fabsf(gDriveVel) <= 0.001f){ gPosTargetEff = wheel_x; gPosTarget = releaseStop(wheel_x, vdesS); }   // still braking from a release -> keep braking
         wasTurning = turning;
         if(fabsf(gDriveVel) > 0.001f){
           // ---- VELOCITY DRIVE (stick held) ----------------------------------------
@@ -1026,10 +1063,10 @@ static void balanceTask(void*){
           wasVelDrive = true;
         } else {
           // ---- POSITION HOLD / COMMANDED MOVE (stick released, or 'ptgt' distance) -----
-          // Trapezoidal profile to gPosTarget (= latched release point, OR a commanded
-          // ptgt move -- specific-distance moves are honored here). On the release edge,
-          // zero the feedforward so we brake from rest at the latched home (no overshoot).
-          if(wasVelDrive){ vdesS = 0.0f; gPosTarget = wheel_x; gPosTargetEff = wheel_x; wasVelDrive = false; }  // latch HERE
+          // Trapezoidal profile to gPosTarget (= the release stop point, OR a commanded
+          // ptgt move -- specific-distance moves are honored here). On the release edge the
+          // speed is KEPT and the home set where the ramp brings it to rest (releaseStop).
+          if(wasVelDrive){ gPosTarget = releaseStop(gPosTargetEff, vdesS); wasVelDrive = false; }
           float dist = gPosTarget - gPosTargetEff;
           float vstop = sqrtf(2.0f * gPosAmax * fabsf(dist));  // brake-distance speed cap -> stop ON target
           float vcap = fminf((dist >= 0.0f) ? gPosVmax : gPosVmaxBack, vstop);  // asymmetric: limit backward moves
@@ -1138,7 +1175,7 @@ static void balanceTask(void*){
         // re-anchor home at the spin center -> clear integral; ONLY for a turn from a HOLD. Mid-drive the
         // target leads the robot by ~20 cm and that lead IS the drive command: re-anchoring it collapsed u
         // to ~0 at every turn start -> the robot stopped, spun, then re-accelerated (floor log 2026-10-18).
-        if(turning && !wasTurning && fabsf(gDriveVel) <= 0.001f){ gPosTarget=wheel_x; gPosTargetEff=wheel_x; lqrIx=0.0f; }
+        if(turning && !wasTurning && fabsf(gDriveVel) <= 0.001f){ gPosTargetEff=wheel_x; gPosTarget=releaseStop(wheel_x, vdesS); lqrIx=0.0f; }
         wasTurning = turning;
         if(fabsf(gDriveVel) > 0.001f){                                   // VELOCITY DRIVE (stick held)
           float vtgt = clampf(gDriveVel, -gPosVmaxBack, gPosVmax);        // clamp BOTH dirs (forward was uncapped)
@@ -1146,7 +1183,7 @@ static void balanceTask(void*){
           gPosTargetEff += vdesS*sdt; gPosTarget=gPosTargetEff; wasVelDrive=true;  // ADVANCE target at cmd velocity
                                                                                    // -> position term drives it (like ptgt)
         } else {                                                          // HOLD / 'ptgt' move (stick released)
-          if(wasVelDrive){ vdesS=0.0f; gPosTarget=wheel_x; gPosTargetEff=wheel_x; lqrIx=0.0f; wasVelDrive=false; }  // latch at current spot -> clear integral
+          if(wasVelDrive){ gPosTarget = releaseStop(gPosTargetEff, vdesS); lqrIx=0.0f; wasVelDrive=false; }   // ramp to rest (releaseStop) -> clear integral
           float dist=gPosTarget-gPosTargetEff;
           float vstop=sqrtf(2.0f*gPosAmax*fabsf(dist));
           float vcap=fminf((dist>=0.0f)?gPosVmax:gPosVmaxBack, vstop);
@@ -1333,12 +1370,17 @@ static void balanceTask(void*){
         if(gLegEnL.stage==LEG_EN_FAILED) gLegEnL=LegEn{LEG_EN_GOAL,0,0}; }
       if(gLegLimped){ drvPrev=driving; levPrev=gLevelOn; gLegHomeReq=false; }  // stay limp: skip the machine (a 'leghome' while limp is dropped)
       else {
-      // balance ON, or 'leghome' (DS4 R3) -> slew both legs to the ride height (MID), slowly
-      if((driving && !drvPrev) || gLegHomeReq){
+      // balance ON, or 'leghome' (DS4 R3) -> slew both legs to the ride height (MID), slowly. A balance-on
+      // with both legs still powered (a pick-up / put-down, a fall) KEEPS the chosen height (2026-10-21):
+      // the legs never went limp, so the height is known. Limp legs (power-up, STOP) still go to MID.
+      bool keepHeight = gLegEnerR && gLegEnerL && gLegTgtR != LEG_NONE && gLegTgtL != LEG_NONE;
+      if((driving && !drvPrev && !keepHeight) || gLegHomeReq){
         gLegHomeReq = false; gLegStepReq = 0;                     // a reset discards any height nudge still pending
         gLegHomeR = (gLegEnerR&&gLegTgtR!=LEG_NONE)?gLegTgtR:(legReadPos(RIGHT_LEG,&hp)?hp:LEG_R_MID);
         gLegHomeL = (gLegEnerL&&gLegTgtL!=LEG_NONE)?gLegTgtL:(legReadPos(LEFT_LEG,&hp)?hp:LEG_L_MID);
         gLegDestR = LEG_R_MID; gLegDestL = LEG_L_MID; gLegHoming = true;
+        { char b[80]; int k = snprintf(b, sizeof(b), "# leg home from R=%d L=%d (%s)\n", (int)gLegHomeR, (int)gLegHomeL,
+                                       driving ? "balance-on" : "leghome"); emit(b, k); }   // DIAG 2026-10-21
       }
       // balance OFF -> roll-level off, then equalize (remove differential, keep height) + hold;
       // leveling OFF while still balancing -> same equalize (legs return to neutral, body un-tilts).
@@ -1426,6 +1468,16 @@ static void balanceTask(void*){
         gLegAbsL = LEG_NONE; gLegStepL = 0;
       }
       if(!gLegLimped) legGoalWriter();                            // the ONLY place leg goal updates go on the bus
+      {                                                           // ARRIVAL CHECK: LEG_ARRIVE_MS after a slow move ends
+        static bool homPrev = false; static uint32_t arriveMs = 0;
+        if(homPrev && !gLegHoming && !gLegLimped) arriveMs = millis() | 1u;
+        homPrev = gLegHoming;
+        if(arriveMs && !gLegHoming && millis() - arriveMs > LEG_ARRIVE_MS){
+          arriveMs = 0;
+          legArrivalCheck(RIGHT_LEG, gLegEnerR, gLegTgtR, &tLegStuckR);
+          legArrivalCheck(LEFT_LEG,  gLegEnerL, gLegTgtL, &tLegStuckL);
+        }
+      }
     }
 
     // dead-reckoned pose: project the change in fused forward distance through the
@@ -1658,7 +1710,13 @@ static void applyCmd(char* s){
 static void pump(Stream& in, char* buf, int& n){
   while(in.available()){
     char c=in.read();
-    if(c=='\n'||c=='\r'){ if(n>0){ buf[n]=0; applyCmd(buf); n=0; } }
+    if(c=='\n'||c=='\r'){ if(n>0){ buf[n]=0;
+        static int rxDiag = 0;                                   // DIAG 2026-10-21: the first command lines after
+        if(rxDiag < 12){ rxDiag++; char b[64]; int k = snprintf(b, sizeof(b), "# rx %lu '%s'\n",   // boot, as received
+                                                             (unsigned long)millis(), buf); emit(b, k); }
+        applyCmd(buf); n=0; } }
+    else if(c < 0x20 || c > 0x7E) n = 0;   // line noise (a power-up fills the Pi link with 0xFF-like bytes, seen
+                                           // 2026-10-21): drop the partial line so it can't swallow the next command
     else if(n<39) buf[n++]=c;
   }
 }
@@ -1707,9 +1765,9 @@ void loop(){
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
     char b[704];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u rfL=%u rfR=%u rft0=%u rft1=%u ms=%u\n",
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u legstkL=%u legstkR=%u legst=%u rfL=%u rfR=%u rft0=%u rft1=%u ms=%u\n",
       tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gLevelOn, tRollAcc, gTurn, gHdgTarget, gYawRateCmd,
-      (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID), (unsigned)gDriveWdTrips, (unsigned)tLegRetryL, (unsigned)tLegRetryR, (unsigned)tLegFailL, (unsigned)tLegFailR, (unsigned)tRfL, (unsigned)tRfR, (unsigned)tRfFirstMs, (unsigned)tRfLastMs, (unsigned)millis());
+      (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID), (unsigned)gDriveWdTrips, (unsigned)tLegRetryL, (unsigned)tLegRetryR, (unsigned)tLegFailL, (unsigned)tLegFailR, (unsigned)tLegStuckL, (unsigned)tLegStuckR, (unsigned)((gLegLimped?1:0)|(gLegHoming?2:0)|(gLegEnerR?4:0)|(gLegEnerL?8:0)), (unsigned)tRfL, (unsigned)tRfR, (unsigned)tRfFirstMs, (unsigned)tRfLastMs, (unsigned)millis());
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     if(gPolJoint && k>0){                        // Stage-1 turn-policy diagnostics (obs + outputs)
       k--;                                       // drop trailing '\n'

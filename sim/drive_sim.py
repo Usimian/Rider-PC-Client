@@ -91,7 +91,7 @@ def lqr_controller(params):
 
 def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s=None, fw_obs=True, params=None,
              stick=True, hold_s=HOLD_S, pitch_offset_deg=0.0, drift_deg=0.0, controller="policy", drive="latch",
-             leash=LEASH, drive_int=False, reverse_at=None, turn_cmd=0.0, spin_gain=1.0, spin_enc=True,
+             leash=LEASH, drive_int=False, reverse_at=None, release_s=0.0, turn_cmd=0.0, spin_gain=1.0, spin_enc=True,
              spin_lat=0.0, spin_tau=0.0, lqr_speed="reported", inject=None, rate_offset_dps=0.0,
              twowheel=False, yaw_cmd=0.0, yaw_from_s=None, right_wheel=None, noise=False):
     """accel_couple: override the accelerometer-reads-acceleration gain (default rider_params, MEASURED);
@@ -112,6 +112,10 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
       drive_int: with 'lead', also integrate the position error while driving (as the LQR does).
     reverse_at: flip the stick to the opposite direction at this time (s) -- full forward straight into full
       reverse (floor 2026-10-19: where ppo_fw_s9 fell).
+    release_s: with reverse_at, the stick passes through the dead zone for this long first (as a real flip
+      does). The firmware's release edge (main.cpp releaseStop) keeps the speed and sets the home where the
+      ramp brings it to rest (LQR: clears its integral). Until 2026-10-21 it zeroed vdes and latched the home
+      at the release spot -- an emergency stop inside every flip (floor, lb25_s4, ride height: pitch 3.6 -> 16 deg).
     turn_cmd: spin in place with this turn output (raw wheel-cmd, floor spins ~60) -- SpinActuator.
       spin_gain: the spinning wheels' strength vs straight driving; spin_lat / spin_tau: their extra pure
       delay / extra first-order lag (s);
@@ -146,7 +150,7 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
     x0 = x
     tgt = x0 + direction * 5.0                              # far target => cruise at vmax the whole run
     tgt_eff = x0; vdes_s = 0.0; xvelF = 0.0; prevX = x0; pint = 0.0; pint_pos = 0.0
-    vest = 0.0; lqr_ix = 0.0
+    vest = 0.0; lqr_ix = 0.0; was_driving = False; hold_tgt = x0
     stack = deque(maxlen=2)
     log = []
     n = int(T / dt)
@@ -166,7 +170,12 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
         xvelF = VEL_LP * xvelF + (1 - VEL_LP) * xvel
         damax = AMAX * dt
         kiLim = POSMAX_DEG / KI if KI > 0.01 else 1e6
-        driving = stick and vmax > 0.0 and t >= hold_s
+        released = reverse_at is not None and reverse_at <= t < reverse_at + release_s
+        driving = stick and vmax > 0.0 and t >= hold_s and not released
+        if was_driving and not driving:                     # firmware release edge (releaseStop): keep the speed,
+            hold_tgt = tgt_eff + np.sign(vdes_s) * vdes_s ** 2 / (2 * AMAX)   # home = where the ramp stops it
+            lqr_ix = 0.0
+        was_driving = driving
         sdir = -direction if (reverse_at is not None and t >= reverse_at) else direction
         if controller == "lqr":
             # LQR drive management (main.cpp): stick held -> target ADVANCES at the ramped speed, the position
@@ -192,8 +201,14 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
         else:
             if stick:
                 # STICK (main.cpp): HOLD until hold_s (target latched at x0; the hold integral builds, with
-                # the deadband), then full stick: vdes ramps at AMAX.
-                vcmd = sdir * vmax if driving else 0.0
+                # the deadband), then full stick: vdes ramps at AMAX. Released: the hold trapezoid brakes the
+                # target to the home (x0, or the release stop point) from the current speed.
+                if driving:
+                    vcmd = sdir * vmax
+                else:
+                    dist = hold_tgt - tgt_eff
+                    vcap = min(VMAX, np.sqrt(2 * AMAX * abs(dist)))
+                    vcmd = vcap if dist >= 0 else -vcap
                 if vcmd > vdes_s + damax: vdes_s += damax
                 elif vcmd < vdes_s - damax: vdes_s -= damax
                 else: vdes_s = vcmd
@@ -210,9 +225,13 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
                     if drive_int:
                         pint_pos = float(np.clip(pint_pos + pos_err * dt, -kiLim, kiLim))
                 else:
+                    tgt_eff += vdes_s * dt
+                    if (dist >= 0 and tgt_eff > hold_tgt) or (dist < 0 and tgt_eff < hold_tgt):
+                        tgt_eff = hold_tgt; vdes_s = 0.0               # never coast past the home
+                    vdes = vdes_s
                     pos_err = x - tgt_eff
                     inband = abs(pos_err) < DEADBAND
-                    if abs(pos_err) < INTBAND and not inband:
+                    if tgt_eff == hold_tgt and abs(pos_err) < INTBAND and not inband:
                         pint_pos = float(np.clip(pint_pos + pos_err * dt, -kiLim, kiLim))
                     if inband:
                         pos_err = 0.0
