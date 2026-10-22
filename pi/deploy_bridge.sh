@@ -71,6 +71,12 @@ sudo systemctl restart mosquitto
 #     services come up ~6s sooner. (Removing it from mosquitto via drop-in didn't reset
 #     cleanly on this systemd; masking the wait service is the reliable fix.)
 sudo systemctl mask NetworkManager-wait-online.service
+# 2c. no ModemManager: there is no modem, and udev marks the ESP32 UART (/dev/ttyAMA0) a modem candidate, so
+#     it opened the port ~3 s after rider-bridge at every boot and left probe bytes in the ESP32's command
+#     buffer -- the first command after power-up was swallowed (2026-10-21). Masked (NetworkManager would
+#     D-Bus-activate it otherwise).
+sudo systemctl disable --now ModemManager.service >/dev/null 2>&1 || true
+sudo systemctl mask ModemManager.service
 # 3. install the systemd units
 sudo install -m 644 /tmp/rider-bridge.service      /etc/systemd/system/rider-bridge.service
 sudo install -m 644 /tmp/rider-joystick.service    /etc/systemd/system/rider-joystick.service

@@ -1,5 +1,5 @@
 [Unit]
-Description=Rider continuous telemetry+dcap recorder (diagnostic: always-on MQTT log)
+Description=Rider continuous telemetry+dcap+leg-check recorder (diagnostic: always-on MQTT log)
 After=mosquitto.service
 Wants=mosquitto.service
 
@@ -10,7 +10,7 @@ Wants=mosquitto.service
 # robot event (fall / swing / nudge) is ever missed for lack of a recorder.
 # NOTE: %% is required -- systemd expands a single % (%%I/%%t/%%p reach mosquitto_sub as %I/%t/%p:
 # ISO-8601 timestamp, topic, payload). A single % gets eaten by systemd and logs garbage.
-ExecStart=/usr/bin/mosquitto_sub -h localhost -t rider/debug/telem -t rider/debug/dcap -v -F "%%I %%t %%p"
+ExecStart=/usr/bin/mosquitto_sub -h localhost -t rider/debug/telem -t rider/debug/dcap -t rider/debug/leg -t rider/debug/unknown -v -F "%%I %%t %%p"
 StandardOutput=append:/home/pi/riderlog.txt
 StandardError=append:/home/pi/riderlog.txt
 Restart=always

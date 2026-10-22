@@ -12,7 +12,7 @@
   `git status`/`log` before claiming anything about repo state. Force-push / history
   rewrites need explicit OK.
 - **Reconstruction from scratch is the bar.** New hardware + this repo must rebuild the whole
-  system. Keep the code, firmware, the six-service deploy (`pi/deploy_bridge.sh`), and the Pi
+  system. Keep the code, firmware, the seven-service deploy (`pi/deploy_bridge.sh`), and the Pi
   host-state runbook (`docs/PI_HOST_SETUP.md`) current when you change how it's built or run.
   If a thing can be regenerated on a fresh system, don't commit a binary snapshot of it; if it
   can't (e.g. the last copy of a stock firmware image), preserve it in `firmware/prebuilt/`.
@@ -79,7 +79,7 @@ It runs these systemd services (deployed by `pi/deploy_bridge.sh`):
   `rider/safety/fwd_limit`; the joystick service caps **forward** drive by it (reverse never limited).
   Always running, but it only limits while switched ON by the retained `rider/safety/enable {"on"}`
   (web page button); off — the default — it reports what it sees and publishes factor 1.0.
-- **rider-recorder** — bare `mosquitto_sub` unit logging `rider/debug/telem` + `rider/debug/dcap`
+- **rider-recorder** — bare `mosquitto_sub` unit logging `rider/debug/telem` + `rider/debug/dcap` + `rider/debug/leg` + `rider/debug/unknown`
   to `/home/pi/riderlog.txt`, always on so no fall/swing is ever missed. Needs `mosquitto-clients`.
 - **rider-wifi-watchdog** (`pi/rider_wifi_watchdog.sh`, root) — pings the router every 5 s; after
   30 s down it snapshots the WiFi state to `/home/pi/wifi_snapshots/`, restarts the WiFi driver and

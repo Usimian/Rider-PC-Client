@@ -42,6 +42,11 @@ lcd = LCD_2inch.LCD_2inch()
 lcd.Init()
 lcd.clear()
 ser = serial.Serial(PORT, 115200, timeout=0.1)
+# End whatever partial line the ESP32 holds: at a real power-up it has bytes from the Pi's boot on this UART
+# with no newline, so the FIRST command after boot was glued onto them and rejected as unknown (2026-10-21:
+# 'leghome' / 'legstep' ignored once after every power-up, the second always worked). The rejected junk comes
+# back as a '# ?' line (forwarded to rider/debug/unknown, kept in riderlog).
+ser.write(b"\n")
 
 # physical buttons on the XGO 2-inch board (active-low, pull-up). Mapped BY POSITION
 # on 2026-06-14 (GPIOs from the XGO CM4 key.py; labels A/B/C/D, but position is what we use):
@@ -516,6 +521,10 @@ while True:
         mqtt_forward("rider/debug/dcap", line)     # drive-capture dump (commanded-vs-actual wheel vel)
     elif line.startswith("# cfg"):
         mqtt_forward("rider/debug/cfg", line)      # servo config-register dump ('cfgdump <id>')
+    elif line.startswith("# leg"):
+        mqtt_forward("rider/debug/leg", line)      # leg arrival check after a slow leg move (ok / STUCK + registers)
+    elif line.startswith("# ?") or line.startswith("# rx"):
+        mqtt_forward("rider/debug/unknown", line)  # a command line the firmware did not recognise / DIAG: first lines received
     # relay any queued commands to the ESP32
     while not cmd_q.empty():
         try:

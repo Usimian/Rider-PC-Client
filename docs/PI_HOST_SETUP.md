@@ -236,8 +236,10 @@ Now run the deploy from the workstation (repo root):
 pi/deploy_bridge.sh rider
 ```
 
-It installs the six units (`rider-bridge`, `-joystick`, `-camera`, `-tof`, `-tof-safety`,
-`-recorder`), copies `beep.wav`, and enables + starts everything. It also installs the **broker
+It installs the seven units (`rider-bridge`, `-joystick`, `-camera`, `-tof`, `-tof-safety`,
+`-recorder`, `-wifi-watchdog`), copies the sounds, and enables + starts everything. It also masks
+`NetworkManager-wait-online` (boot speed) and **`ModemManager`**: there is no modem, and it probed the
+ESP32 UART at every boot, leaving bytes that swallowed the first command after power-up. It also installs the **broker
 config** `pi/mosquitto-rider.conf` → `/etc/mosquitto/conf.d/rider.conf` (1883 open to the LAN —
 a stock Mosquitto 2.x is localhost-only, so without it nothing off the Pi can connect — and 9001
 for the browser page) and the **web page** `pi/web/` → `/srv/rider-web/`, then restarts the
