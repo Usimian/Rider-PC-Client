@@ -63,7 +63,6 @@ class FeaturesPanel:
         self.parent = parent
         self.callbacks = callbacks
         self._volume_after_id = None
-        self._led_after_id = None
         self.setup_panel()
 
     def setup_panel(self):
@@ -125,27 +124,6 @@ class FeaturesPanel:
         )
         self._volume_slider.pack(side='left', fill='x', expand=True, padx=(5, 5))
 
-        # LED brightness row (live -> ESP32 firmware 'ledbright 0..255' via rider/control/line)
-        led_row = tk.Frame(grid, bg='#3c3c3c')
-        led_row.pack(fill='x', pady=8)
-
-        tk.Label(led_row, text="LED Bright:", font=('Arial', 12, 'bold'),
-                bg='#3c3c3c', fg='white', width=15, anchor='w').pack(side='left')
-
-        self._led_val_label = tk.Label(led_row, text="20", font=('Arial', 12, 'bold'),
-                                       bg='#3c3c3c', fg='#87ceeb', width=5)
-        self._led_val_label.pack(side='right')
-
-        self._led_var = tk.IntVar(value=20)
-        self._led_slider = tk.Scale(
-            led_row, from_=0, to=255, orient='horizontal',
-            variable=self._led_var, showvalue=False,
-            bg='#3c3c3c', fg='white', troughcolor='#555555',
-            highlightthickness=0, bd=0, sliderlength=16,
-            command=self._on_led_change
-        )
-        self._led_slider.pack(side='left', fill='x', expand=True, padx=(5, 5))
-    
     def _on_volume_change(self, value):
         """Called as slider moves — debounce then send to robot."""
         val = int(value)
@@ -154,16 +132,6 @@ class FeaturesPanel:
             self.panel.after_cancel(self._volume_after_id)
         self._volume_after_id = self.panel.after(
             150, lambda: self.callbacks.get('set_volume', lambda v: None)(val)
-        )
-
-    def _on_led_change(self, value):
-        """LED brightness slider — debounce then send 'ledbright <n>' to the ESP32."""
-        val = int(value)
-        self._led_val_label.config(text=f"{val}")
-        if self._led_after_id:
-            self.panel.after_cancel(self._led_after_id)
-        self._led_after_id = self.panel.after(
-            120, lambda: self.callbacks.get('set_led_brightness', lambda v: None)(val)
         )
 
     def update_feature_status(self, feature: str, enabled: bool):
@@ -180,7 +148,7 @@ class FeaturesPanel:
     def update_all_features(self, data: Dict[str, Any]):
         """Update all feature statuses"""
         feature_map = {
-            'roll_balance_enabled': 'roll_balance',
+            'roll_leveling_enabled': 'roll_balance',   # the "Roll Balance" row shows roll LEVELING, not balancing
         }
         
         for data_key, feature_key in feature_map.items():

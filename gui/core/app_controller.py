@@ -61,7 +61,6 @@ class ApplicationController:
             'toggle_roll_balance': self._toggle_roll_balance,
             'toggle_camera': self._toggle_camera,
             'set_volume': self._set_volume,
-            'set_led_brightness': self._set_led_brightness,
             'emergency_stop': self._emergency_stop,
             'reset_robot': self._reset_robot,
             'reboot_pi': self._reboot_pi,
@@ -168,21 +167,18 @@ class ApplicationController:
             print(f"[APP] Body tilt changed to: {value}°")
 
     def _toggle_roll_balance(self):
-        """Toggle balance via raw firmware line commands -- the same path the DS4
-        controller and LCD button use. Reads current state to decide direction:
-        enable -> 'en 1'; disable -> 'en 0'. (The controller is compiled into the
-        firmware -- there is no runtime policy-arm step anymore.)"""
+        """"Roll Balance" = the firmware's ROLL LEVELING (legs tilt to keep the body level side to side),
+        the same function as the DS4 Square button: 'level 1' / 'level 0'. Direction comes from the
+        robot's real state (telemetry 'lev' -> status 'roll_leveling_enabled'). It used to send 'en 0/1',
+        i.e. it switched BALANCING off -- balancing on/off stays on Share and the LCD button."""
         if not self.mqtt_client.is_connected():
             messagebox.showwarning("Not Connected", "Not connected to robot")
             return
 
-        currently_on = bool(self.robot_state.data.get('roll_balance_enabled', False))
-        if currently_on:
-            self.mqtt_client.send_line("en 0")
-        else:
-            self.mqtt_client.send_line("en 1")
+        currently_on = bool(self.robot_state.data.get('roll_leveling_enabled', False))
+        self.mqtt_client.send_line("level 0" if currently_on else "level 1")
         if self.debug_mode:
-            print(f"[APP] Roll balance toggle -> {'OFF' if currently_on else 'ON'}")
+            print(f"[APP] Roll leveling toggle -> {'OFF' if currently_on else 'ON'}")
 
     def _toggle_camera(self):
         """Toggle camera"""
@@ -198,11 +194,6 @@ class ApplicationController:
         """Send volume level (0-100) to robot"""
         if self.mqtt_client.is_connected():
             self.mqtt_client.send_settings_command('set_volume', int(value))
-
-    def _set_led_brightness(self, value: int):
-        """Set ESP32 status-LED brightness (0-255) via the firmware 'ledbright' line command."""
-        if self.mqtt_client.is_connected():
-            self.mqtt_client.send_line("ledbright %d" % int(value))
 
     def _request_image_capture(self, resolution: str = "high"):
         """Request image capture from robot"""
@@ -383,12 +374,8 @@ class ApplicationController:
 
         # Start immediate shutdown in a separate thread to avoid blocking
         def immediate_shutdown():
-            try:
-                # Try to send safety commands quickly
-                self._send_safety_shutdown_commands()
-            except:
-                pass  # Don't let safety commands block shutdown
-
+            # No commands to the robot on close: closing the GUI must not switch balancing off
+            # (it used to send 'emergency_stop' -> 'en 0'). The GUI never drives the robot.
             print("🚪 Forcing immediate process termination...")
             import os
             os._exit(0)  # Force immediate termination
@@ -402,26 +389,6 @@ class ApplicationController:
             self.gui_manager.main_window.root.destroy()
         except:
             pass
-
-    def _send_safety_shutdown_commands(self):
-        """Send safety commands before shutdown - ultra-fast version"""
-        if not hasattr(self, 'mqtt_client') or not self.mqtt_client.is_connected():
-            return
-
-        try:
-            print("🛡️ Sending safety shutdown commands...")
-
-            # Send both commands without any error handling to maximize speed
-            try:
-                self.mqtt_client.send_movement_command(0, 0)
-                self.mqtt_client.send_system_command('emergency_stop')
-            except:
-                pass  # Ignore all errors - speed is critical
-
-            print("✅ Safety shutdown commands sent")
-
-        except Exception:
-            pass  # Ignore all errors to prevent blocking
 
     def run(self):
         """Run the application"""
@@ -456,13 +423,7 @@ class ApplicationController:
         print("🛑 Shutting down application...")
 
         try:
-            # Send safety commands first (with minimal delay)
-            try:
-                self._send_safety_shutdown_commands()
-            except Exception as e:
-                print(f"⚠️ Safety shutdown commands failed: {e}")
-
-            # Stop GUI immediately
+            # Stop GUI immediately (no stop commands to the robot -- see immediate_shutdown)
             try:
                 if hasattr(self, 'gui_manager'):
                     self.gui_manager.stop()

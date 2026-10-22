@@ -110,7 +110,6 @@ class MainWindow:
         feature_callbacks = {
             'toggle_roll_balance': self.callbacks.get('toggle_roll_balance', lambda: None),
             'set_volume': self.callbacks.get('set_volume', lambda v: None),
-            'set_led_brightness': self.callbacks.get('set_led_brightness', lambda v: None)
         }
         self.features_panel = FeaturesPanel(middle_row, feature_callbacks)
         self.features_panel.get_widget().grid(row=0, column=1, sticky="ew")

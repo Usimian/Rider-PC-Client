@@ -10,7 +10,8 @@ class RobotState:
         self.data = {
             'battery_level': 0,
             'speed_scale': 1.0,
-            'roll_balance_enabled': False,
+            'roll_balance_enabled': False,      # = balancing on (legacy name from the bridge)
+            'roll_leveling_enabled': False,     # firmware roll leveling -> the GUI's "Roll Balance" row
             'performance_mode_enabled': False,
             'camera_enabled': False,
             'controller_connected': False,
@@ -181,6 +182,7 @@ class RobotState:
         self._check_controller_timeout()
         return {
             'roll_balance_enabled': self.data['roll_balance_enabled'],
+            'roll_leveling_enabled': self.data['roll_leveling_enabled'],
             'performance_mode_enabled': self.data['performance_mode_enabled'],
             'camera_enabled': self.data['camera_enabled'],
             'controller_connected': self.data['controller_connected']

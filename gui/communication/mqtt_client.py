@@ -24,7 +24,6 @@ class MQTTClient:
             'control_line': 'rider/control/line',
             'battery': 'rider/status/battery',
             'imu': 'rider/status/imu',
-            'control_movement': 'rider/control/movement',
             'control_settings': 'rider/control/settings',
             'control_camera': 'rider/control/camera',
             'control_system': 'rider/control/system',
@@ -113,9 +112,9 @@ class MQTTClient:
         try:
             print("📡 Graceful disconnect initiated...")
 
-            # Send stop commands to ensure robot is in safe state
-            self.send_emergency_stop()
-            self.send_movement_stop()
+            # NO stop commands here (2026-10-19): this used to publish 'emergency_stop', which the bridge
+            # maps to 'en 0' -- so every GUI disconnect/reconnect/close switched BALANCING off (the robot
+            # stops or falls). The GUI never drives the robot (the DS4 does), so it has nothing to cancel.
 
             # Tell robot we're disconnecting before dropping the connection
             self.mqtt_client.publish(
@@ -144,41 +143,6 @@ class MQTTClient:
             # Fall back to force disconnect if graceful fails
             self.disconnect()
 
-    def send_emergency_stop(self) -> bool:
-        """Send emergency stop command during disconnect"""
-        try:
-            command = {
-                'action': 'emergency_stop',
-                'timestamp': time.time(),
-                'source': 'disconnect_cleanup'
-            }
-            if self.connected and self.mqtt_client:
-                payload = json.dumps(command)
-                result = self.mqtt_client.publish(self.topics['control_system'], payload)
-                self.debug_print("[CLEANUP] Emergency stop sent during disconnect")
-                return result.rc == 0
-        except Exception as e:
-            self.debug_print(f"[CLEANUP] Failed to send emergency stop: {e}")
-        return False
-
-    def send_movement_stop(self) -> bool:
-        """Send movement stop command during disconnect"""
-        try:
-            command = {
-                'x': 0,
-                'y': 0,
-                'timestamp': time.time(),
-                'source': 'disconnect_cleanup'
-            }
-            if self.connected and self.mqtt_client:
-                payload = json.dumps(command)
-                result = self.mqtt_client.publish(self.topics['control_movement'], payload)
-                self.debug_print("[CLEANUP] Movement stop sent during disconnect")
-                return result.rc == 0
-        except Exception as e:
-            self.debug_print(f"[CLEANUP] Failed to send movement stop: {e}")
-        return False
-
     def reconnect(self):
         """Reconnect to MQTT broker"""
         self.graceful_disconnect()
@@ -205,15 +169,6 @@ class MQTTClient:
         except Exception as e:
             print(f"[ERROR] Failed to publish to {topic}: {e}")
             return False
-
-    def send_movement_command(self, x: float, y: float) -> bool:
-        """Send movement command (legacy format, used by disconnect safety-stop)"""
-        command = {
-            'x': x,
-            'y': y,
-            'timestamp': time.time()
-        }
-        return self.publish_command(self.topics['control_movement'], command)
 
     def send_line(self, line: str) -> bool:
         """Send a raw ESP32 balance-firmware line command via the bridge.
