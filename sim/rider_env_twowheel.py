@@ -43,7 +43,7 @@ def build_mjcf_twowheel(p):
     r = p.wheel_radius_m
     vmax = 1.25 * p.vel_max_rad_s * max(1.0, p.cmd_limit)
     frng = p.vel_forcerange_Nm
-    arm = p.wheel_armature / 2.0     # per wheel: two spin joints share the lumped value (see rider_model_3d)
+    arm = p.wheel_armature / 2.0     # per wheel: two spin joints share the single-wheel model's lumped value
     ww = WHEEL_HALF_WIDTH
     return f"""<mujoco model="rider_twowheel">
   <option timestep="{p.physics_timestep_s}" gravity="0 0 -9.81" integrator="implicitfast"/>

@@ -18,7 +18,9 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
 from rider_env import RiderBalanceEnv
 
-name = sys.argv[1] if len(sys.argv) > 1 else "ppo_v_dr_final"
+if len(sys.argv) < 2:
+    sys.exit("usage: export_policy.py <policy name, e.g. ppo_lb25_s4> [frame_stack] [prefix] [--posaware]")
+name = sys.argv[1]
 FS = int(sys.argv[2]) if len(sys.argv) > 2 else 2
 PFX = sys.argv[3] if len(sys.argv) > 3 else "POL"   # C macro/array prefix (POA for pos-aware -> no POL_ collision)
 POS_AWARE = "--posaware" in sys.argv                  # validate in the position-aware env (policy SEES x_err/x_int)
