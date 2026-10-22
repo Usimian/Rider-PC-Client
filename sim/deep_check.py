@@ -10,7 +10,7 @@ floor-test pick rests on more than one rollout:
 Per controller: falls, worst speed error over the last 3 s (vs the command), worst 99th-pct |output|, and the
 hold's pitch-rate RMS + dominant 1-6 Hz frequency. All in drive_sim, measured accelerometer coupling.
 
-Run:  ./.venv/bin/python deep_check.py ppo_ld8_s3 ppo_ld8_s9 ... [--drive lead] [--seeds 3]
+Run:  ./.venv/bin/python deep_check.py ppo_ld8_s3 ppo_ld8_s9 ... [--drive lead] [--seeds 3] [--k 20 --kd 10]
 """
 import argparse
 from concurrent.futures import ProcessPoolExecutor
@@ -76,7 +76,10 @@ def main():
     ap.add_argument("policies", nargs="+")
     ap.add_argument("--drive", default="lead")
     ap.add_argument("--seeds", type=int, default=3)
+    ap.add_argument("--k", type=float, default=ds.K, help="policy position-loop P gain (gPosHoldK)")
+    ap.add_argument("--kd", type=float, default=ds.KD, help="policy position-loop D gain (gDriveKd)")
     a = ap.parse_args()
+    ds.K, ds.KD = a.k, a.kd                  # the worker processes fork after this, so they inherit it
     names = ["LQR"] + a.policies
     print(f"{'controller':14s} {'runs':>5s} {'falls':>5s} {'worst speed err':>16s} {'worst a99':>10s}   hold (stick-slip, 10 s)")
     with ProcessPoolExecutor(max_workers=len(names)) as ex:
