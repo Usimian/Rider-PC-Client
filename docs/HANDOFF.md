@@ -12,7 +12,10 @@ list, and what not to trust.
 - **Fall at full leg height** on full-forward-into-full-reverse (10-21). Cause found: a stick flip passes the
   dead zone, and the release used to be a full emergency stop (pitch +12.8° at ride height). Height barely
   moves the CoM (Marc: 80 mm above the floor at max = 50 mm above the axle vs 45 at ride). Fixed in firmware
-  (`releaseStop`: keep speed, brake on the ramp) and in `drive_sim` (`release_s`). **Not floor-tested yet.**
+  (`releaseStop`: keep speed, brake on the ramp) and in `drive_sim` (`release_s`). **Floor 10-22, lb25_s4:**
+  full flips swing 2.6-3.4 deg at ride height (was ~13), 3.8-7.0 at full height (fell before), 5.0 at the
+  lowest; releases 1.5-6.8 deg, no roll-back; LQR at full height flip 5.0. No falls. Capture
+  `data/captures/2026-10-22_release_floor.csv`.
 - **First command after a real power-up was lost**: ModemManager probed the ESP32 UART ~3 s after the bridge
   started. Masked (deploy does it); the firmware drops a partial line on line noise.
 - **Pi power: a bad contact in the 5 V lead**, reseated 10-21 (full-load min 4.60 -> 4.72 V, no alarms); it
@@ -23,12 +26,10 @@ list, and what not to trust.
 
 ## Open list, in order
 
-1. **Floor test of the release / height changes** (firmware `releaseStop`, keep height after a pick-up):
-   full-speed release (smooth stop ~11 cm on), flips at ride height, raise to max + pick up + set down (height
-   kept), then flips at max height, gentle first.
-2. **First balance-on after a power-up** (the left leg used to lag): `legstkL/R` and the `# leg` lines in
-   riderlog say whether a leg arrived; `rider/debug/unknown` shows any stray line after boot (should be none
-   now that ModemManager is masked -- not yet confirmed by a power-up).
+1. **Height kept after a pick-up:** not visible in the 10-22 telemetry (no tilted pick-up logged); ask Marc what
+   he saw.
+2. **First balance-on after a power-up** (the left leg used to lag): two clean power-ups since ModemManager was
+   masked (no stray lines, both legs "ok" on the arrival check). Keep watching `legstkL/R`.
 3. Wheel read failures at power-up (469 / 496, then 0): read `rfL/rfR`, `rft0/rft1` after the next boot that has
    them. Possibly ModemManager too.
 4. Voice: rebuild fresh in `pi/` (facts in HARDWARE.md -> Audio).
