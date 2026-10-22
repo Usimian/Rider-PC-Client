@@ -134,6 +134,17 @@ position at rest — the fault only showed mid-range under motion, so a static r
 - **DS4** PS4 controller over BT on the Pi (`/dev/input/js0`, pygame; ERTM left at default,
   kernel pinned 6.12.47 — memory `project_xgo_rider_controller`).
 
+## Audio (WM8960 codec on the carrier: speaker + microphone)
+- ALSA card `wm8960soundcard` (boot config `dtoverlay=wm8960-soundcard`, PI_HOST_SETUP step 2). Playback
+  device `plughw:CARD=wm8960soundcard,DEV=0` -- the engine sounds (`pi/rider_controller.py` `BEEP_DEV`).
+- **Microphone (from the Feb-Apr 2026 voice service, not re-verified since):** capture only at the codec's
+  hardware rate **44100 Hz, 2 channels**; the mic is on the **left** channel (take every other sample).
+- **Speaker volume (same era):** the useful hardware range was ~80-127 of 127; 120 was the start-up level.
+- **The old voice stack** (Vosk small English model `/home/pi/model/vosk-model-small-en-us-0.15` for
+  listening, `espeak-ng -v en -s 150` for speaking, MQTT `rider/voice/*`) lived in the retired
+  `Rider-Robot-Controller` project; its GUI side was removed here 2026-06-15 (`ca4345c`). A rebuild starts
+  fresh in `pi/`.
+
 ## I²C sensors (Pi — bus 1)
 - Pi I²C **bus 1** = GPIO2 (SDA) / GPIO3 (SCL). The carrier's **WM8960 audio codec** lives here at
   **0x1A** (shows `UU` = kernel-driver-bound) — a handy "bus-alive" reference.
