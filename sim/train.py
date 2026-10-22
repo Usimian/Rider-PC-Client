@@ -16,13 +16,13 @@ from caps_ppo import CAPS_PPO       # PPO + spatial action-smoothness (used when
 
 
 def make_env(domain_rand=False, frame_stack=1, vel_pen=0.0, mirror_aug=True, rate_dr=True,
-             pos_anchor=0.0, pure_balance=True, pos_weight=0.75, rate_pen=0.30, drive_train=False,
+             pos_anchor=0.0, rate_pen=0.30, drive_train=False,
              fw_obs=True, drive_lead=False, pitch_dis=False, spin_prob=0.0, turn_obs=False):
     # spin_prob > 0: the TWO-WHEEL env (rider_env_twowheel) -- real turns/spins through the firmware turn controller
     cls, extra = (RiderTwoWheelEnv, dict(spin_prob=spin_prob)) if spin_prob > 0.0 else (RiderBalanceEnv, {})
     return lambda: cls(add_noise=True, domain_rand=domain_rand, frame_stack=frame_stack,
                        mirror_aug=mirror_aug, vel_pen=vel_pen, rate_dr=rate_dr, rate_pen=rate_pen,
-                       pos_anchor=pos_anchor, pure_balance=pure_balance, pos_weight=pos_weight,
+                       pos_anchor=pos_anchor,
                        drive_train=drive_train, fw_obs=fw_obs, drive_lead=drive_lead, pitch_dis=pitch_dis,
                        turn_obs=turn_obs, **extra)
 
@@ -153,8 +153,6 @@ if __name__ == "__main__":
     ap.add_argument("--no_mirror", action="store_true")   # disable mirror_aug (reproduce ppo_v_pure recipe)
     ap.add_argument("--no_rate_dr", action="store_true")  # disable control-rate DR (ppo_v_pure predates it)
     ap.add_argument("--pos_anchor", type=float, default=0.0)  # small x^2 penalty: break cruise w/o mirror/velpen
-    ap.add_argument("--pos_aware", action="store_true")   # position-aware end-to-end (x_err/x_int in obs + objective)
-    ap.add_argument("--pos_weight", type=float, default=0.75)  # position-error^2 weight (pos_aware mode)
     ap.add_argument("--rate_pen", type=float, default=0.30)    # temporal action-rate^2 weight (chatter suppressor)
     ap.add_argument("--drive_train", action="store_true")      # embed the firmware setpoint-tilt DRIVE loop in
                                                                # training -> policy learns forward-drive authority
@@ -191,8 +189,7 @@ if __name__ == "__main__":
 
     venv = make_vec_env(make_env(args.domain_rand, args.frame_stack, args.vel_pen,
                                  mirror_aug=not args.no_mirror, rate_dr=not args.no_rate_dr,
-                                 pos_anchor=args.pos_anchor, pure_balance=not args.pos_aware,
-                                 pos_weight=args.pos_weight, rate_pen=args.rate_pen,
+                                 pos_anchor=args.pos_anchor, rate_pen=args.rate_pen,
                                  drive_train=args.drive_train, fw_obs=not args.legacy_obs,
                                  drive_lead=args.drive_lead, pitch_dis=args.pitch_dis, spin_prob=args.spin_prob,
                                  turn_obs=args.turn_obs),

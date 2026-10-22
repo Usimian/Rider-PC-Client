@@ -230,9 +230,9 @@ class RiderBalanceEnv(gym.Env):
 
     def __init__(self, params: RiderParams = None, render_mode=None,
                  max_seconds: float = 10.0, target_x: float = 0.0, add_noise: bool = True,
-                 domain_rand: bool = False, frame_stack: int = 1, pure_balance: bool = True,
+                 domain_rand: bool = False, frame_stack: int = 1,
                  mirror_aug: bool = False, vel_pen: float = 0.0, rate_dr: bool = True,
-                 pos_anchor: float = 0.0, pos_weight: float = 0.75, rate_pen: float = 0.30,
+                 pos_anchor: float = 0.0, rate_pen: float = 0.30,
                  drive_train: bool = False, fw_obs: bool = True, drive_lead: bool = False,
                  pitch_dis: bool = False, turn_obs: bool = False):
         super().__init__()
@@ -254,11 +254,6 @@ class RiderBalanceEnv(gym.Env):
         self._dis_off = 0.0; self._dis_amp = 0.0; self._dis_t0 = 0.0; self._dis_hold = 0.0
         self._bias_rad = 0.0
         self.rate_pen = rate_pen   # temporal action-rate^2 weight (chatter suppressor); default 0.30 = deployed
-        # pos_weight: position-error^2 penalty when NOT pure_balance (position-aware end-to-end policy).
-        # The policy SEES x_err/x_int and learns the full position->lean->torque mapping itself, so it
-        # holds its spot WITHOUT a cruise -- the proper way to a smooth non-drifting balancer. Pairs with
-        # the high rate_pen below (the old position-aware attempt used 0.05 -> too twitchy on HW).
-        self.pos_weight = pos_weight
         self.p = params or DEFAULT
         self.frame_stack = frame_stack
         # vel_pen: penalize chassis fwd-velocity^2. pure_balance had NO velocity term, so a
@@ -270,7 +265,7 @@ class RiderBalanceEnv(gym.Env):
         # firmware's commanded drive. mirror_aug handles the directional symmetry separately.
         self.vel_pen = vel_pen
         self.rate_dr = rate_dr   # per-episode control-rate randomization (added 2026-06-16); ppo_v_pure predates it
-        # pos_anchor: SMALL position^2 penalty in pure_balance. Integrated x^2 explodes for a SUSTAINED
+        # pos_anchor: SMALL position^2 penalty (the policy is a pure balancer). Integrated x^2 explodes for a SUSTAINED
         # cruise (the bias source) but is ~free for balance transients (small net displacement) -- so it
         # breaks the creep WITHOUT mirror_aug and WITHOUT the velocity penalty's fight against balancing.
         # The policy still doesn't SEE position (obs stays pure-balance, deployable as-is); it just learns
@@ -283,10 +278,6 @@ class RiderBalanceEnv(gym.Env):
         # policies (ppo_v_pure et al.) drift onto the action rail asymmetrically.
         self.mirror_aug = mirror_aug
         self.mirror = 1.0
-        # pure_balance: position is handled by a CODE loop on the robot (the firmware
-        # feeds the policy x_err=0, x_int=0), so train the policy that way -- no position
-        # objective, position obs zeroed. Removes the train/deploy mismatch + the wobble.
-        self.pure_balance = pure_balance
         self.model = mujoco.MjModel.from_xml_string(build_mjcf(self.p))
         self.data = mujoco.MjData(self.model)
         self.render_mode = render_mode
@@ -327,7 +318,7 @@ class RiderBalanceEnv(gym.Env):
         # The two integral terms are the key to velocity-mode: the body responds to
         # the derivative of the commanded velocity, so static feedback can't stabilize
         # -- integral (PI-like) state can. Both are trivial to accumulate on the ESP32.
-        self._int_clip = (1.0, 2.0)        # clamps (rad*s, m*s) to prevent windup
+        self._int_clip = 1.0               # pitch-integral clamp (rad*s), as the firmware polIpitch
         high1 = np.array([np.pi, 50.0, 5.0, 10.0, 200.0, 1.0, 2.0] + ([2.0] if turn_obs else []), np.float32)
         high = np.tile(high1, self.frame_stack)
         self.observation_space = spaces.Box(-high, high, dtype=np.float32)
@@ -381,8 +372,9 @@ class RiderBalanceEnv(gym.Env):
     def _single_obs(self):
         pitch, pitch_rate, x_vel, wheel_vel = self.last_sensed
         x = self._raw_state()[2]                         # forward travel (2-D: slide_x; two-wheel: wheel odometry)
-        xerr = 0.0 if self.pure_balance else (x - self.target_x)   # firmware zeros these (pos in code)
-        xint = 0.0 if self.pure_balance else self._x_int
+        # position is handled by a CODE loop on the robot (the firmware feeds x_err = x_int = 0): the policy is a
+        # pure balancer, trained the same way -- no position objective, position obs zeroed
+        xerr = xint = 0.0
         # drive_train: the pitch obs is setpoint-RELATIVE (pitch + drive-loop bias), exactly like the
         # firmware feeds pr_pitch = biasDeg - pitch. bias_rad is 0 when not drive_train (pure balance).
         o = np.array([pitch + self._bias_rad, pitch_rate, xerr, x_vel, wheel_vel,
@@ -495,7 +487,6 @@ class RiderBalanceEnv(gym.Env):
         self._steps = 0
         self._prev_a = 0.0
         self._pitch_int = 0.0
-        self._x_int = 0.0
         self._bias_rad = 0.0
         if self.drive_train:
             # 40% HOLD (vdes=0), 60% DRIVE at a random speed up to DRIVE_TRAIN_VMAX (margin over the fw
@@ -538,9 +529,9 @@ class RiderBalanceEnv(gym.Env):
         self._drive_bias()                             # advance the setpoint-tilt loop from the new state
         fell = abs(pitch) > 0.40                       # ~23 deg (real fall, setpoint-independent)
         upright = np.cos(pitch + self._bias_rad)       # reward HOLDING the (possibly tilted) drive setpoint
-        # pure_balance: NO position objective (code does position). Heavy command-
+        # NO position objective (code does position; pos_anchor only breaks a sustained cruise). Heavy command-
         # smoothness to kill the on-robot shimmy (jerky velocity cmd = jerky cart accel).
-        pos_pen = (self.pos_anchor if self.pure_balance else self.pos_weight) * (x - self.target_x) ** 2
+        pos_pen = self.pos_anchor * (x - self.target_x) ** 2
         act_pen = 0.02 * a ** 2                        # bumped 0.01->0.02: discourage riding the action rail
         rate_pen = self.rate_pen * (a - self._prev_a) ** 2   # temporal smoothness pressure (tunable; 0.30 = deployed)
         vel_pen = self.vel_pen * x_vel ** 2            # pin optimum at STATIONARY (kills the trained creep)
@@ -549,10 +540,9 @@ class RiderBalanceEnv(gym.Env):
             reward -= 10.0
         self._prev_a = a
         # accumulate integral state (clamped to prevent windup)
-        ci, cx = self._int_clip
+        ci = self._int_clip
         p_fed = self.last_sensed[0] if self.fw_obs else pitch   # the robot's polIpitch integrates the FUSED pitch
         self._pitch_int = float(np.clip(self._pitch_int + (p_fed + self._bias_rad) * self.ctrl_dt, -ci, ci))
-        self._x_int = float(np.clip(self._x_int + (x - self.target_x) * self.ctrl_dt, -cx, cx))
         terminated = bool(fell)
         truncated = self._steps >= self.max_steps
         self._stack.append(self._single_obs())

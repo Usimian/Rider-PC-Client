@@ -24,14 +24,10 @@
 #include <Wire.h>
 #include <Preferences.h>       // NVS key/value store -- persists the controller choice (gCtrl)
 #include "rider_policy.h"   // auto-generated PPO policy weights (sim/export_policy.py)
-#include "rider_turn_policy.h"  // Stage-1 CAPS-smoothed balance+turn policy (POLT_*, sim/export_policy_turn.py)
-#include "rider_posaware_policy.h"  // POSITION-AWARE policy (POA_*): SEES x_err/x_int, owns position like the LQR
 #ifndef POL_FRAME
 #define POL_FRAME 7                 // inputs per frame: 7, or 8 with the turn input (headers from 2026-10-20 define it)
 #endif
 static_assert(POL_OBS == 2 * POL_FRAME && (POL_FRAME == 7 || POL_FRAME == 8), "policy frame: 2 frames of 7 or 8");
-static_assert(POA_OBS == 14, "position-aware policy: 2 frames of 7");
-                                    // ('posaware 1' to A/B vs the default pure-balancer + code position hold)
 #include <Adafruit_NeoPixel.h>
 // status LEDs: 4x WS2812B daisy-chained on ESP32 IO27 (5V) -- see Rider-Pi_SCH.pdf / xgo-cm4-pinout.md
 #define LED_PIN 27
@@ -130,12 +126,6 @@ volatile int gCtrl = CTRL_POL;
 static Preferences gPrefs;
 static const char* ctrlName(){ return gCtrl == CTRL_LQR ? "LQR" : "POL"; }
 volatile float gPolSign  = 1.0f;    // action->wheel-command sign (verify on robot)
-volatile bool  gPolJoint   = false; // use Stage-1 balance+turn policy ('polj'); 0 = legacy 1-output balancer
-volatile bool  gPosAware   = false; // 'posaware 1' -> POSITION-AWARE policy (POA_*): real x_err/x_int in obs, NO
-                                    // code setpoint-bias (the policy owns position, like the LQR). 0 = default
-                                    // pure-balancer + code position hold. A/B these on the robot, no reflash.
-volatile float gYawObsSign = 1.0f;  // sim yaw-rate OBS sign ('yawobssign'); verify on stand
-volatile float gPolTurnSign= 1.0f;  // turn-output sign ('poljsign'); verify on stand
 volatile float gPolULP   = 0.0f;    // low-pass on the POLICY output cmd (0=off; adds command lag, can destabilize)
 volatile float gPolFF    = 0.0f;    // stiction feed-forward on the POLICY output (raw counts added past +/-gFFband;
                                     // 0=off). Same mechanism as the LQR build's gFF / the factory boost: keeps the
@@ -249,7 +239,6 @@ volatile float gRollGyroSign=-1.0f;      // roll gyro-fusion sign ('rollgsign');
 volatile float tVbat=0;                  // smoothed pack voltage (V), read from GPIO33 divider
 volatile float tYaw=0;                    // integrated heading (deg), gyro-Z only -> drifts slowly
 volatile float tTgtEff=0, tVdes=0;        // slewed pos target + profile velocity (driving diagnostics)
-volatile float tJp=0,tJyr=0,tJaL=0,tJaR=0;  // Stage-1 turn-policy diagnostics (pitch_o, yaw_rate_o, balance, turn)
 volatile float tPoseX=0, tPoseY=0;        // world-frame dead-reckoned pose (m): fwd distance projected through heading (tYaw)
 volatile bool  gOdoReset=true;            // 'odoreset' + each gyro-cal -> loop zeros pose & resyncs prev wheel_x (init true: clean first-loop sync)
 volatile bool  gPosZeroReq=false;         // 'poszero' (controller button) -> loop re-zeros the distance frame WITHOUT dropping balance
@@ -601,9 +590,7 @@ static void legService(uint8_t id, int* tgt, bool* ener, int* wrote, int* setl, 
   if(*tgt == LEG_NONE) return;                                    // leg inactive -> nothing on the bus
   if(!*ener){                                                     // ENERGIZE: one write per visit, then verify
     switch(en->stage){
-      case LEG_EN_GOAL:   en->sent = *tgt; legSetReg2(id,0x1E,en->sent); en->stage = LEG_EN_SPEED;   // goal = TARGET
-                          { char b[48]; int k = snprintf(b, sizeof(b), "# leg %d energize tgt=%d\n", id, *tgt); emit(b, k); }  // DIAG
-                          break;
+      case LEG_EN_GOAL:   en->sent = *tgt; legSetReg2(id,0x1E,en->sent); en->stage = LEG_EN_SPEED;  break;  // goal = TARGET
       case LEG_EN_SPEED:  legSetReg2(id,0x20,LEG_SPEED);                 en->stage = LEG_EN_TORQUE; break;
       case LEG_EN_TORQUE: wheelSetReg(id,0x18,1);                        en->stage = LEG_EN_VERIFY; break;  // -> servo slews
       case LEG_EN_VERIFY: {
@@ -729,20 +716,10 @@ static void odomUpdate(uint8_t id, int pos, int vel){
 // Copying to .bss SRAM (written by memcpy, so the compiler can't fold it back to flash)
 // makes the matmul read single-cycle SRAM. policyToRam() is called once in setup().
 static float rW0[64][POL_OBS], rW1[64][64], rW2[1][64], rB0[64], rB1[64], rMEAN[POL_OBS], rVAR[POL_OBS];
-// Stage-1 balance+turn policy weights (POLT_*): 18-dim obs, 2 outputs [balance, turn]
-static float tW0[64][POLT_OBS], tW1[64][64], tW2[POLT_OUT][64], tB0[64], tB1[64], tB2[POLT_OUT], tMEAN[POLT_OBS], tVAR[POLT_OBS];
-// Position-aware policy weights (POA_*): same 14-dim/1-out shape as the balancer, separate RAM set
-static float aW0[64][POA_OBS], aW1[64][64], aW2[1][64], aB0[64], aB1[64], aMEAN[POA_OBS], aVAR[POA_OBS];
 static void policyToRam(){
   memcpy(rW0,POL_W0,sizeof rW0); memcpy(rW1,POL_W1,sizeof rW1); memcpy(rW2,POL_W2,sizeof rW2);
   memcpy(rB0,POL_B0,sizeof rB0); memcpy(rB1,POL_B1,sizeof rB1);
   memcpy(rMEAN,POL_MEAN,sizeof rMEAN); memcpy(rVAR,POL_VAR,sizeof rVAR);
-  memcpy(aW0,POA_W0,sizeof aW0); memcpy(aW1,POA_W1,sizeof aW1); memcpy(aW2,POA_W2,sizeof aW2);
-  memcpy(aB0,POA_B0,sizeof aB0); memcpy(aB1,POA_B1,sizeof aB1);
-  memcpy(aMEAN,POA_MEAN,sizeof aMEAN); memcpy(aVAR,POA_VAR,sizeof aVAR);
-  memcpy(tW0,POLT_W0,sizeof tW0); memcpy(tW1,POLT_W1,sizeof tW1); memcpy(tW2,POLT_W2,sizeof tW2);
-  memcpy(tB0,POLT_B0,sizeof tB0); memcpy(tB1,POLT_B1,sizeof tB1); memcpy(tB2,POLT_B2,sizeof tB2);
-  memcpy(tMEAN,POLT_MEAN,sizeof tMEAN); memcpy(tVAR,POLT_VAR,sizeof tVAR);
 }
 // fast tanh: Pade[7/8] rational (~1e-7 vs libm tanhf; validated to 5e-5 on the policy action).
 // libm tanhf measured ~20us/call x 128 = ~2.5ms/cycle on this ESP32 -- the control loop's #1 cost.
@@ -763,31 +740,6 @@ static float policyInfer(const float* obs){
   for(int j=0;j<64;j++){ float s=rB1[j]; for(int i=0;i<64;i++)     s+=rW1[j][i]*h0[i]; h1[j]=ftanh(s); }
   float a=POL_B2[0]; for(int i=0;i<64;i++) a+=rW2[0][i]*h1[i];
   return a>1.0f?1.0f:(a<-1.0f?-1.0f:a);
-}
-// Position-aware policy: same 14-dim obs/1-out as policyInfer, but with REAL x_err/x_int in the
-// obs (slots 2 and 6, both frames) -> owns position. Separate RAM set (a*) + POA_B2 output bias.
-static float policyInferA(const float* obs){
-  float z[POA_OBS], h0[64], h1[64];
-  for(int i=0;i<POA_OBS;i++){
-    float v=(obs[i]-aMEAN[i])/sqrtf(aVAR[i]+POA_EPS);
-    z[i]= v>POA_CLIP?POA_CLIP:(v<-POA_CLIP?-POA_CLIP:v);
-  }
-  for(int j=0;j<64;j++){ float s=aB0[j]; for(int i=0;i<POA_OBS;i++) s+=aW0[j][i]*z[i];  h0[j]=ftanh(s); }
-  for(int j=0;j<64;j++){ float s=aB1[j]; for(int i=0;i<64;i++)     s+=aW1[j][i]*h0[i]; h1[j]=ftanh(s); }
-  float a=POA_B2[0]; for(int i=0;i<64;i++) a+=aW2[0][i]*h1[i];
-  return a>1.0f?1.0f:(a<-1.0f?-1.0f:a);
-}
-// Stage-1 balance+turn policy: 18-dim obs -> 2 outputs [balance, turn] in [-1,1].
-static void policyInferT(const float* obs, float* out){
-  float z[POLT_OBS], h0[64], h1[64];
-  for(int i=0;i<POLT_OBS;i++){
-    float v=(obs[i]-tMEAN[i])/sqrtf(tVAR[i]+POLT_EPS);
-    z[i]= v>POLT_CLIP?POLT_CLIP:(v<-POLT_CLIP?-POLT_CLIP:v);
-  }
-  for(int j=0;j<64;j++){ float s=tB0[j]; for(int i=0;i<POLT_OBS;i++) s+=tW0[j][i]*z[i];  h0[j]=ftanh(s); }
-  for(int j=0;j<64;j++){ float s=tB1[j]; for(int i=0;i<64;i++)      s+=tW1[j][i]*h0[i]; h1[j]=ftanh(s); }
-  for(int o=0;o<POLT_OUT;o++){ float a=tB2[o]; for(int i=0;i<64;i++) a+=tW2[o][i]*h1[i];
-                               out[o]= a>1.0f?1.0f:(a<-1.0f?-1.0f:a); }
 }
 
 // Stick RELEASE (both controllers, 2026-10-21): keep the current drive speed and set the home where the
@@ -978,10 +930,8 @@ static void balanceTask(void*){
     static bool  polInit=false;          // neural-policy episode state (reset on disable)
     static bool  lqrInit=false;          // LQR drive-state init on enable; declared here (not in the LQR block) so the runaway cutout's posRef can read it
     static float polIpitch=0,polPrevX=0,polPrevFrame[8]={0},posErrInt=0,xvelF=0,xvelP=0,uF=0,gPosTargetEff=0,vdesS=0;
-    static float posXInt=0;             // position-aware policy x_err integral (sim _x_int; clamp +/-2.0 m*s)
     static bool  wasVelDrive=false;     // edge-detect velocity-drive -> release, to latch the home cleanly
     static bool  wasTurning=false;      // edge-detect turn start -> re-anchor fore/aft home to the spin center
-    static float polPrevFrameT[9]={0};  // Stage-1 turn-policy frame stack (previous frame; shares polInit)
     // position-runaway cutout: in policy mode measure from the SLEWED target gPosTargetEff
     // (what the wheels actually track) -- a joystick that jumps gPosTarget far ahead slews
     // in gradually at posvmax, so driving never trips the guard; only a genuine track loss
@@ -1007,7 +957,6 @@ static void balanceTask(void*){
       if(gDriveVel != 0.0f && ms - gDriveMs > DRIVE_CMD_TIMEOUT_MS){ gDriveVel = 0.0f; gDriveWdTrips++; }
       if(gYawRateCmd != 0.0f && ms - gTurnMs > DRIVE_CMD_TIMEOUT_MS){ gYawRateCmd = 0.0f; gDriveWdTrips++; } }
     float u = 0.0f;
-    float turnPol = 0.0f;          // Stage-1 turn-policy turn output (raw wheel cmd); used by the output stage
     if(gCtrl == CTRL_POL){
     // ===== POLICY controller =====
     if(gEnabled && !fallen){
@@ -1018,7 +967,7 @@ static void balanceTask(void*){
       // (x_err, x_int) are zeroed so it doesn't fight. Velocity obs kept for damping.
       float xvel=0.0f, wvel=0.0f, vdes=0.0f;
       if(!polInit){ polIpitch=0; polPrevX=wheel_x; gPosTarget=wheel_x; gPosTargetEff=wheel_x;
-                    posErrInt=0; posXInt=0; xvelF=0; xvelP=0; uF=0; vdesS=0; }
+                    posErrInt=0; xvelF=0; xvelP=0; uF=0; vdesS=0; }
       else {
         float sdt = (dt>1e-4f?dt:0.004f);
         xvel = (wheel_x - polPrevX) / sdt;                   // m/s from position (exact units)
@@ -1097,51 +1046,28 @@ static void balanceTask(void*){
       // Inside the dead-band P is dropped (pErr=0) so it stops hunting; velocity-D stays (anti-drift).
       float kd = moving ? gDriveKd : gPosHoldKd;
       float pErr = inBand ? 0.0f : posErr;
-      // position-aware: NO setpoint bias -- the policy holds position itself via its x_err/x_int obs.
-      // (gPosTargetEff drive management above still runs so 'dv'/'ptgt' move the target the policy chases.)
-      float biasDeg = gPosAware ? 0.0f : clampf(gPosHoldK*pErr + gPosHoldKi*posErrInt + kd*(xvelF - vdes),
-                                                -gPosHoldMax, gPosHoldMax);
+      float biasDeg = clampf(gPosHoldK*pErr + gPosHoldKi*posErrInt + kd*(xvelF - vdes), -gPosHoldMax, gPosHoldMax);
       float pr_pitch = (biasDeg - pitch) * POL_DEG2RAD;   // = -(theta-(setpoint+bias)) in rad
       float pr_rate  = -dqf * POL_DEG2RAD;                // pitch rate (rad/s), sim frame
       if(polInit) polIpitch = clampf(polIpitch + pr_pitch*dt, -1.0f, 1.0f);
       tPolPP = pr_pitch; tPolPR = pr_rate; tPolXV = xvelP; tPolPI = polIpitch; tPolBias = biasDeg;   // drivecap
-      // x_int for the position-aware obs: integral of x_err (= posErr), clamped to sim's +/-2.0 m*s,
-      // accumulated EVERY step (matches sim's unconditional integrator -- NOT posErrInt's gated one).
-      if(polInit && gPosAware) posXInt = clampf(posXInt + posErr*dt, -2.0f, 2.0f);
       // feed the FILTERED velocity to the policy: the raw differentiated-encoder vel is
       // quantization-noisy (1024 cnt/rev), but the policy trained on a clean signal, so
       // smoothing it to ~clean kills the velocity-driven shimmy without retraining.
       (void)wvel;
       uint32_t ti0=micros();                         // INSTRUMENT: time policy inference
       float uraw;
-      if(gPolJoint){
-        // ===== Stage-1 balance+turn policy (POLT): legacy balance obs + yaw_rate + cmd_yaw =====
-        // u=balance feeds the same path as the legacy balancer; turn feeds tn in the output (L=u+tn).
-        float yrate_o = gYawObsSign * yaw_rate * POL_DEG2RAD;          // sim yaw-rate (rad/s); sign 'yawobssign'
-        float frameT[9]={pr_pitch,pr_rate,0.0f,xvelP,xvelP/POL_WHEEL_R,polIpitch,0.0f, yrate_o, gYawRateCmd};
-        if(!polInit){ for(int k=0;k<9;k++) polPrevFrameT[k]=frameT[k]; polInit=true; }
-        float obsT[POLT_OBS];                          // frame_stack=2: [prev, curr]
-        for(int k=0;k<9;k++){ obsT[k]=polPrevFrameT[k]; obsT[9+k]=frameT[k]; }
-        for(int k=0;k<9;k++) polPrevFrameT[k]=frameT[k];
-        float outT[POLT_OUT]; policyInferT(obsT, outT);               // [balance, turn]
-        uraw    = gPolSign     * outT[0] * POL_VELMAX_RADS * POL_RAW_PER_RADS;
-        turnPol = gPolTurnSign * outT[1] * POL_VELMAX_RADS * POL_RAW_PER_RADS;
-        tJp=pr_pitch; tJyr=yrate_o; tJaL=outT[0]; tJaR=outT[1];        // diagnostics (balance=jaL, turn=jaR)
-      } else {
-        // pure-balancer feeds x_err=0,x_int=0 (position handled in code above); position-aware feeds
-        // the REAL posErr/posXInt (slots 2,6) so the policy owns position itself, like the LQR.
-        float xe = gPosAware ? posErr  : 0.0f;
-        float xi = gPosAware ? posXInt : 0.0f;
+      {
+        // the pure balancer feeds x_err=0, x_int=0 (slots 2, 6): position is handled in code above.
         // 8th input (POL_FRAME 8, sim --turn_obs, 2026-10-20): |turnrate command| -- lets the balancer tell a spin
-        // from holding still. The position-aware policy keeps the 7-input frame.
-        float frame[8]={pr_pitch,pr_rate,xe,xvelP,xvelP/POL_WHEEL_R,polIpitch,xi, fminf(2.0f, fabsf(gYawRateCmd))};
-        int nf = gPosAware ? 7 : POL_FRAME;
+        // from holding still.
+        float frame[8]={pr_pitch,pr_rate,0.0f,xvelP,xvelP/POL_WHEEL_R,polIpitch,0.0f, fminf(2.0f, fabsf(gYawRateCmd))};
+        const int nf = POL_FRAME;
         if(!polInit){ for(int k=0;k<8;k++) polPrevFrame[k]=frame[k]; polInit=true; }
         float obs[2*8];                                // frame_stack=2: [prev_frame, curr_frame]
         for(int k=0;k<nf;k++){ obs[k]=polPrevFrame[k]; obs[nf+k]=frame[k]; }
         for(int k=0;k<8;k++) polPrevFrame[k]=frame[k];
-        float ainf = gPosAware ? policyInferA(obs) : policyInfer(obs);
-        uraw = gPolSign * ainf * POL_VELMAX_RADS * POL_RAW_PER_RADS; // raw wheel velocity cmd
+        uraw = gPolSign * policyInfer(obs) * POL_VELMAX_RADS * POL_RAW_PER_RADS; // raw wheel velocity cmd
       }
       { float ims=(micros()-ti0)*1e-3f; if(ims>inferMaxAcc) inferMaxAcc=ims; }   // INSTRUMENT
       uF = gPolULP*uF + (1.0f-gPolULP)*uraw;   // low-pass the policy command -> kills the cycle-to-cycle shimmy
@@ -1296,11 +1222,7 @@ static void balanceTask(void*){
         uout += inj;
       }
       if(driving && gDither>0){ uout += (float)(gDither*ditherSign); ditherSign = -ditherSign; }  // dither in balance OR stand-test
-      // turn differential: from the Stage-1 policy (turnPol) when active, else the hand-tuned gTurn.
-      // turnPol is assigned ONLY by the policy controller; under LQR it stays 0, so gate on gCtrl
-      // here -- otherwise 'polj 1' under LQR forces tn=clampf(0)=0 and silently kills ALL turning.
-      float tn = (gCtrl == CTRL_POL && gPolJoint) ? clampf(turnPol, -(float)gUMax, (float)gUMax)
-                                                  : clampf(gTurn, -gTurnMax, gTurnMax);
+      float tn = clampf(gTurn, -gTurnMax, gTurnMax);              // turn differential (the turn controller's output)
       if(gPosMode){
         // factory-style: rate-limit + ACCUMULATE the wheel-driving (torque) field.
         // While the lean persists, the command ramps up (+/-gPosClamp/cycle) to a
@@ -1379,8 +1301,6 @@ static void balanceTask(void*){
         gLegHomeR = (gLegEnerR&&gLegTgtR!=LEG_NONE)?gLegTgtR:(legReadPos(RIGHT_LEG,&hp)?hp:LEG_R_MID);
         gLegHomeL = (gLegEnerL&&gLegTgtL!=LEG_NONE)?gLegTgtL:(legReadPos(LEFT_LEG,&hp)?hp:LEG_L_MID);
         gLegDestR = LEG_R_MID; gLegDestL = LEG_L_MID; gLegHoming = true;
-        { char b[80]; int k = snprintf(b, sizeof(b), "# leg home from R=%d L=%d (%s)\n", (int)gLegHomeR, (int)gLegHomeL,
-                                       driving ? "balance-on" : "leghome"); emit(b, k); }   // DIAG 2026-10-21
       }
       // balance OFF -> roll-level off, then equalize (remove differential, keep height) + hold;
       // leveling OFF while still balancing -> same equalize (legs return to neutral, body un-tilts).
@@ -1571,8 +1491,8 @@ static void emit(const char* b, int k){ Serial.write((const uint8_t*)b,k); Seria
 static void ackState(){
   char b[210];
   int k = snprintf(b, sizeof(b),
-    "# en=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f izero=%.1f set=%.2f Umax=%d ff=%.0f ffb=%.0f posmode=%d torlim=%d fault=%d gbias=%.2f posaware=%d\n",
-    gEnabled,gLqrX,gLqrVx,gLqrQ,gLqrDq,gImuZero,gSetpoint,gUMax,gFF,gFFband,gPosMode,gTorLim,gWheelFault,gGyroBias,gPosAware);
+    "# en=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f izero=%.1f set=%.2f Umax=%d ff=%.0f ffb=%.0f posmode=%d torlim=%d fault=%d gbias=%.2f\n",
+    gEnabled,gLqrX,gLqrVx,gLqrQ,gLqrDq,gImuZero,gSetpoint,gUMax,gFF,gFFband,gPosMode,gTorLim,gWheelFault,gGyroBias);
   emit(b,k);
 }
 static void applyCmd(char* s){
@@ -1693,10 +1613,6 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"legrate"))  { gLegRate = clampf(v,-200.0f,200.0f); gLegRateMs = millis(); }  // height rate (counts/s, + up); heartbeat
   else if (!strcmp(s,"leghome"))  gLegHomeReq = true;    // legs -> ride height (MID), slow slew; ignored while limp
   else if (!strcmp(s,"leglimp"))  gLegLimpReq = true;    // STOP button: torque-OFF both legs, stay limp until next balance-on
-  else if (!strcmp(s,"polj"))     gPolJoint=(v!=0.0f); // use Stage-1 balance+turn policy on/off (gated)
-  else if (!strcmp(s,"posaware")) gPosAware=(v!=0.0f); // position-aware policy on/off (set while DISABLED; takes effect on enable)
-  else if (!strcmp(s,"yawobssign")) gYawObsSign=(v<0?-1.0f:1.0f);  // sim yaw-rate obs sign
-  else if (!strcmp(s,"poljsign"))  gPolTurnSign=(v<0?-1.0f:1.0f);  // turn-output sign
   else if (!strcmp(s,"ff"))    gFF=v;                  // friction feed-forward magnitude
   else if (!strcmp(s,"ffband")) gFFband=v;             // friction FF deadband
   else if (!strcmp(s,"cfa"))   gCfAlpha=clampf(v,0.9f,0.9999f); // compl-filter gyro weight
@@ -1710,11 +1626,7 @@ static void applyCmd(char* s){
 static void pump(Stream& in, char* buf, int& n){
   while(in.available()){
     char c=in.read();
-    if(c=='\n'||c=='\r'){ if(n>0){ buf[n]=0;
-        static int rxDiag = 0;                                   // DIAG 2026-10-21: the first command lines after
-        if(rxDiag < 12){ rxDiag++; char b[64]; int k = snprintf(b, sizeof(b), "# rx %lu '%s'\n",   // boot, as received
-                                                             (unsigned long)millis(), buf); emit(b, k); }
-        applyCmd(buf); n=0; } }
+    if(c=='\n'||c=='\r'){ if(n>0){ buf[n]=0; applyCmd(buf); n=0; } }
     else if(c < 0x20 || c > 0x7E) n = 0;   // line noise (a power-up fills the Pi link with 0xFF-like bytes, seen
                                            // 2026-10-21): drop the partial line so it can't swallow the next command
     else if(n<39) buf[n++]=c;
@@ -1769,12 +1681,6 @@ void loop(){
       tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gLevelOn, tRollAcc, gTurn, gHdgTarget, gYawRateCmd,
       (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID), (unsigned)gDriveWdTrips, (unsigned)tLegRetryL, (unsigned)tLegRetryR, (unsigned)tLegFailL, (unsigned)tLegFailR, (unsigned)tLegStuckL, (unsigned)tLegStuckR, (unsigned)((gLegLimped?1:0)|(gLegHoming?2:0)|(gLegEnerR?4:0)|(gLegEnerL?8:0)), (unsigned)tRfL, (unsigned)tRfR, (unsigned)tRfFirstMs, (unsigned)tRfLastMs, (unsigned)millis());
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
-    if(gPolJoint && k>0){                        // Stage-1 turn-policy diagnostics (obs + outputs)
-      k--;                                       // drop trailing '\n'
-      k += snprintf(b+k, sizeof(b)-k, " jp=%.3f jyr=%.3f bal=%.3f turn=%.3f\n",
-                    tJp, tJyr, tJaL, tJaR);
-      if(k > (int)sizeof(b)-1) k = sizeof(b)-1;
-    }
     emit(b,k);
   }
   // drive-capture dump: buffer filled by the control task -> emit here (loop() task), so the

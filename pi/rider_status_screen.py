@@ -523,8 +523,8 @@ while True:
         mqtt_forward("rider/debug/cfg", line)      # servo config-register dump ('cfgdump <id>')
     elif line.startswith("# leg"):
         mqtt_forward("rider/debug/leg", line)      # leg arrival check after a slow leg move (ok / STUCK + registers)
-    elif line.startswith("# ?") or line.startswith("# rx"):
-        mqtt_forward("rider/debug/unknown", line)  # a command line the firmware did not recognise / DIAG: first lines received
+    elif line.startswith("# ?"):
+        mqtt_forward("rider/debug/unknown", line)  # a command line the firmware did not recognise
     # relay any queued commands to the ESP32
     while not cmd_q.empty():
         try:

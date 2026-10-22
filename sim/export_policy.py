@@ -19,11 +19,10 @@ from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
 from rider_env import RiderBalanceEnv
 
 if len(sys.argv) < 2:
-    sys.exit("usage: export_policy.py <policy name, e.g. ppo_lb25_s4> [frame_stack] [prefix] [--posaware]")
+    sys.exit("usage: export_policy.py <policy name, e.g. ppo_lb25_s4> [frame_stack]")
 name = sys.argv[1]
 FS = int(sys.argv[2]) if len(sys.argv) > 2 else 2
-PFX = sys.argv[3] if len(sys.argv) > 3 else "POL"   # C macro/array prefix (POA for pos-aware -> no POL_ collision)
-POS_AWARE = "--posaware" in sys.argv                  # validate in the position-aware env (policy SEES x_err/x_int)
+PFX = "POL"                                         # C macro/array prefix the firmware reads (rider_policy.h)
 
 model = PPO.load(name, device="cpu")
 # 8 obs per frame = the turn input (train.py --turn_obs, 2026-10-20): validate in the two-wheel env, turning
@@ -32,7 +31,7 @@ if TURN:
     from rider_env_twowheel import RiderTwoWheelEnv
     mk = lambda: RiderTwoWheelEnv(frame_stack=FS, add_noise=False, turn_obs=True)
 else:
-    mk = lambda: RiderBalanceEnv(frame_stack=FS, add_noise=False, pure_balance=not POS_AWARE)
+    mk = lambda: RiderBalanceEnv(frame_stack=FS, add_noise=False)
 vn = VecNormalize.load(name + "_vecnorm.pkl", DummyVecEnv([mk]))
 
 # --- extract weights: hidden Linears (policy_net) + output (action_net) ---
@@ -104,8 +103,7 @@ def carr(a):
 
 
 with open(name + "_policy.h", "w") as f:
-    kind = "POSITION-AWARE (sees x_err/x_int)" if POS_AWARE else "deterministic"
-    f.write(f"// auto-generated from {name} -- {kind} PPO policy for ESP32 ({PFX}_*)\n")
+    f.write(f"// auto-generated from {name} -- deterministic PPO policy for ESP32 ({PFX}_*)\n")
     f.write(f"// obs (len {obs_dim}) = {FS} frames of {FRAME}\n")
     f.write(f"#define {PFX}_OBS {obs_dim}\n#define {PFX}_FS {FS}\n#define {PFX}_FRAME {obs_dim // FS}\n")
     f.write(f"#define {PFX}_CLIP {clip:.1f}f\n#define {PFX}_EPS {eps:.8g}f\n")
