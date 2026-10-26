@@ -40,7 +40,7 @@ list, and what not to trust.
 5. **ToF obstacle/edge stop: PARKED, switched OFF (Marc's call to me, 10-26).** Two table runs: with it off,
    the edge was called only ~23 cm / 0.78 s out at 0.30 m/s (too late to stop); with it ON at ~0.22 m/s the edge
    rule NEVER fired before the drop -- the obstacle rule cut speed ~9 cm out, too late -- and near the edge it
-   flickered edge/clear many times. On open floor (report-only) it would have limited ~30 % of the time. The
+   flickered edge/clear many times. Open-floor false triggers: not measured (both runs were on the table). The
    rule does not match what the sensor reports at a real edge. To revive: record RAW rider/tof frames + telem
    near an edge without driving off anything, rework the rule offline against them, then a hard stop for edges
    and a lower top speed while on; test on a low step, never a table. Recorder `tools/tof/tof_safety_capture.py`
