@@ -15,7 +15,8 @@ list, and what not to trust.
   (`releaseStop`: keep speed, brake on the ramp) and in `drive_sim` (`release_s`). **Floor 10-22, lb25_s4:**
   full flips swing 2.6-3.4 deg at ride height (was ~13), 3.8-7.0 at full height (fell before), 5.0 at the
   lowest; releases 1.5-6.8 deg, no roll-back; LQR at full height flip 5.0. No falls. Capture
-  `data/captures/2026-10-22_release_floor.csv`.
+  `data/captures/2026-10-22_release_floor.csv`. **Height kept after a pick-up** (10-26): raised to full height,
+  tipped past 25° back and forward -- balancing cut out and came back, the leg target stayed 535 both times.
 - **First command after a real power-up was lost**: ModemManager probed the ESP32 UART ~3 s after the bridge
   started. Masked (deploy does it); the firmware drops a partial line on line noise.
 - **Pi power: a bad contact in the 5 V lead**, reseated 10-21 (full-load min 4.60 -> 4.72 V, no alarms); it
@@ -26,22 +27,20 @@ list, and what not to trust.
 
 ## Open list, in order
 
-1. **Height kept after a pick-up:** not visible in the 10-22 telemetry (no tilted pick-up logged); ask Marc what
-   he saw.
-2. **First balance-on after a power-up** (the left leg used to lag): two clean power-ups since ModemManager was
+1. **First balance-on after a power-up** (the left leg used to lag): two clean power-ups since ModemManager was
    masked (no stray lines, both legs "ok" on the arrival check). Keep watching `legstkL/R`.
-3. Wheel read failures at power-up (469 / 496, then 0): read `rfL/rfR`, `rft0/rft1` after the next boot that has
+2. Wheel read failures at power-up (469 / 496, then 0): read `rfL/rfR`, `rft0/rft1` after the next boot that has
    them. Possibly ModemManager too.
-4. Voice (parked 10-26): rebuild fresh in `pi/` (facts in HARDWARE.md -> Audio). Options weighed: A spoken commands
+3. Voice (parked 10-26): rebuild fresh in `pi/` (facts in HARDWARE.md -> Audio). Options weighed: A spoken commands
    on the Pi (offline), B conversation via an LLM, C both. The Pi can't run a useful LLM; **Groq is the chosen
    cloud option** (Marc, 10-26): free tier, Whisper speech-to-text + open LLMs, sub-second, already the
    news-reader fallback, and it works in the field over the phone hotspot. It sends voice/text off-site --
    Marc's explicit OK under the local-only rule. The workstation's local model is the at-home alternative.
-5. Watch the Pi under-voltage count after floor driving.
-6. ToF obstacle/edge stop: check its zone classes while driving before leaving it on.
-7. `/home/pi/riderlog.txt` is never rotated (321 MB on 10-21). Filter on the Pi; never copy it whole over WiFi.
-8. The controller low-battery cutoff (<= 15 %, unplugged) is untested.
-9. `.claude/settings.json` in the working tree has its read-only `ssh rider` allow list emptied (not mine, not
+4. Watch the Pi under-voltage count after floor driving.
+5. ToF obstacle/edge stop: check its zone classes while driving before leaving it on.
+6. `/home/pi/riderlog.txt` is never rotated (321 MB on 10-21). Filter on the Pi; never copy it whole over WiFi.
+7. The controller low-battery cutoff (<= 15 %, unplugged) is untested.
+8. `.claude/settings.json` in the working tree has its read-only `ssh rider` allow list emptied (not mine, not
    committed) -- ask Marc.
 
 ## Do not trust
