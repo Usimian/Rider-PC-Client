@@ -40,8 +40,6 @@ list, and what not to trust.
 5. ToF obstacle/edge stop: check its zone classes while driving before leaving it on.
 6. `/home/pi/riderlog.txt` is never rotated (321 MB on 10-21). Filter on the Pi; never copy it whole over WiFi.
 7. The controller low-battery cutoff (<= 15 %, unplugged) is untested.
-8. `.claude/settings.json` in the working tree has its read-only `ssh rider` allow list emptied (not mine, not
-   committed) -- ask Marc.
 
 ## Do not trust
 
