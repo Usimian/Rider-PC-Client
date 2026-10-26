@@ -46,7 +46,6 @@ list, and what not to trust.
   19 cm, 0/90 falls); on the floor (10-22 15:24) it drove with a ~2 Hz pitch oscillation (+-7 deg, std 3-5 deg vs
   1.2) and the releases did not get shorter (18.5 / 23.2 cm). Put back to 20 / 10 / 10 live; the sim is missing
   whatever sets that 2 Hz mode.
-
 - Commit `dabc54f`'s line "after masking, a power-up took 'leghome' as its first command": that test was at
   14:24, BEFORE ModemManager was masked. No power-up has been checked since masking.
 - Sim spin numbers as a floor prediction (ld8_s6 6 vs floor 18; tt25_s4 3.6 vs 21). Use the floor-replay lead.
