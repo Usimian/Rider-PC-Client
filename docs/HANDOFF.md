@@ -32,7 +32,11 @@ list, and what not to trust.
    masked (no stray lines, both legs "ok" on the arrival check). Keep watching `legstkL/R`.
 3. Wheel read failures at power-up (469 / 496, then 0): read `rfL/rfR`, `rft0/rft1` after the next boot that has
    them. Possibly ModemManager too.
-4. Voice: rebuild fresh in `pi/` (facts in HARDWARE.md -> Audio).
+4. Voice (parked 10-26): rebuild fresh in `pi/` (facts in HARDWARE.md -> Audio). Options weighed: A spoken commands
+   on the Pi (offline), B conversation via an LLM, C both. The Pi can't run a useful LLM; **Groq is the chosen
+   cloud option** (Marc, 10-26): free tier, Whisper speech-to-text + open LLMs, sub-second, already the
+   news-reader fallback, and it works in the field over the phone hotspot. It sends voice/text off-site --
+   Marc's explicit OK under the local-only rule. The workstation's local model is the at-home alternative.
 5. Watch the Pi under-voltage count after floor driving.
 6. ToF obstacle/edge stop: check its zone classes while driving before leaving it on.
 7. `/home/pi/riderlog.txt` is never rotated (321 MB on 10-21). Filter on the Pi; never copy it whole over WiFi.
