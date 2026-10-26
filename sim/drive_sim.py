@@ -23,7 +23,7 @@ import argparse
 import numpy as np
 from collections import deque
 from dataclasses import replace
-from rider_env import RiderBalanceEnv, SpinActuator
+from rider_env import RiderBalanceEnv, SpinActuator, drive_ramp
 from rider_env_twowheel import RiderTwoWheelEnv
 from rider_params import DEFAULT
 
@@ -32,6 +32,7 @@ K, KI, KD = 20.0, 1.0, 10.0         # gPosHoldK (poshold) / gPosHoldKi (poshi) /
 POSMAX_DEG = 8.0                    # gPosHoldMax: setpoint-bias clamp (deg). 5 -> 8 with the LQR-like drive (2026-10-19):
                                     # at 5 it pinned in low-legs reverse (3 deg offset + reverse lean) -> 0.25 m/s
 AMAX = 0.4                          # gPosAmax: accel cap (m/s^2) -- 0.8 -> 0.4 fw default 2026-10-19
+DMAX = 0.8                          # gPosDmax: BRAKING cap (m/s^2), separate from AMAX since 2026-10-26
 VEL_LP = DEFAULT.fw_drive_vel_lp    # gPosVelLP: LP on velocity feeding the D term
 INTBAND = 0.15                      # gPosIntBand: integrate only within this of the FINAL target
 DEADBAND = 0.012                    # gPosDeadband: no P term / no integration this close to the hold target
@@ -169,13 +170,12 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
         xvel = env.sense.xvel_raw if fw_obs else (x - prevX) / dt
         prevX = x
         xvelF = VEL_LP * xvelF + (1 - VEL_LP) * xvel
-        damax = AMAX * dt
         kiLim = POSMAX_DEG / KI if KI > 0.01 else 1e6
         released = ((reverse_at is not None and reverse_at <= t < reverse_at + release_s)
                     or (release_at is not None and t >= release_at))
         driving = stick and vmax > 0.0 and t >= hold_s and not released
         if was_driving and not driving:                     # firmware release edge (releaseStop): keep the speed,
-            hold_tgt = tgt_eff + np.sign(vdes_s) * vdes_s ** 2 / (2 * AMAX)   # home = where the ramp stops it
+            hold_tgt = tgt_eff + np.sign(vdes_s) * vdes_s ** 2 / (2 * DMAX)   # home = where the braking ramp stops it
             lqr_ix = 0.0
         was_driving = driving
         sdir = -direction if (reverse_at is not None and t >= reverse_at) else direction
@@ -183,9 +183,7 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
             # LQR drive management (main.cpp): stick held -> target ADVANCES at the ramped speed, the position
             # integral runs throughout; held still -> target latched at the start.
             vcmd = sdir * vmax if driving else 0.0
-            if vcmd > vdes_s + damax: vdes_s += damax
-            elif vcmd < vdes_s - damax: vdes_s -= damax
-            else: vdes_s = vcmd
+            vdes_s = drive_ramp(vdes_s, vcmd, dt, AMAX, DMAX)
             tgt_eff += vdes_s * dt
             vdes = vdes_s
             lqr_ix = float(np.clip(lqr_ix + (x - tgt_eff) * dt, -LQR_IXMAX, LQR_IXMAX))
@@ -209,11 +207,9 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
                     vcmd = sdir * vmax
                 else:
                     dist = hold_tgt - tgt_eff
-                    vcap = min(VMAX, np.sqrt(2 * AMAX * abs(dist)))
+                    vcap = min(VMAX, np.sqrt(2 * DMAX * abs(dist)))
                     vcmd = vcap if dist >= 0 else -vcap
-                if vcmd > vdes_s + damax: vdes_s += damax
-                elif vcmd < vdes_s - damax: vdes_s -= damax
-                else: vdes_s = vcmd
+                vdes_s = drive_ramp(vdes_s, vcmd, dt, AMAX, DMAX)
                 vdes = vdes_s
                 if driving and drive == "latch":
                     # target tracks wheel_x every cycle (posErr 0), integral FROZEN: lean = KD*(xvelF - vdes) + cancel
@@ -240,12 +236,10 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
             else:
                 # 'ptgt' distance move: trapezoidal profile (brake-distance capped) to a far target, P-term lean
                 dist = tgt - tgt_eff
-                vstop = np.sqrt(2 * AMAX * abs(dist))
+                vstop = np.sqrt(2 * DMAX * abs(dist))
                 vcap = min(vmax, vstop)
                 vcmd = vcap if dist >= 0 else -vcap
-                if vcmd > vdes_s + damax: vdes_s += damax
-                elif vcmd < vdes_s - damax: vdes_s -= damax
-                else: vdes_s = vcmd
+                vdes_s = drive_ramp(vdes_s, vcmd, dt, AMAX, DMAX)
                 tgt_eff += vdes_s * dt
                 vdes = vdes_s
                 pos_err = x - tgt_eff

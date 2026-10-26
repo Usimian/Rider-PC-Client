@@ -168,6 +168,10 @@ volatile float gPosVmaxBack= 0.30f; // BACKWARD speed cap (m/s). matched to forw
                                     // Matching the demand to the headroom (lower cap backward) keeps it out of the
                                     // rail. Drive-shaping fix for the cruise-bias asymmetry. live-tune via 'posvmaxb'
 volatile float gPosAmax    = 0.4f;  // accel cap (m/s^2) on the drive-velocity ramp: gentle accel kills the lurch/oscillation.
+volatile float gPosDmax    = 0.8f;  // BRAKING cap (m/s^2), 'posdmax' (2026-10-26): the ramp's rate while the speed falls
+                                    // (stick release, flip, end of a ptgt move). It shared gPosAmax's 0.4 before, so a
+                                    // release from 0.30 m/s took 0.75 s and ~11 cm of target travel (LQR stop 7.5 cm,
+                                    // policy 18-22 on the floor). Sim: LQR 0.8 -> ~2-3 cm, swings 9-11 deg.
                                     // 0.8 -> 0.4 (2026-10-19): with the matched LQR speed reference, 0.8 made starts lean
                                     // 9-10 deg; 0.4 cut that by ~1/3 (floor). Applies to the policy's drive ramp too. 'posamax'
 volatile float gTurn       = 0.0f;  // wheel differential (raw) ADDED to both wheel cmds -> yaw. Computed by the yaw-rate controller each loop.
@@ -743,12 +747,21 @@ static float policyInfer(const float* obs){
 }
 
 // Stick RELEASE (both controllers, 2026-10-21): keep the current drive speed and set the home where the
-// gPosAmax ramp brings it to rest; the hold trapezoid then decelerates from that speed. It used to zero
+// braking ramp (gPosDmax) brings it to rest; the hold trapezoid then decelerates from that speed. It used to zero
 // the speed and latch the home at the release spot -- a full-strength emergency stop, and a stick FLIP
 // passes through the dead zone, so every full reversal began with one (floor: a 12.8 deg backward lurch
 // at ride height, a fall at full leg height). Now a flip just ramps through zero into reverse.
 static float releaseStop(float tgtEff, float v){   // -> the new home
-  return tgtEff + ((v >= 0.0f) ? 1.0f : -1.0f) * v * v / (2.0f * gPosAmax);
+  return tgtEff + ((v >= 0.0f) ? 1.0f : -1.0f) * v * v / (2.0f * gPosDmax);
+}
+// One step of the drive-speed ramp toward tgt: gPosDmax while the speed falls (braking), gPosAmax while it rises.
+// A braking step never carries through zero: the speed stops at 0 for a cycle, then ramps up the other way.
+static float driveRamp(float v, float tgt, float dt){
+  bool braking = (v > 0.0f && tgt < v) || (v < 0.0f && tgt > v);
+  float d = (braking ? gPosDmax : gPosAmax) * dt;
+  float n = (tgt > v + d) ? v + d : (tgt < v - d) ? v - d : tgt;
+  if(braking && ((v > 0.0f && n < 0.0f) || (v < 0.0f && n > 0.0f))) n = 0.0f;
+  return n;
 }
 
 // ---------------- balance task (core 1) ----------------
@@ -977,7 +990,6 @@ static void balanceTask(void*){
         // filters: xvelF for the position-D term, xvelP for the policy's velocity obs.
         xvelF = gPosVelLP*xvelF + (1.0f-gPosVelLP)*xvel;
         xvelP = gPolVelLP*xvelP + (1.0f-gPolVelLP)*xvel;
-        float damax = gPosAmax * sdt;
         // TURN-START re-anchor: when a turn BEGINS, set the fore/aft home to the current
         // position (the spin center). The position loop stays ACTIVE through the turn (below),
         // so it holds that center -> bounds wheel path length -> robot spins ~in place (drift
@@ -998,7 +1010,7 @@ static void balanceTask(void*){
           // old drive): the home tracks the current position, posErr ~0, only the velocity-D term drives.
           // Either way, the instant the stick releases the home latches at the current spot.
           float vtgt = (gDriveVel < -gPosVmaxBack) ? -gPosVmaxBack : gDriveVel;   // asymmetric: limit backward
-          if(vtgt > vdesS + damax) vdesS += damax; else if(vtgt < vdesS - damax) vdesS -= damax; else vdesS = vtgt;
+          vdesS = driveRamp(vdesS, vtgt, sdt);
           // posErrInt is FROZEN here, not zeroed (2026-09-16): at rest the integrator tilts the
           // setpoint to cancel the policy's constant command bias (ppo_fw_s2: ~-50 raw -> hold
           // pitch 5.0 vs setpoint 3.55). Zeroing it on stick touch brought the bias back and ate
@@ -1017,10 +1029,10 @@ static void balanceTask(void*){
           // speed is KEPT and the home set where the ramp brings it to rest (releaseStop).
           if(wasVelDrive){ gPosTarget = releaseStop(gPosTargetEff, vdesS); wasVelDrive = false; }
           float dist = gPosTarget - gPosTargetEff;
-          float vstop = sqrtf(2.0f * gPosAmax * fabsf(dist));  // brake-distance speed cap -> stop ON target
+          float vstop = sqrtf(2.0f * gPosDmax * fabsf(dist));  // brake-distance speed cap -> stop ON target
           float vcap = fminf((dist >= 0.0f) ? gPosVmax : gPosVmaxBack, vstop);  // asymmetric: limit backward moves
           float vcmd = (dist >= 0.0f) ? vcap : -vcap;
-          if(vcmd > vdesS + damax) vdesS += damax; else if(vcmd < vdesS - damax) vdesS -= damax; else vdesS = vcmd;
+          vdesS = driveRamp(vdesS, vcmd, sdt);
           gPosTargetEff += vdesS * sdt;
           if((dist >= 0.0f && gPosTargetEff > gPosTarget) ||   // never coast past the goal
              (dist <  0.0f && gPosTargetEff < gPosTarget)){ gPosTargetEff = gPosTarget; vdesS = 0.0f; }
@@ -1096,7 +1108,6 @@ static void balanceTask(void*){
       float vdes = 0.0f, sdt = (dt>1e-4f ? dt : 0.004f);
       if(!lqrInit){ gPosTarget=wheel_x; gPosTargetEff=wheel_x; vdesS=0.0f; lqrIx=0.0f; lqrInit=true; }  // fresh home -> clear integral
       else {
-        float damax = gPosAmax * sdt;
         bool turning = (fabsf(gYawRateCmd) > 0.001f);
         // re-anchor home at the spin center -> clear integral; ONLY for a turn from a HOLD. Mid-drive the
         // target leads the robot by ~20 cm and that lead IS the drive command: re-anchoring it collapsed u
@@ -1105,16 +1116,16 @@ static void balanceTask(void*){
         wasTurning = turning;
         if(fabsf(gDriveVel) > 0.001f){                                   // VELOCITY DRIVE (stick held)
           float vtgt = clampf(gDriveVel, -gPosVmaxBack, gPosVmax);        // clamp BOTH dirs (forward was uncapped)
-          if(vtgt > vdesS+damax) vdesS+=damax; else if(vtgt < vdesS-damax) vdesS-=damax; else vdesS=vtgt;
+          vdesS = driveRamp(vdesS, vtgt, sdt);
           gPosTargetEff += vdesS*sdt; gPosTarget=gPosTargetEff; wasVelDrive=true;  // ADVANCE target at cmd velocity
                                                                                    // -> position term drives it (like ptgt)
         } else {                                                          // HOLD / 'ptgt' move (stick released)
           if(wasVelDrive){ gPosTarget = releaseStop(gPosTargetEff, vdesS); lqrIx=0.0f; wasVelDrive=false; }   // ramp to rest (releaseStop) -> clear integral
           float dist=gPosTarget-gPosTargetEff;
-          float vstop=sqrtf(2.0f*gPosAmax*fabsf(dist));
+          float vstop=sqrtf(2.0f*gPosDmax*fabsf(dist));
           float vcap=fminf((dist>=0.0f)?gPosVmax:gPosVmaxBack, vstop);
           float vcmd=(dist>=0.0f)?vcap:-vcap;
-          if(vcmd > vdesS+damax) vdesS+=damax; else if(vcmd < vdesS-damax) vdesS-=damax; else vdesS=vcmd;
+          vdesS = driveRamp(vdesS, vcmd, sdt);
           gPosTargetEff += vdesS*sdt;
           if((dist>=0.0f && gPosTargetEff>gPosTarget)||(dist<0.0f && gPosTargetEff<gPosTarget)){ gPosTargetEff=gPosTarget; vdesS=0.0f; }
         }
@@ -1581,6 +1592,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"posvmax"))  gPosVmax=v;          // move speed cap (m/s) for the target slew
   else if (!strcmp(s,"posvmaxb")) gPosVmaxBack=v;      // BACKWARD speed cap (m/s); lower = keep policy out of saturation
   else if (!strcmp(s,"posamax"))  gPosAmax=v;          // accel cap (m/s^2) on the drive-velocity ramp
+  else if (!strcmp(s,"posdmax"))  gPosDmax=clampf(v,0.1f,3.0f);  // BRAKING cap (m/s^2) on the drive-velocity ramp
   else if (!strcmp(s,"turnrate")) { gYawRateCmd=v; gTurnMs=millis(); }  // commanded yaw rate (rad/s); 0=straight; heartbeat (watchdog)
   else if (!strcmp(s,"yawkp"))    gYawKp=v;            // yaw-rate FB trim gain (raw per rad/s)
   else if (!strcmp(s,"yawff"))    gYawFF=v;            // yaw-rate FEEDFORWARD (raw per rad/s cmd) -> turn firmness

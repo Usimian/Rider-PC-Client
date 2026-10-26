@@ -105,6 +105,7 @@ class FirmwareSensing:
 DRIVE_K, DRIVE_KI, DRIVE_KD = 20.0, 1.0, 10.0   # gPosHoldK / gPosHoldKi / gDriveKd (MOVING regime)
 DRIVE_POSMAX_DEG = 8.0                           # gPosHoldMax (setpoint-bias clamp, deg); 5 -> 8 with drive_lead (2026-10-19)
 DRIVE_AMAX  = 0.4                                 # gPosAmax  (accel cap m/s^2) -- 0.8 -> 0.4 fw default 2026-10-19
+DRIVE_DMAX  = 0.8                                 # gPosDmax  (BRAKING cap m/s^2, 2026-10-26): the ramp while speed falls
 DRIVE_VMAX  = 0.30                                # gPosVmax  (full-stick speed cap m/s) -- 0.25 -> 0.30 2026-10-19
 DRIVE_TRAIN_VMAX = 0.35                           # training samples cruise speeds up to this: margin over the fw cap
 DRIVE_VELLP = 0.9                                 # gPosVelLP (LP on velocity feeding the D term)
@@ -117,6 +118,19 @@ DRIVE_DEADBAND = 0.012                            # gPosDeadband (m)
 DRIVE_KILIM    = DRIVE_POSMAX_DEG / DRIVE_KI      # integral clamp (m*s)
 DRIVE_HOLD_S   = (1.0, 2.5)                       # drive episodes start with a hold this long (real use: hold, then drive)
 DRIVE_LEASH    = 0.25                             # drive_lead: the moving target stays within this of the robot (m)
+
+
+def drive_ramp(v, tgt, dt, amax=None, dmax=None):
+    """One step of the firmware's drive-speed ramp (main.cpp driveRamp): DRIVE_DMAX while the speed falls (braking),
+    DRIVE_AMAX while it rises; a braking step stops at 0 instead of carrying through it. amax/dmax override."""
+    amax = DRIVE_AMAX if amax is None else amax
+    dmax = DRIVE_DMAX if dmax is None else dmax
+    braking = (v > 0.0 and tgt < v) or (v < 0.0 and tgt > v)
+    d = (dmax if braking else amax) * dt
+    n = v + d if tgt > v + d else (v - d if tgt < v - d else tgt)
+    if braking and ((v > 0.0 and n < 0.0) or (v < 0.0 and n > 0.0)):
+        n = 0.0
+    return n
 # pitch_dis: errors in the pitch the controller is fed, as MEASURED on the floor 2026-10-19 -- a balance point moved
 # by the leg height (~3 deg at the lowest legs) and a sensor drift that builds during fast turns (~2 deg).
 PDIS_OFFSET_DEG = (-4.0, 4.0)                     # per-episode constant offset
@@ -397,10 +411,7 @@ class RiderBalanceEnv(gym.Env):
         x = float(self._raw_state()[2])                        # forward travel, not world x (the two-wheel env turns)
         if self._steps >= self._drive_start_step:              # hold first, then the stick goes over
             self._vdes_cmd = self._drive_cmd
-        dv = DRIVE_AMAX * dt                                   # accel-cap the commanded velocity ramp
-        if self._vdes_cmd > self._vdes_s + dv:   self._vdes_s += dv
-        elif self._vdes_cmd < self._vdes_s - dv: self._vdes_s -= dv
-        else:                                    self._vdes_s = self._vdes_cmd
+        self._vdes_s = drive_ramp(self._vdes_s, self._vdes_cmd, dt)   # the firmware's driveRamp
         self._tgt_eff += self._vdes_s * dt
         # the firmware's drive loop differences the same ENCODER wheel_x the policy's velocity comes from
         xvel = self.sense.xvel_raw if self.fw_obs else (x - self._prevX) / dt
