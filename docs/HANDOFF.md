@@ -37,7 +37,12 @@ list, and what not to trust.
    news-reader fallback, and it works in the field over the phone hotspot. It sends voice/text off-site --
    Marc's explicit OK under the local-only rule. The workstation's local model is the at-home alternative.
 4. Watch the Pi under-voltage count after floor driving.
-5. ToF obstacle/edge stop: check its zone classes while driving before leaving it on.
+5. **ToF edge stop is NOT safe at full speed** (10-26, table edge, stop switched OFF / report-only, Marc caught the
+   robot): far zones read 'd' ~1.8 s before the edge, the cliff rule asserted only 0.78 s (~23 cm) before, flickered
+   off for a frame, and the policy needs ~0.75 s / 18-22 cm to stop on the gentle release ramp. Keep it OFF and the
+   robot off tables until reworked: act on the far rows earlier, a hard stop for edges (not the stick-release ramp),
+   likely a lower top speed while the stop is on. Wall/obstacle check (phase 2) not done yet. Recorder:
+   `tools/tof/tof_safety_capture.py`; capture `data/captures/2026-10-26_tof_off_drive.csv`.
 6. `/home/pi/riderlog.txt` is never rotated (321 MB on 10-21). Filter on the Pi; never copy it whole over WiFi.
 7. The controller low-battery cutoff (<= 15 %, unplugged) is untested.
 
