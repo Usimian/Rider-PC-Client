@@ -322,8 +322,10 @@ $("tofviewbtn").addEventListener("click", () => {
 });
 
 // ---- 3D view: the governor's floor-referenced zone points (rider/safety/fwd_limit "pts", mm: forward, left,
-// up; origin on the floor under the sensor), drawn as an orthographic three-quarter view. Drag to turn.
-const D3 = { az: 35, el: 28, drag: null };            // viewer azimuth (deg, + = behind-right), elevation (deg)
+// up; origin on the floor under the sensor), drawn as an orthographic three-quarter view. Drag sideways to turn,
+// up/down to tilt, scroll wheel to zoom (toward the pointer), double-click to reset.
+const D3_HOME = { az: 35, el: 28, zoom: 1, panX: 0, panY: 0 };
+const D3 = { ...D3_HOME, drag: null };   // azimuth (deg, + = behind-right), elevation (deg), zoom, pan (px) after the fit
 const D3_COL = { o: "#ff5a5a", f: "#3ecf72", d: "#ffc53d", b: "#c9a24a", h: "#7d86a8" };
 const D3_LANE = Math.tan(11.25 * Math.PI / 180);     // drive corridor = the middle 4 of 8 columns of a 45 deg view
 const D3_XMAX = 1.2, D3_YMAX = 0.5;                   // floor drawn: 0..1.2 m ahead, +-0.5 m to the sides
@@ -349,7 +351,9 @@ function depth3d() {
   }
   const pad = 14, sc = Math.min((W - 2 * pad) / (uMax - uMin), (H - 2 * pad) / (vMax - vMin));   // px per metre
   const ox = (W - sc * (uMax - uMin)) / 2 - sc * uMin, oy = (H - sc * (vMax - vMin)) / 2 - sc * vMin;
-  const P = (x, y, z) => [ox + sc * u0(x, y), oy + sc * v0(x, y, z)];
+  // then the user's zoom about the canvas centre, and pan (the wheel pans so the point under the pointer stays put)
+  const cx = W / 2, cy = H / 2, zm = D3.zoom;
+  const P = (x, y, z) => [cx + zm * (ox + sc * u0(x, y) - cx) + D3.panX, cy + zm * (oy + sc * v0(x, y, z) - cy) + D3.panY];
   const path = (pts, close) => {
     g.beginPath(); pts.forEach(([x, y, z], i) => { const [u, v] = P(x, y, z); i ? g.lineTo(u, v) : g.moveTo(u, v); });
     if (close) g.closePath();
@@ -409,12 +413,26 @@ function depth3d() {
   }
 }
 const cv3 = $("depth3d");
-cv3.addEventListener("pointerdown", (ev) => { D3.drag = { x: ev.clientX, az: D3.az }; cv3.setPointerCapture(ev.pointerId); });
+cv3.addEventListener("pointerdown", (ev) => {
+  D3.drag = { x: ev.clientX, y: ev.clientY, az: D3.az, el: D3.el };
+  cv3.setPointerCapture(ev.pointerId);
+});
 cv3.addEventListener("pointermove", (ev) => {
   if (!D3.drag) return;
-  D3.az = Math.max(-80, Math.min(80, D3.drag.az + (ev.clientX - D3.drag.x) * 0.4));
+  D3.az = Math.max(-170, Math.min(170, D3.drag.az + (ev.clientX - D3.drag.x) * 0.4));   // turn
+  D3.el = Math.max(2, Math.min(88, D3.drag.el + (ev.clientY - D3.drag.y) * 0.3));       // tilt: flat .. top-down
   depth3d();
 });
 for (const t of ["pointerup", "pointercancel"]) cv3.addEventListener(t, () => { D3.drag = null; });
+cv3.addEventListener("wheel", (ev) => {
+  ev.preventDefault();                                   // zoom the view, not the page
+  const r = cv3.getBoundingClientRect(), mx = ev.clientX - r.left - r.width / 2, my = ev.clientY - r.top - r.height / 2;
+  const z0 = D3.zoom, z1 = Math.max(0.5, Math.min(8, z0 * Math.exp(-ev.deltaY * 0.0015)));
+  D3.panX = mx - (z1 / z0) * (mx - D3.panX);             // keep the point under the pointer where it is
+  D3.panY = my - (z1 / z0) * (my - D3.panY);
+  D3.zoom = z1;
+  depth3d();
+}, { passive: false });
+cv3.addEventListener("dblclick", () => { Object.assign(D3, D3_HOME); depth3d(); });
 new ResizeObserver(() => depth3d()).observe(cv3);
 showTofView();
