@@ -264,7 +264,8 @@ $("cambtn").addEventListener("click", () => {
 const tofCells = [];
 for (let k = 0; k < 64; k++) { const c = document.createElement("div"); $("tofgrid").appendChild(c); tofCells.push(c); }
 let tofT = 0, safeT = 0, SAFE = null, tofCls = ".".repeat(64);
-const TOF_VALID = new Set([5, 6]);                  // VL53L5CX target_status: 5 valid, 6 50 % valid
+const TOF_VALID = new Set([5, 6, 9]);               // VL53L5CX target_status: 5 valid, 6 50 % valid, 9 valid (large
+                                                    // pulse) -- the same set as rider_tof_safety.py's VALID
 function tofFrame(f) {
   tofT = Date.now();
   for (let k = 0; k < 64; k++) {
@@ -282,10 +283,12 @@ function tofSafety(p) {
   SAFE = p;
   if (typeof p.cls === "string" && p.cls.length === 64) tofCls = p.cls;
   tofShow();
+  depth3d();
 }
 const safeLive = () => client.connected && SAFE && Date.now() - safeT < 2000;
 function tofShow() {
   $("tofgrid").classList.toggle("stale", Date.now() - tofT > 2000);
+  $("depth3d").classList.toggle("stale", !safeLive());
   const b = $("tofbtn"), ok = safeLive();
   b.disabled = !ok;
   b.textContent = "Obstacle stop: " + (!ok ? "–" : SAFE.on ? "ON" : "off");
@@ -301,3 +304,117 @@ setInterval(tofShow, 250);
 $("tofbtn").addEventListener("click", () => {
   if (safeLive()) client.publish("rider/safety/enable", JSON.stringify({ on: !SAFE.on }), true);   // retained
 });
+
+// ---- obstacle card view switch: the 8x8 grid or the 3D view, in the same space. Which one is a per-browser
+// display preference (not robot state), remembered in localStorage when the browser allows it.
+let view3d = false;
+try { view3d = localStorage.getItem("tofview") === "3d"; } catch { /* storage blocked: start on the grid */ }
+function showTofView() {
+  $("tofviewgrid").hidden = view3d;
+  $("tofview3d").hidden = !view3d;
+  $("tofviewbtn").textContent = view3d ? "Grid view" : "3D view";
+  if (view3d) depth3d();
+}
+$("tofviewbtn").addEventListener("click", () => {
+  view3d = !view3d;
+  try { localStorage.setItem("tofview", view3d ? "3d" : "grid"); } catch { /* not remembered */ }
+  showTofView();
+});
+
+// ---- 3D view: the governor's floor-referenced zone points (rider/safety/fwd_limit "pts", mm: forward, left,
+// up; origin on the floor under the sensor), drawn as an orthographic three-quarter view. Drag to turn.
+const D3 = { az: 35, el: 28, drag: null };            // viewer azimuth (deg, + = behind-right), elevation (deg)
+const D3_COL = { o: "#ff5a5a", f: "#3ecf72", d: "#ffc53d", b: "#c9a24a", h: "#7d86a8" };
+const D3_LANE = Math.tan(11.25 * Math.PI / 180);     // drive corridor = the middle 4 of 8 columns of a 45 deg view
+const D3_XMAX = 1.2, D3_YMAX = 0.5;                   // floor drawn: 0..1.2 m ahead, +-0.5 m to the sides
+function depth3d() {
+  const cv = $("depth3d");
+  if (!view3d) return;
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (!W || !H) return;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  }
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const a = D3.az * Math.PI / 180, e = D3.el * Math.PI / 180;
+  const r0 = Math.sin(a), r1 = -Math.cos(a), f0 = Math.cos(a), f1 = Math.sin(a), ce = Math.cos(e), se = Math.sin(e);
+  // fit the drawn floor (plus 0.4 m of height) to the canvas at this angle: scale + offset from its projected box
+  const u0 = (x, y) => x * r0 + y * r1, v0 = (x, y, z) => -(z * ce + (x * f0 + y * f1) * se);
+  let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
+  for (const x of [-0.1, D3_XMAX]) for (const y of [-D3_YMAX, D3_YMAX]) for (const z of [0, 0.4]) {
+    const u = u0(x, y), v = v0(x, y, z);
+    uMin = Math.min(uMin, u); uMax = Math.max(uMax, u); vMin = Math.min(vMin, v); vMax = Math.max(vMax, v);
+  }
+  const pad = 14, sc = Math.min((W - 2 * pad) / (uMax - uMin), (H - 2 * pad) / (vMax - vMin));   // px per metre
+  const ox = (W - sc * (uMax - uMin)) / 2 - sc * uMin, oy = (H - sc * (vMax - vMin)) / 2 - sc * vMin;
+  const P = (x, y, z) => [ox + sc * u0(x, y), oy + sc * v0(x, y, z)];
+  const path = (pts, close) => {
+    g.beginPath(); pts.forEach(([x, y, z], i) => { const [u, v] = P(x, y, z); i ? g.lineTo(u, v) : g.moveTo(u, v); });
+    if (close) g.closePath();
+  };
+
+  // floor grid, 10 cm; every 50 cm brighter and labelled
+  for (let i = 0; i <= Math.round(D3_XMAX * 10); i++) {
+    const x = i / 10, major = i % 5 === 0;
+    g.strokeStyle = major ? "#3a4370" : "#232a48"; g.lineWidth = 1;
+    path([[x, D3_YMAX, 0], [x, -D3_YMAX, 0]]); g.stroke();
+    if (major && i) { const [u, v] = P(x, D3_YMAX, 0); g.fillStyle = "#8b93b5"; g.font = "11px system-ui";
+                      g.fillText(`${x} m`, u - 30, v); }
+  }
+  for (let i = -Math.round(D3_YMAX * 10); i <= Math.round(D3_YMAX * 10); i++) {
+    g.strokeStyle = i === 0 ? "#3a4370" : "#232a48";
+    path([[0, i / 10, 0], [D3_XMAX, i / 10, 0]]); g.stroke();
+  }
+
+  // drive lane, shaded by what the stop does there (distances from the governor)
+  const live = SAFE && Array.isArray(SAFE.pts);
+  const stop = live ? SAFE.stop_mm / 1000 : 0.10, slow = live ? SAFE.slow_mm / 1000 : 0.40;
+  const band = (x0, x1, col) => {
+    path([[x0, x0 * D3_LANE, 0], [x1, x1 * D3_LANE, 0], [x1, -x1 * D3_LANE, 0], [x0, -x0 * D3_LANE, 0]], true);
+    g.fillStyle = col; g.fill();
+  };
+  band(0, stop, "rgba(255,90,90,.28)");
+  band(stop, slow, "rgba(255,197,61,.20)");
+  band(slow, D3_XMAX, "rgba(102,194,255,.08)");
+
+  // the robot: a wire box behind the sensor, the sensor a dot at its measured height
+  const h = live ? SAFE.h_mm / 1000 : 0.062;
+  const bx = [-0.10, 0], by = [-0.09, 0.09], bz = [0, h + 0.07];
+  g.strokeStyle = "#8b93b5"; g.lineWidth = 1;
+  for (const z of bz) { path([[bx[0], by[0], z], [bx[1], by[0], z], [bx[1], by[1], z], [bx[0], by[1], z]], true); g.stroke(); }
+  for (const x of bx) for (const y of by) { path([[x, y, bz[0]], [x, y, bz[1]]]); g.stroke(); }
+  const [su, sv] = P(0, 0, h);
+  g.fillStyle = "#66c2ff"; g.beginPath(); g.arc(su, sv, 4, 0, 2 * Math.PI); g.fill();
+
+  if (!live) {
+    g.fillStyle = "#8b93b5"; g.font = "13px system-ui"; g.fillText("no ToF governor data", 12, 20);
+    return;
+  }
+  // zone points, far to near so near ones paint on top; obstacles get a stalk to the floor
+  const pts = [];
+  SAFE.pts.forEach((p, k) => {
+    if (!p) return;
+    const x = p[0] / 1000, y = p[1] / 1000, z = p[2] / 1000;
+    if (x < -0.1 || x > D3_XMAX + 0.4 || Math.abs(y) > D3_YMAX + 0.3) return;    // off the drawn floor
+    pts.push({ x, y, z, c: tofCls[k], depth: x * f0 + y * f1 });
+  });
+  pts.sort((p, q) => q.depth - p.depth);
+  for (const p of pts) {
+    const col = D3_COL[p.c] || "#e8ecf8";
+    if (p.c === "o") { g.strokeStyle = col; g.globalAlpha = .45; path([[p.x, p.y, 0], [p.x, p.y, p.z]]); g.stroke(); g.globalAlpha = 1; }
+    const [u, v] = P(p.x, p.y, p.z);
+    g.fillStyle = col; g.beginPath(); g.arc(u, v, 3.5, 0, 2 * Math.PI); g.fill();
+  }
+}
+const cv3 = $("depth3d");
+cv3.addEventListener("pointerdown", (ev) => { D3.drag = { x: ev.clientX, az: D3.az }; cv3.setPointerCapture(ev.pointerId); });
+cv3.addEventListener("pointermove", (ev) => {
+  if (!D3.drag) return;
+  D3.az = Math.max(-80, Math.min(80, D3.drag.az + (ev.clientX - D3.drag.x) * 0.4));
+  depth3d();
+});
+for (const t of ["pointerup", "pointercancel"]) cv3.addEventListener(t, () => { D3.drag = null; });
+new ResizeObserver(() => depth3d()).observe(cv3);
+showTofView();

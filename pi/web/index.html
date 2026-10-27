@@ -93,14 +93,24 @@
     <h2>OBSTACLES (ToF)</h2>
     <div class="row">
       <button class="btn" id="tofbtn" disabled title="Forward speed is capped near an obstacle (slows from 40 cm, stops at 10 cm). It does not see table edges. Reverse is never limited.">Obstacle stop: –</button>
+      <button class="btn" id="tofviewbtn" title="Switch between the sensor's 8 × 8 grid and the 3D view">3D view</button>
     </div>
     <div class="row"><span class="k">ahead</span><span id="tofstate">–</span></div>
-    <div class="tofgrid" id="tofgrid"></div>
-    <div class="tofpath"><span></span><span class="on"></span><span></span></div>
-    <p class="hint">The sensor's 8 × 8 view, looking ahead: left = the robot's left, top row = farthest.
-      Colour = distance (red near, blue far; numbers in cm). Outline: <span class="bad">obstacle</span>,
-      <span class="on">floor</span>, <span class="warn">floor dropped away</span>. The bar marks the drive path
-      (the columns the stop uses).</p>
+    <div id="tofviewgrid">
+      <div class="tofgrid" id="tofgrid"></div>
+      <div class="tofpath"><span></span><span class="on"></span><span></span></div>
+      <p class="hint">The sensor's 8 × 8 view, looking ahead: left = the robot's left, top row = farthest.
+        Colour = distance (red near, blue far; numbers in cm). Outline: <span class="bad">obstacle</span>,
+        <span class="on">floor</span>, <span class="warn">floor dropped away</span>. The bar marks the drive path
+        (the columns the stop uses).</p>
+    </div>
+    <div id="tofview3d" hidden>
+      <canvas id="depth3d" title="Drag sideways to turn the view"></canvas>
+      <p class="hint">Each sensor zone as a point in the room, corrected for pitch, roll and leg height: the same
+        points the obstacle stop decides from. <span class="bad">Obstacle</span> (with a stalk to the floor),
+        <span class="on">floor</span>, <span class="warn">floor dropped away</span>, grey = overhead. Grid = 10 cm
+        on the floor; the shaded lane is the drive path: amber = slowing, red = stopping. Drag to turn.</p>
+    </div>
   </section>
 </main>
 

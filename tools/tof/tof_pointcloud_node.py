@@ -32,7 +32,7 @@ from sensor_msgs_py import point_cloud2
 from geometry_msgs.msg import TransformStamped
 from tf2_ros import TransformBroadcaster
 
-VALID_STATUS = (5, 6)
+VALID_STATUS = (5, 6, 9)   # as pi/rider_tof_safety.py VALID (9 = valid range, large pulse; added 2026-10-27)
 
 # --- calibrated kinematic model (tof_calib_solve.py, 3-height flat-floor fit) ---
 ROLL_SIGN, PITCH_SIGN = -1.0, -1.0      # IMU -> world sign convention

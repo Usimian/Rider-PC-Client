@@ -28,8 +28,9 @@ def main():
     v.set_resolution(RES * RES)
     try:
         v.set_ranging_frequency_hz(10)
-    except Exception:
-        pass
+    except Exception as e:   # was swallowed silently: the frame rate is part of every stop's reaction time
+        print(f"WARNING: set_ranging_frequency_hz(10) failed ({e!r}); the sensor runs at its default rate",
+              flush=True)
     v.start_ranging()
     print("publishing -> rider/tof", flush=True)
 

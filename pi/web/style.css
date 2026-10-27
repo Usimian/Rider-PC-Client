@@ -92,3 +92,8 @@ input[type=range] { flex: 1; min-width: 140px; accent-color: var(--accent); }
 .tofpath { display: grid; grid-template-columns: 2fr 4fr 2fr; gap: 3px; max-width: 420px; margin: 4px 0 8px; }
 .tofpath span { height: 4px; border-radius: 2px; }
 .tofpath span.on { background: var(--accent); }
+
+/* 3D depth view: canvas sized by CSS, drawn at device-pixel resolution by app.js */
+#depth3d { display: block; width: 100%; max-width: 520px; aspect-ratio: 4 / 3; background: #0d1020; border-radius: 6px;
+           touch-action: pan-y; cursor: ew-resize; }
+#depth3d.stale { opacity: .35; }

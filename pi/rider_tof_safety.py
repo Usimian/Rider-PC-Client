@@ -7,7 +7,11 @@ FLOOR-REFERENCED frame using the calibrated kinematic model, and publishes a
 FORWARD-speed factor on rider/safety/fwd_limit:
 
     {"factor": 0.0..1.0, "reason": "none|obstacle", "min_mm": <fwd dist>,
-     "on": bool, "would": 0.0..1.0, "cls": "<64 zone classes>"}
+     "on": bool, "would": 0.0..1.0, "cls": "<64 zone classes>",
+     "pts": [64 x [fwd, left, up] mm, floor-referenced, or null], "h_mm": <sensor height>,
+     "slow_mm": SLOW_FWD, "stop_mm": STOP_FWD}
+
+pts/h_mm/slow_mm/stop_mm feed the web page's 3D depth view (2026-10-27): it draws what the stop decides from.
 
 The DS4 controller (rider_controller.py) multiplies its FORWARD drive by factor
 -- reverse is never limited, so you can always back out from a wall.
@@ -66,7 +70,9 @@ SLOW_FWD = 0.40            # m forward: full speed beyond; linear taper between 
 FLOOR_TOL = 0.05           # m: |z| under this counts as "floor"
 DROP_Z = 0.08              # m: z below -this reads 'd' (floor dropped away), between -FLOOR_TOL and it 'b'
 
-VALID = (5, 6)             # VL53L5CX target_status: 5 = valid, 6 = 50% valid
+VALID = (5, 6, 9)          # VL53L5CX target_status: 5 = valid, 6 = 50% valid (no wrap-around check),
+                           # 9 = valid range with a large pulse (merged target). 9 was rejected before 10-27:
+                           # 1-6 zones/frame facing a wall at ~50 cm (tools/tof/tof_raw_vs_verdict.py)
 
 # per-zone center angles (8 zones over 45 deg FoV, centered)
 _half, _step = 22.5, 45.0 / 8.0
@@ -115,14 +121,16 @@ def factor_from_fwd(x):
 
 
 def evaluate(d, s, roll, pitch, legidx):
-    """Floor-reference one frame; return the nearest obstacle ahead and the zone classes.
-    Pure (no state) so it can be replayed against captured frames in tests."""
+    """Floor-reference one frame; return the nearest obstacle ahead, the zone classes, each zone's point and the
+    sensor height. Pure (no state) so it can be replayed against captured frames in tests.
+    pts[k] = [forward, left, up] in mm, floor-referenced (origin on the floor under the sensor), or None."""
     Ri = _mm(_Rx(math.radians(ROLL_SIGN * roll)), _Ry(math.radians(PITCH_SIGN * pitch)))
     R = _mm(Ri, R_MOUNT)
     H = H_A * legidx + H_C
 
-    nearest_obs = None          # nearest obstacle forward distance (m)
+    nearest_obs = None          # nearest obstacle forward distance (m), drive corridor (COLS) only
     cls = ["."] * 64            # per-zone class, all 64 zones (for display); the stop uses COLS only
+    pts = [None] * 64
 
     for i in range(8):
         for j in range(8):
@@ -130,26 +138,19 @@ def evaluate(d, s, roll, pitch, legidx):
             if s[k] in VALID and d[k] > 0:
                 rng = d[k] / 1000.0
                 p = _mv(R, (rng * RAY[i][j][0], rng * RAY[i][j][1], rng * RAY[i][j][2]))
-                z = p[2] + H
+                fwd, z = p[0], p[2] + H        # forward dist, height above floor
+                pts[k] = [round(fwd * 1000), round(p[1] * 1000), round(z * 1000)]
                 if z <= -FLOOR_TOL:
                     cls[k] = "d" if z < -DROP_Z else "b"
                 elif z < FLOOR_TOL:
                     cls[k] = "f"
                 else:
                     cls[k] = "o" if z < OBS_Z_MAX else "h"
-
-    for j in COLS:
-        for i in range(8):
-            k = i * 8 + j
-            if s[k] in VALID and d[k] > 0:
-                rng = d[k] / 1000.0
-                p = _mv(R, (rng * RAY[i][j][0], rng * RAY[i][j][1], rng * RAY[i][j][2]))
-                fwd, z = p[0], p[2] + H        # forward dist, height above floor
-                if OBS_Z_MIN < z < OBS_Z_MAX and fwd > 0:
+                if j in COLS and OBS_Z_MIN < z < OBS_Z_MAX and fwd > 0:
                     if nearest_obs is None or fwd < nearest_obs:
                         nearest_obs = fwd
 
-    return {"nearest_obs": nearest_obs, "cls": "".join(cls)}
+    return {"nearest_obs": nearest_obs, "cls": "".join(cls), "pts": pts, "h_mm": round(H * 1000)}
 
 
 def main():
@@ -186,7 +187,9 @@ def main():
 
         c.publish(LIMIT_TOPIC,
                   json.dumps({"factor": round(factor, 3) if _state["on"] else 1.0, "reason": reason,
-                              "min_mm": mm, "on": _state["on"], "would": round(factor, 3), "cls": r["cls"]}),
+                              "min_mm": mm, "on": _state["on"], "would": round(factor, 3), "cls": r["cls"],
+                              "pts": r["pts"], "h_mm": r["h_mm"],
+                              "slow_mm": round(SLOW_FWD * 1000), "stop_mm": round(STOP_FWD * 1000)}),
                   qos=0, retain=True)
 
     def on_message(c, u, msg):
