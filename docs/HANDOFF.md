@@ -56,10 +56,10 @@ list, and what not to trust.
    between the sensor and the governor's verdict. Raw vs verdict on a 0.30 m/s drive to 50 cm
    (`tools/tof/tof_raw_vs_verdict.py`, local `data/captures/2026-10-27_drive_*.csv`): the governor's rejected zones
    equal the raw status-not-5/6 zones in every frame -- its code does not corrupt frames; the morning's striped
-   blanks did NOT reproduce (3-5 invalid while driving). Found instead: (a) frames arrive every 0.196 s = **5 Hz,
-   not 10** -- the Pi I2C bus is at its 100 kHz default (no i2c_arm_baudrate in config.txt), and
-   rider_tof.py swallows a failed set_ranging_frequency_hz(10) silently; (b) status 9 (valid range, large pulse)
-   is 1-6 zones/frame near the wall and the governor + page reject it (VALID = 5, 6). Blind-hold fix (designed, not built): while the corridor returns almost
+   blanks did NOT reproduce (3-5 invalid while driving) -- still OPEN: repeat a stick-driven policy approach with
+   both recorders. Fixed on the way (`ba0b388`): the sensor ran at 5 Hz (I2C at its 100 kHz default) -> now
+   400 kHz, 10 Hz; status 9 (valid, large pulse) now accepted. The obstacle pane's 3D view shows the governor's
+   own points. Blind-hold fix (designed, not built): while the corridor returns almost
    nothing and the last obstacle was inside the slowdown zone, hold the last cap; say "blind" on the LCD/page.
    Policy wall stops: not decided. Why no edge stop: at ride height the sensor is
    ~6 cm up, so row 6 (the row that sees an edge in time, ~30 cm out) meets the surface at ~11 deg and goes blank
