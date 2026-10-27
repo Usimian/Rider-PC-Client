@@ -48,11 +48,14 @@ list, and what not to trust.
    ~0.25-0.29 m/s 12 cm out while the commanded speed is ~0.1 (11.2, 9.6, 0 cm = hit). **OPEN DEFECT: blind reads
    as clear.** Near the wall, on 2 of the 3 policy approaches, the sensor returned NO valid zone for seconds; the
    governor reported "none" and the cap went back to full (commanded speed crept forward to 0.19 m/s against the
-   wall). Cause UNKNOWN -- NOT a ~10 cm range limit (commit 68bdace's message says so; wrong): approach 4 read
-   valid down to 11 mm and 0 mm, and a palm reads down to ~1 cm (Marc). The capture keeps only classes, not status
-   codes; next: raw frames (d + status) facing that wall at 15/10/5/2 cm. Fix designed, not built: while the
-   corridor returns almost nothing and the last obstacle was inside the slowdown zone, hold the last cap, and say
-   "blind" on the LCD/page. Policy wall stops: not decided. Why no edge stop: at ride height the sensor is
+   wall). NOT a ~10 cm range limit (commit 68bdace's message says so; wrong). Measured 10-27 with
+   `tools/tof/tof_raw_capture.py` (local `data/captures/2026-10-27_wall_raw.csv`), stepping the robot to the same
+   wall: all 64 zones status 5 from 47 cm down to 1.9 cm; at contact 56 valid (0-13 mm) + 8 status 255. Most likely
+   the blank frames came AFTER the policy hit the wall (last valid 11 cm with the wheels still at ~0.15 m/s, then
+   2.5 s standing still, all blank = sensor pressed to the wall). Status 9 shows up in row 6 at ~45 cm; the
+   governor and page accept only 5/6. Blind-hold fix (designed, not built): while the corridor returns almost
+   nothing and the last obstacle was inside the slowdown zone, hold the last cap; say "blind" on the LCD/page.
+   Policy wall stops: not decided. Why no edge stop: at ride height the sensor is
    ~6 cm up, so row 6 (the row that sees an edge in time, ~30 cm out) meets the surface at ~11 deg and goes blank
    as the body rocks back past ~4 deg (empty corridor zones: 0.2 at 3 deg, 1.3 at 4, 1.9 at 5, 3 at 6+). The
    continuity rule (`tools/tof/tof_edge_replay.py`) called the three real edges 1.2-1.4 s early but also stopped
