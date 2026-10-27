@@ -35,7 +35,6 @@ BROKER_PORT = 1883
 
 f_s = ImageFont.truetype(FONT, 15)
 f_m = ImageFont.truetype(FONT, 20)
-f_xl = ImageFont.truetype(FONT, 25)
 f_l = ImageFont.truetype(FONT, 30)
 
 lcd = LCD_2inch.LCD_2inch()
@@ -313,8 +312,6 @@ def publish():
         "mode": g_ctrl,                 # compiled-in controller ("LQR"/"POL"), parsed from telem ctrl=; firmware picks it at build time (was derived from the removed 'polrun')
         "position": tel.get("wx", 0.0),
         "target": tel.get("ptgt", 0.0),
-        "wheel_l": tel.get("wp1", 0.0),
-        "wheel_r": tel.get("wp2", 0.0),
         "pose_x": round(tel.get("px", 0.0), 3),
         "pose_y": round(tel.get("py", 0.0), 3),
         # NOTE: roll/pitch/yaw (incl. heading) are published ONLY on rider/status/imu
@@ -461,13 +458,6 @@ def render():
     # the Pi's WiFi address, right-justified: where a phone finds the web page (home 10.0.0.x, phone hotspot 172.20.10.x)
     ip = wifi_ip()
     d.text((312 - _text_w(d, ip, f_s), 94), ip, fill=(150, 165, 205), font=f_s)
-
-    wp1 = tel.get("wp1", 0.0); wp2 = tel.get("wp2", 0.0)
-    wx = tel.get("wx", 0.0); tg = tel.get("ptgt", 0.0); err = wx - tg
-    ecol = (255, 200, 70) if abs(err) > 0.030 else (0, 255, 140)
-    # R = robot's right wheel (wp1), L = wp2  -- swapped so R sits on the right
-    d.text((10, 112), "L %+.3fm    R %+.3fm" % (wp2, wp1), fill=(255, 255, 255), font=f_xl)
-    d.text((10, 148), "Tgt %+.3fm    Err %+.3fm" % (tg, err), fill=ecol, font=f_xl)
 
     # drive source (Start-button toggle): cyan = joystick, orange = computer/MQTT -- just above CPU row
     dm_col = (80, 200, 255) if g_drivemode == "joystick" else (255, 170, 60)
