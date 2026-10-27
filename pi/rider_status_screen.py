@@ -454,7 +454,7 @@ def render():
         s_txt = "OBSTACLE %dcm" % round(sf["mm"] / 10.0)
     else:
         s_txt, s_col = "---", (110, 110, 110)                               # nothing within range
-    d.text((10, 90), s_txt, fill=s_col, font=f_m)
+    d.text((10, 96), s_txt, fill=s_col, font=f_m)
 
     # position (wheel travel since balance-on, wx) and the dead-reckoned pose x, y (px, py) -- the web page's
     # POSE numbers -- laid out like the tilt/roll/yaw row
