@@ -4,7 +4,7 @@ Read at session start. Facts live in the repo (commit messages carry the numbers
 provenance, `docs/HARDWARE.md` -> Power / Audio the hardware facts); this is only the running story, the open
 list, and what not to trust.
 
-## Where it stands (2026-10-26)
+## Where it stands (2026-10-27)
 
 - **Flashed + committed: `ppo_lb25_s4`** -- the spin shimmy fixed on the floor (spin pitch-rate RMS 3.1 / 5.3 /
   3.4 °/s by drivecap, ld8_s6 13-23). Backup `ppo_lb25_s1`. Training lever: `--lead_lambda` + a firm
@@ -19,14 +19,27 @@ list, and what not to trust.
   tipped past 25° back and forward -- balancing cut out and came back, the leg target stayed 535 both times.
 - **First command after a real power-up was lost**: ModemManager probed the ESP32 UART ~3 s after the bridge
   started. Masked (deploy does it); the firmware drops a partial line on line noise.
-- **Pi power: a bad contact in the 5 V lead**, reseated 10-21 (full-load min 4.60 -> 4.72 V, no alarms); it
-  will loosen again. The web fault item shows Pi under-voltage alarms and WiFi dropouts.
+- **Pi power: a bad contact in the 5 V lead**, reseated 10-21 (full-load min 4.60 -> 4.72 V, no alarms). **It is
+  loosening again** (kernel count per boot): 0 through 10-22 morning; 1/3/0/1 later 10-22; 12 in 1 h 45 on 10-26
+  afternoon; 10 in 20 min on 10-27, now at ~3 W peaks (was clean at 6 W). At rest the rail reads 4.94-5.06 V.
+  The web fault item shows the alarms and WiFi dropouts.
 - **WiFi:** watchdog (`rider-wifi-watchdog`); field network = Marc's iPhone hotspot (home has priority).
 - **Braking rate** (`f9fe690`, 10-26): the drive ramp brakes at `gPosDmax` 0.8 m/s² (live `posdmax`), speeds up
   at 0.4. Floor, LQR: from 0.30 m/s at rest in 0.3-0.5 s, peak 11-12 cm, 7.5-9.6° lean, no falls. The policy is
   unchanged (17-27 cm over 1.8-3 s, only 2.4-3.9° lean: it follows the commanded speed loosely). Options for
   the policy put to Marc, not chosen: make the sim reproduce the 2 Hz wobble then retrain firmer; LQR does the
   braking; leave it.
+- **ToF governor = a wall stop only** (`68bdace`, 10-27): slows from 0.40 m, stops at 0.10 m (Marc: half the old
+  0.80 / 0.20). The **table-edge stop is removed** (Marc's call): the sensor sits ~6 cm up, so the row that would
+  see an edge in time (~30 cm out) meets the surface at ~11° and goes blank as the body rocks back past ~4°;
+  every rule tried either drove off (three table runs) or stopped on solid table (`tools/tof/tof_edge_replay.py`).
+  Pitch, roll and leg height are already in every point -- a missing return has no point to correct. Edges
+  would need a small ToF looking straight down at the front. Wall floor test: LQR stopped at 9.2 cm.
+- **ToF at 10 Hz** (`ba0b388`): it ran at 5 Hz -- the Pi I2C bus was at its 100 kHz default; now
+  `i2c_arm_baudrate=400000` (runbook). Status 9 (valid range, large pulse) is now accepted. The governor
+  publishes each zone's floor-referenced point; the web obstacle pane switches its 8x8 grid for a 3D view of them.
+- **ToF tools:** `tof_raw_capture.py` (raw distances + status codes + body state), `tof_raw_vs_verdict.py`
+  (raw vs the governor, frame by frame), `wall_stop_report.py`, `tof_safety_capture.py` (verdicts).
 - **Cleanup 10-22:** the old `Rider-Robot-Controller` project is gone (folder trashed, GitHub repo deleted);
   the abandoned sim experiments and their firmware paths (balance+turn, position-aware, diff-drive) are removed.
 
@@ -41,35 +54,21 @@ list, and what not to trust.
    cloud option** (Marc, 10-26): free tier, Whisper speech-to-text + open LLMs, sub-second, already the
    news-reader fallback, and it works in the field over the phone hotspot. It sends voice/text off-site --
    Marc's explicit OK under the local-only rule. The workstation's local model is the at-home alternative.
-4. Watch the Pi under-voltage count after floor driving.
-5. **ToF: wall stop only; the edge stop is REMOVED (Marc's call, 10-27).** Walls now slow from 0.40 m and stop at
-   0.10 m (Marc asked, half the old 0.80 / 0.20) -- deployed 10-27. Floor (`tools/tof/wall_stop_report.py` on
-   `data/captures/2026-10-27_wall_stop.csv`): LQR stops at 9.2 cm; the policy does not -- its wheels are still at
-   ~0.25-0.29 m/s 12 cm out while the commanded speed is ~0.1 (11.2, 9.6, 0 cm = hit). **OPEN DEFECT: blind reads
-   as clear.** Near the wall, on 2 of the 3 policy approaches, the sensor returned NO valid zone for seconds; the
-   governor reported "none" and the cap went back to full (commanded speed crept forward to 0.19 m/s against the
-   wall). NOT a ~10 cm range limit (commit 68bdace's message says so; wrong). Measured 10-27 with
-   `tools/tof/tof_raw_capture.py` (local `data/captures/2026-10-27_wall_raw.csv`), stepping the robot to the same
-   wall: all 64 zones status 5 from 47 cm down to 1.9 cm; at contact 56 valid (0-13 mm) + 8 status 255. Cause of
-   the blank governor frames UNKNOWN. The robot did NOT hit the wall and the sensor showed no bad data (Marc, who
-   watched it); commit b9a73ff's "came after the policy hit the wall" is wrong -- my speculation. So the fault is
-   between the sensor and the governor's verdict. Raw vs verdict on a 0.30 m/s drive to 50 cm
-   (`tools/tof/tof_raw_vs_verdict.py`, local `data/captures/2026-10-27_drive_*.csv`): the governor's rejected zones
-   equal the raw status-not-5/6 zones in every frame -- its code does not corrupt frames; the morning's striped
-   blanks did NOT reproduce (3-5 invalid while driving) -- still OPEN: repeat a stick-driven policy approach with
-   both recorders. Fixed on the way (`ba0b388`): the sensor ran at 5 Hz (I2C at its 100 kHz default) -> now
-   400 kHz, 10 Hz; status 9 (valid, large pulse) now accepted. The obstacle pane's 3D view shows the governor's
-   own points. Blind-hold fix (designed, not built): while the corridor returns almost
-   nothing and the last obstacle was inside the slowdown zone, hold the last cap; say "blind" on the LCD/page.
-   Policy wall stops: not decided. Why no edge stop: at ride height the sensor is
-   ~6 cm up, so row 6 (the row that sees an edge in time, ~30 cm out) meets the surface at ~11 deg and goes blank
-   as the body rocks back past ~4 deg (empty corridor zones: 0.2 at 3 deg, 1.3 at 4, 1.9 at 5, 3 at 6+). The
-   continuity rule (`tools/tof/tof_edge_replay.py`) called the three real edges 1.2-1.4 s early but also stopped
-   while standing on solid table; gating by tilt did not cure it; row 7 alone was too late. Pitch, roll and leg
-   height ARE already in every depth point -- a missing return has no point to correct. Way forward if edges
-   matter: a small ToF looking straight down at the front (as robot vacuums do).
-6. `/home/pi/riderlog.txt` is never rotated (321 MB on 10-21). Filter on the Pi; never copy it whole over WiFi.
-7. The controller low-battery cutoff (<= 15 %, unplugged) is untested.
+4. **Pi 5 V contact** (see above): reseat it (robot off), then read the alarm count after a boot and a drive.
+   For good: solder one side of the connector (Marc's idea -- still separable).
+5. **ToF: striped blank verdicts while driving (OPEN, cause unknown).** On 2 of 3 stick-driven policy wall
+   approaches (10-27 morning, local `data/captures/2026-10-27_wall_stop.csv`) whole columns of zones came back
+   invalid, in stripes, even 1.4 m out, and near the wall the governor saw nothing and lifted the cap (commanded
+   speed crept to 0.19 m/s against the wall). Ruled out: a range limit (stepping to the wall read all 64 zones
+   to 1.9 cm), wall contact and bad sensor data (Marc watched), the governor's code (raw vs verdict match frame
+   for frame). Not reproduced by a ptgt-driven 0.30 m/s drive. That run was at 5 Hz / 100 kHz I2C -- possibly
+   related, unproven. Next: a stick-driven policy approach with `tof_raw_capture.py` + `tof_safety_capture.py`.
+6. **ToF follow-ups:** the policy does not stop for walls (wheels still ~0.25-0.29 m/s 12 cm out with the
+   commanded speed ~0.1; 11.2 / 9.6 / 0 cm = hit) -- not decided. Blind-hold (designed, not built): while the
+   corridor returns almost nothing and the last obstacle was inside the slowdown zone, hold the last cap and
+   show "blind".
+7. `/home/pi/riderlog.txt` is never rotated (321 MB on 10-21). Filter on the Pi; never copy it whole over WiFi.
+8. The controller low-battery cutoff (<= 15 %, unplugged) is untested.
 
 ## Do not trust
 
@@ -79,6 +78,9 @@ list, and what not to trust.
   whatever sets that 2 Hz mode.
 - Commit `dabc54f`'s line "after masking, a power-up took 'leghome' as its first command": that test was at
   14:24, BEFORE ModemManager was masked. No power-up has been checked since masking.
+- Commit `68bdace`'s "within ~10 cm the sensor returns nothing": wrong, it reads to contact. Commit `b9a73ff`'s
+  "the blank frames came after the policy hit the wall": my speculation, wrong (it did not hit).
+- ToF timing reasoning before `ba0b388` (10-27) assumed 10 Hz; the sensor ran at 5 Hz. Capture timestamps are real.
 - Sim spin numbers as a floor prediction (ld8_s6 6 vs floor 18; tt25_s4 3.6 vs 21). Use the floor-replay lead.
 - The sim's reversal before 10-21: it ramped smoothly through zero and never modelled the stick release.
 - The Pi's always-on telemetry log for phase or frequency at 1-5 Hz (~11 rows/s); magnitude only.
