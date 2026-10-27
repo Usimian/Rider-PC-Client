@@ -323,7 +323,7 @@ $("tofviewbtn").addEventListener("click", () => {
 
 // ---- 3D view: the governor's floor-referenced zone points (rider/safety/fwd_limit "pts", mm: forward, left,
 // up; origin on the floor under the sensor), drawn as an orthographic three-quarter view. Drag sideways to turn,
-// up/down to tilt, scroll wheel to zoom (toward the pointer), double-click to reset.
+// up/down to tilt, middle-button drag to move, scroll wheel to zoom (toward the pointer), double-click to reset.
 const D3_HOME = { az: 35, el: 28, zoom: 1, panX: 0, panY: 0 };
 const D3 = { ...D3_HOME, drag: null };   // azimuth (deg, + = behind-right), elevation (deg), zoom, pan (px) after the fit
 const D3_COL = { o: "#ff5a5a", f: "#3ecf72", d: "#ffc53d", b: "#c9a24a", h: "#7d86a8" };
@@ -414,15 +414,21 @@ function depth3d() {
 }
 const cv3 = $("depth3d");
 cv3.addEventListener("pointerdown", (ev) => {
-  D3.drag = { x: ev.clientX, y: ev.clientY, az: D3.az, el: D3.el };
+  if (ev.button === 1) ev.preventDefault();              // middle button: no browser autoscroll, it pans the view
+  D3.drag = { x: ev.clientX, y: ev.clientY, az: D3.az, el: D3.el, panX: D3.panX, panY: D3.panY, pan: ev.button === 1 };
   cv3.setPointerCapture(ev.pointerId);
 });
 cv3.addEventListener("pointermove", (ev) => {
   if (!D3.drag) return;
-  D3.az = Math.max(-170, Math.min(170, D3.drag.az + (ev.clientX - D3.drag.x) * 0.4));   // turn
-  D3.el = Math.max(2, Math.min(88, D3.drag.el + (ev.clientY - D3.drag.y) * 0.3));       // tilt: flat .. top-down
+  const dx = ev.clientX - D3.drag.x, dy = ev.clientY - D3.drag.y;
+  if (D3.drag.pan) { D3.panX = D3.drag.panX + dx; D3.panY = D3.drag.panY + dy; }          // middle drag: move
+  else {
+    D3.az = Math.max(-170, Math.min(170, D3.drag.az + dx * 0.4));                         // turn
+    D3.el = Math.max(2, Math.min(88, D3.drag.el + dy * 0.3));                             // tilt: flat .. top-down
+  }
   depth3d();
 });
+cv3.addEventListener("mousedown", (ev) => { if (ev.button === 1) ev.preventDefault(); });   // autoscroll starts here
 for (const t of ["pointerup", "pointercancel"]) cv3.addEventListener(t, () => { D3.drag = null; });
 cv3.addEventListener("wheel", (ev) => {
   ev.preventDefault();                                   // zoom the view, not the page
