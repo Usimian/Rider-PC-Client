@@ -459,6 +459,13 @@ def render():
     ip = wifi_ip()
     d.text((312 - _text_w(d, ip, f_s), 94), ip, fill=(150, 165, 205), font=f_s)
 
+    # position (wheel travel since balance-on, wx) and the dead-reckoned pose x, y (px, py) -- the web page's
+    # POSE numbers -- laid out like the tilt/roll/yaw row
+    for x, lbl, val, fmt in ((10, "position", tel.get("wx", 0.0), "%+.3fm"), (112, "pose x", tel.get("px", 0.0), "%+.2fm"),
+                             (214, "pose y", tel.get("py", 0.0), "%+.2fm")):
+        d.text((x, 122), lbl, fill=(150, 165, 205), font=f_s)
+        d.text((x, 140), fmt % val, fill=(255, 255, 255), font=f_m)
+
     # drive source (Start-button toggle): cyan = joystick, orange = computer/MQTT -- just above CPU row
     dm_col = (80, 200, 255) if g_drivemode == "joystick" else (255, 170, 60)
     d.text((10, 186), "DRIVE: %s" % g_drivemode.upper(), fill=dm_col, font=f_m)
