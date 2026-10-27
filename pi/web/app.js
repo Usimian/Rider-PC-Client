@@ -82,7 +82,7 @@ function status(s) {
     "DS4 controller connected" + (cb == null ? "" : `, battery ${cb} %` + (s.controller_charging ? " (charging)" : ""));
   set("ctrl", s.mode === "POL" ? "POLICY" : s.mode, s.mode === "POL" ? "pol" : "lqr");
   set("bal", s.roll_balance_enabled ? "ON" : "off", s.roll_balance_enabled ? "on" : "off");
-  set("pos", m(s.position)); set("tgt", m(s.target));
+  set("pos", m(s.position));
   set("xy", `${Number(s.pose_x).toFixed(2)}, ${Number(s.pose_y).toFixed(2)} m`);
   set("cpu", `${Math.round(s.cpu_percent)} %`);
   set("temp", `${Number(s.cpu_temp).toFixed(0)} °C`, s.cpu_temp >= 80 ? "num bad" : s.cpu_temp >= 70 ? "num warn" : "num");
