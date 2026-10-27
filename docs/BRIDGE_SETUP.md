@@ -18,7 +18,7 @@ Workstation GUI / tools/diag/rider_cmd.py ──MQTT──► Pi (mosquitto) ─
    rider-joystick    rider_controller.py    — DS4 → drive/turn commands
    rider-camera      rider_camera.py        — CSI camera, on-demand image responder
    rider-tof         rider_tof.py           — VL53L5CX 8×8 frames  (venv: ~/tofvenv)
-   rider-tof-safety  rider_tof_safety.py    — floor-referenced obstacle/cliff → forward cap
+   rider-tof-safety  rider_tof_safety.py    — floor-referenced obstacle stop → forward cap (no edge stop)
    rider-recorder    mosquitto_sub          — always-on telem log → /home/pi/riderlog.txt
 ```
 

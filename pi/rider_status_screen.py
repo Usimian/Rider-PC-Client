@@ -77,7 +77,7 @@ reset_last = 0.0                # reset last-press time (debounce)
 
 tel = {}
 cmd_q = queue.Queue()           # inbound MQTT -> ESP32 line commands
-# forward safety governor state (rider/safety/fwd_limit): obstacle/edge distance ahead
+# forward safety governor state (rider/safety/fwd_limit): obstacle distance ahead
 g_safety = {"reason": "clear", "mm": -1, "factor": 1.0, "on": False, "t": 0.0}
 
 
@@ -440,22 +440,21 @@ def render():
     if lev_on:
         d.text((112 + _text_w(d, "roll", f_s) + 6, 52), "LVL", fill=(0, 255, 140), font=f_s)
 
-    # forward path (ToF governor): OBSTACLE/EDGE distance ahead, or CLEAR. Red = stopped
-    # (factor 0, <=~20cm), amber = slowing, green = clear, grey = governor offline (stale).
+    # forward path (ToF governor): OBSTACLE distance ahead, or CLEAR. Red = stopped
+    # (factor 0, <=~10cm), amber = slowing, green = clear, grey = governor offline (stale).
     # Limiting switched OFF (web page): the distance still shows, in grey, prefixed "off".
     sf = g_safety
     if time.time() - sf["t"] > 3.0:
         s_txt, s_col = "FWD --", (110, 110, 110)                            # governor offline
     elif not sf["on"]:
-        kind = {"obstacle": "OBST", "cliff": "EDGE"}.get(sf["reason"])
-        s_txt = "ToF off" + (" %s %dcm" % (kind, round(sf["mm"] / 10.0)) if kind and sf["mm"] >= 0 else "")
+        obst = sf["reason"] == "obstacle" and sf["mm"] >= 0
+        s_txt = "ToF off" + (" OBST %dcm" % round(sf["mm"] / 10.0) if obst else "")
         s_col = (110, 110, 110)
-    elif sf["reason"] in ("obstacle", "cliff") and sf["mm"] >= 0:
-        kind = "OBSTACLE" if sf["reason"] == "obstacle" else "EDGE"
-        # green = clear ahead, amber = slowing, red = stopped (<=~20cm)
+    elif sf["reason"] == "obstacle" and sf["mm"] >= 0:
+        # green = clear ahead, amber = slowing, red = stopped (<=~10cm)
         s_col = (255, 90, 90) if sf["factor"] <= 0.001 else \
                 (255, 170, 60) if sf["factor"] < 0.999 else (0, 255, 140)
-        s_txt = "%s %dcm" % (kind, round(sf["mm"] / 10.0))
+        s_txt = "OBSTACLE %dcm" % round(sf["mm"] / 10.0)
     else:
         s_txt, s_col = "---", (110, 110, 110)                               # nothing within range
     d.text((10, 90), s_txt, fill=s_col, font=f_m)

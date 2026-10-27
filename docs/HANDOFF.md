@@ -42,19 +42,20 @@ list, and what not to trust.
    news-reader fallback, and it works in the field over the phone hotspot. It sends voice/text off-site --
    Marc's explicit OK under the local-only rule. The workstation's local model is the at-home alternative.
 4. Watch the Pi under-voltage count after floor driving.
-5. **ToF edge stop: ACTIVE again (Marc, 10-26 evening) -- a rule change is proposed, awaiting his go.**
-   Third table run (LQR, stop ON, stick held full): the safety service braked only ~10-12 cm out and it went
-   over (Marc caught it). Walls stop well. Why, from the per-zone classes of the three table drives
-   (`data/captures/2026-10-26_tof_*.csv`, replay `tools/tof/tof_edge_replay.py`): the old rule takes the edge as
-   the FARTHEST table-height return (a return ~1.9 m out said "table continues" -> no slowdown), and it flickers
-   stop/clear near the edge (each "clear" re-sends full speed). **Continuity rule** (Marc: what matters is the
-   table continuing to the edge): corridor column with the near row (7) on the surface whose next row out (6) is
-   d/b/. = ends; >= 2 of the 4 corridor columns, 2 frames -> edge 1.18 / 1.37 / 1.37 s before the drop (old: 0.78
-   letting go / 1.57 flickering / 0.40 = the wall rule). Needed ~0.7 s (0.3 react + 0.4 LQR stop). Row 5 as well
-   reads "ends" all the time on that table -- unusable. **Proposed change** (rider_tof_safety.py): continuity rule;
-   edge = hard stop, latched until continuous for 1 s; walls slow from 0.40 m and stop at 0.10 m (Marc asked,
-   half the old 0.80 / 0.20, both controllers). Then: open floor first (false stops, wall distance), then the
-   table edge, `tof_safety_capture.py` running each time. Open-floor behaviour of the rule is unknown.
+5. **ToF: wall stop only; the edge stop is REMOVED (Marc's call, 10-27).** Walls now slow from 0.40 m and stop at
+   0.10 m (Marc asked, half the old 0.80 / 0.20) -- deployed 10-27. Floor (`tools/tof/wall_stop_report.py` on
+   `data/captures/2026-10-27_wall_stop.csv`): LQR stops at 9.2 cm; the policy does not -- its wheels are still at
+   ~0.25-0.29 m/s 12 cm out while the commanded speed is ~0.1 (11.2, 9.6, 0 cm = hit). **OPEN DEFECT: blind reads
+   as clear.** At ~10 cm from a wall the sensor returns nothing at all; the governor reports "none" and the cap
+   goes back to full (seen: commanded speed crept forward to 0.19 m/s against the wall). Fix designed, not built:
+   while the corridor returns almost nothing and the last obstacle was inside the slowdown zone, hold the last
+   cap, and say "blind" on the LCD/page. Policy wall stops: not decided. Why no edge stop: at ride height the sensor is
+   ~6 cm up, so row 6 (the row that sees an edge in time, ~30 cm out) meets the surface at ~11 deg and goes blank
+   as the body rocks back past ~4 deg (empty corridor zones: 0.2 at 3 deg, 1.3 at 4, 1.9 at 5, 3 at 6+). The
+   continuity rule (`tools/tof/tof_edge_replay.py`) called the three real edges 1.2-1.4 s early but also stopped
+   while standing on solid table; gating by tilt did not cure it; row 7 alone was too late. Pitch, roll and leg
+   height ARE already in every depth point -- a missing return has no point to correct. Way forward if edges
+   matter: a small ToF looking straight down at the front (as robot vacuums do).
 6. `/home/pi/riderlog.txt` is never rotated (321 MB on 10-21). Filter on the Pi; never copy it whole over WiFi.
 7. The controller low-battery cutoff (<= 15 %, unplugged) is untested.
 

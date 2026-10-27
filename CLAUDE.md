@@ -75,8 +75,9 @@ It runs these systemd services (deployed by `pi/deploy_bridge.sh`):
 - **rider-camera** (`pi/rider_camera.py`) — CSI camera (OV5647/picamera2) → MQTT image responder, on-demand.
 - **rider-tof** (`pi/rider_tof.py`) — VL53L5CX 8×8 ToF frames → `rider/tof`. Runs on the **`tofvenv`**
   venv (not xgovenv): it needs `vl53l5cx-ctypes` + `smbus2`.
-- **rider-tof-safety** (`pi/rider_tof_safety.py`) — floor-referenced obstacle/cliff governor →
-  `rider/safety/fwd_limit`; the joystick service caps **forward** drive by it (reverse never limited).
+- **rider-tof-safety** (`pi/rider_tof_safety.py`) — floor-referenced obstacle governor (slows from 40 cm,
+  stops at 10 cm) → `rider/safety/fwd_limit`; the joystick service caps **forward** drive by it (reverse
+  never limited). **No table-edge stop**: removed 2026-10-27, the sensor sits too low to see an edge reliably.
   Always running, but it only limits while switched ON by the retained `rider/safety/enable {"on"}`
   (web page button); off — the default — it reports what it sees and publishes factor 1.0.
 - **rider-recorder** — bare `mosquitto_sub` unit logging `rider/debug/telem` + `rider/debug/dcap` + `rider/debug/leg` + `rider/debug/unknown`

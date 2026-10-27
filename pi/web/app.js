@@ -1,5 +1,5 @@
 // Rider control page -- steps 2-4: status bar, pose, stats, E-STOP, balance card, legs (docs/WEB_UI_DESIGN.md);
-// + the ToF card (8x8 view, obstacle/edge stop switch).
+// + the ToF card (8x8 view, obstacle stop switch).
 // Rules: the page holds no robot state -- every control shows and decides from the robot's own
 // messages (the top speed is a RETAINED broker message, so every open page sees the same value) --
 // and it sends nothing on load or close.
@@ -256,7 +256,7 @@ $("cambtn").addEventListener("click", () => {
   else { camReq = null; if (camTimer) { clearTimeout(camTimer); camTimer = null; } $("cam").removeAttribute("src"); set("caminfo", ""); }
 });
 
-// ---- obstacles (ToF): the 8x8 view + the obstacle/edge stop switch ----
+// ---- obstacles (ToF): the 8x8 view + the obstacle stop switch ----
 // Distances come from the sensor (rider/tof, ~10 Hz); the zone classes, what is ahead and whether the
 // stop is ON come from the governor (rider/safety/fwd_limit, rider_tof_safety.py) -- robot truth, as
 // for every other control. The switch is the RETAINED rider/safety/enable {"on"}: the governor limits
@@ -288,12 +288,10 @@ function tofShow() {
   $("tofgrid").classList.toggle("stale", Date.now() - tofT > 2000);
   const b = $("tofbtn"), ok = safeLive();
   b.disabled = !ok;
-  b.textContent = "Obstacle & edge stop: " + (!ok ? "–" : SAFE.on ? "ON" : "off");
+  b.textContent = "Obstacle stop: " + (!ok ? "–" : SAFE.on ? "ON" : "off");
   b.className = "btn" + (ok && SAFE.on ? " active" : "");
   if (!ok) { set("tofstate", "ToF governor not running", "off"); return; }
-  const what = SAFE.reason === "obstacle" ? "obstacle" : SAFE.reason === "cliff" ? "table edge" : null;
-  const dist = !what ? "clear" : SAFE.min_mm >= 0 ? `${what} ${Math.round(SAFE.min_mm / 10)} cm`
-             : `${what} — no floor ahead`;
+  const dist = SAFE.reason === "obstacle" && SAFE.min_mm >= 0 ? `obstacle ${Math.round(SAFE.min_mm / 10)} cm` : "clear";
   const lim = SAFE.on ? Number(SAFE.factor) : Number(SAFE.would);
   const pct = `${Math.round(100 * lim)} %`;
   const txt = dist + (lim < 0.999 ? (SAFE.on ? ` — forward speed capped at ${pct}` : ` — would cap forward at ${pct}`) : "");

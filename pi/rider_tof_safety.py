@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""ToF safety governor (runs on the Pi) -- floor-referenced obstacle + cliff.
+"""ToF safety governor (runs on the Pi) -- floor-referenced obstacle stop.
 
 Subscribes to the VL53L5CX frames (rider/tof) and the body state
 (rider/debug/telem: roll, th=pitch, legR/legL), projects every zone into a
 FLOOR-REFERENCED frame using the calibrated kinematic model, and publishes a
 FORWARD-speed factor on rider/safety/fwd_limit:
 
-    {"factor": 0.0..1.0, "reason": "none|obstacle|cliff", "min_mm": <fwd dist>,
+    {"factor": 0.0..1.0, "reason": "none|obstacle", "min_mm": <fwd dist>,
      "on": bool, "would": 0.0..1.0, "cls": "<64 zone classes>"}
 
 The DS4 controller (rider_controller.py) multiplies its FORWARD drive by factor
--- reverse is never limited, so you can always back out of a wall OR off a cliff.
+-- reverse is never limited, so you can always back out from a wall.
 
 ON/OFF (2026-10-19): the service always runs and always evaluates, but it only LIMITS when switched
 on by the RETAINED message rider/safety/enable {"on": true|false} (the web page's button). Off --
@@ -19,12 +19,16 @@ sees ("would" = the factor it would apply, "reason"/"min_mm", and the per-zone "
 and LCD can show it. cls: one char per zone, row-major (row 0 = top/far, column 0 = robot's left):
 'o' obstacle, 'f' floor, 'd' floor dropped away, 'h' overhead, 'b' just below floor, '.' no return.
 
-Two stops, both forward-only:
+One stop, forward-only:
   * OBSTACLE -- a return standing ABOVE the floor (z in [OBS_Z_MIN, OBS_Z_MAX])
     in the drive corridor: cap forward, tapering to 0 as it gets close.
-  * CLIFF    -- near floor present (row 7 reads z~0: we're on a surface) AND the
-    forward floor has vanished (rows 5-6 return nothing / far below floor): the
-    surface ends ahead -> force factor 0.
+
+No table-edge stop (removed 2026-10-27). At ride height the sensor is ~6 cm above the surface, so the rows that
+would see an edge in time (~30 cm out) meet the surface at ~11 deg; as the body rocks back a few degrees they stop
+returning, on solid table too. Every edge rule tried either let the robot drive off (it did, three table runs) or
+stopped it while standing on solid table (replays: tools/tof/tof_edge_replay.py, captures
+data/captures/2026-10-26_tof_*.csv). A wall faces the sensor and returns at any tilt. Edges need a sensor that
+looks straight down at the front, as robot vacuums do.
 
 Floor leveling/height is corrected per-frame from the IMU + leg height, so the
 balance dance and ride height don't move the floor. Model constants come from
@@ -55,17 +59,12 @@ OBS_Z_MIN = 0.05           # m above floor: obstacle floor. MUST equal FLOOR_TOL
                            # floor-detector rejects as "too high to be floor" in the corridor is an obstacle.
                            # A gap here (OBS_Z_MIN > FLOOR_TOL) makes short objects (that band tall) invisible.
 OBS_Z_MAX = 0.50           # m above floor: ignore stuff overhead
-STOP_FWD = 0.20            # m forward: full stop at/under this
-SLOW_FWD = 0.80            # m forward: full speed beyond; linear taper between
+STOP_FWD = 0.10            # m forward: full stop at/under this (was 0.20; Marc 10-27: half as close)
+SLOW_FWD = 0.40            # m forward: full speed beyond; linear taper between (was 0.80)
 
-# --- cliff detection ---
-NEAR_ROWS = (7,)           # reliable near-floor band (~0.25 m ahead)
-FWD_ROWS = (5, 6)          # forward floor band (~0.5 m ahead) -- vanishes first at an edge
+# --- zone classes (cls, for the page's 8x8 view) ---
 FLOOR_TOL = 0.05           # m: |z| under this counts as "floor"
-CLIFF_DROP = 0.08          # m: z below -this counts as "floor gone" (dropped away)
-NEAR_MIN = 2               # >= this many near-floor zones valid -> we're on a surface
-FWD_MISSING_MIN = 4        # >= this many forward-floor zones gone -> edge ahead
-CLIFF_DEBOUNCE = 2         # consecutive cliff frames before asserting (anti-glitch)
+DROP_Z = 0.08              # m: z below -this reads 'd' (floor dropped away), between -FLOOR_TOL and it 'b'
 
 VALID = (5, 6)             # VL53L5CX target_status: 5 = valid, 6 = 50% valid
 
@@ -98,7 +97,7 @@ def _mv(M, v):
 
 R_MOUNT = _mm(_Rx(math.radians(BETA_ROLL)), _Ry(math.radians(BETA_PITCH)))
 
-_state = {"roll": 0.0, "pitch": 0.0, "legidx": LEG_IDX_DEFAULT, "cliff_run": 0, "on": False}
+_state = {"roll": 0.0, "pitch": 0.0, "legidx": LEG_IDX_DEFAULT, "on": False}
 _running = True
 
 
@@ -116,17 +115,14 @@ def factor_from_fwd(x):
 
 
 def evaluate(d, s, roll, pitch, legidx):
-    """Floor-reference one frame; return per-frame obstacle/cliff signals.
+    """Floor-reference one frame; return the nearest obstacle ahead and the zone classes.
     Pure (no state) so it can be replayed against captured frames in tests."""
     Ri = _mm(_Rx(math.radians(ROLL_SIGN * roll)), _Ry(math.radians(PITCH_SIGN * pitch)))
     R = _mm(Ri, R_MOUNT)
     H = H_A * legidx + H_C
 
     nearest_obs = None          # nearest obstacle forward distance (m)
-    near_floor = 0              # near-band zones reading floor
-    fwd_missing = 0             # forward-band zones with floor gone
-    floor_edge = None           # farthest forward dist where floor is still seen (= the edge)
-    cls = ["."] * 64            # per-zone class, all 64 zones (for display); the stops use COLS only
+    cls = ["."] * 64            # per-zone class, all 64 zones (for display); the stop uses COLS only
 
     for i in range(8):
         for j in range(8):
@@ -136,7 +132,7 @@ def evaluate(d, s, roll, pitch, legidx):
                 p = _mv(R, (rng * RAY[i][j][0], rng * RAY[i][j][1], rng * RAY[i][j][2]))
                 z = p[2] + H
                 if z <= -FLOOR_TOL:
-                    cls[k] = "d" if z < -CLIFF_DROP else "b"
+                    cls[k] = "d" if z < -DROP_Z else "b"
                 elif z < FLOOR_TOL:
                     cls[k] = "f"
                 else:
@@ -152,18 +148,8 @@ def evaluate(d, s, roll, pitch, legidx):
                 if OBS_Z_MIN < z < OBS_Z_MAX and fwd > 0:
                     if nearest_obs is None or fwd < nearest_obs:
                         nearest_obs = fwd
-                if abs(z) < FLOOR_TOL and fwd > 0:          # this zone sees floor
-                    if floor_edge is None or fwd > floor_edge:
-                        floor_edge = fwd                    # push the visible-floor edge outward
-                    if i in NEAR_ROWS:
-                        near_floor += 1
-                elif i in FWD_ROWS and z < -CLIFF_DROP:
-                    fwd_missing += 1           # returned, but far below floor = dropped away
-            elif i in FWD_ROWS:
-                fwd_missing += 1               # no return where forward floor should be
 
-    return {"nearest_obs": nearest_obs, "near_floor": near_floor,
-            "fwd_missing": fwd_missing, "floor_edge": floor_edge, "cls": "".join(cls)}
+    return {"nearest_obs": nearest_obs, "cls": "".join(cls)}
 
 
 def main():
@@ -189,30 +175,11 @@ def main():
 
     def on_tof(c, f):
         r = evaluate(f["d"], f["s"], _state["roll"], _state["pitch"], _state["legidx"])
-        near, miss, edge, obs = r["near_floor"], r["fwd_missing"], r["floor_edge"], r["nearest_obs"]
-
-        # a drop-off is in view when the forward floor is gone (open air ahead, debounced)
-        gap = miss >= FWD_MISSING_MIN
-        _state["cliff_run"] = _state["cliff_run"] + 1 if gap else 0
-        armed = _state["cliff_run"] >= CLIFF_DEBOUNCE
-
-        # cliff: taper to stop ~STOP_FWD short of where the visible floor ends (the edge)
-        if armed and near < NEAR_MIN:
-            cliff_factor = 0.0                       # no ground under us + gap ahead -> at/over edge
-        elif armed and edge is not None:
-            cliff_factor = factor_from_fwd(edge)     # stop STOP_FWD before the floor edge
-        else:
-            cliff_factor = 1.0
-
-        obs_factor = factor_from_fwd(obs) if obs is not None else 1.0
-
-        # --- combine: forward-only, most restrictive wins ---
-        factor = min(cliff_factor, obs_factor)
-        # report the nearest thing ahead (the active limiter, else nearest obstacle/edge),
-        # at ANY distance -- the screen shows the live distance, not just when limiting.
-        if armed and cliff_factor <= obs_factor:
-            reason, mm = "cliff", (int(edge * 1000) if edge is not None else -1)
-        elif obs is not None:
+        obs = r["nearest_obs"]
+        factor = factor_from_fwd(obs) if obs is not None else 1.0     # forward-only
+        # report the nearest obstacle ahead at ANY distance -- the screen shows the live distance,
+        # not just when limiting.
+        if obs is not None:
             reason, mm = "obstacle", int(obs * 1000)
         else:
             reason, mm = "none", -1

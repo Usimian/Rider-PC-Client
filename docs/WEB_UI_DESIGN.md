@@ -58,7 +58,7 @@ bus (see the pairing plan in the Hover project).
 | **Balance on/off** | `rider/control/line` `en 1` / `en 0` | toggles by the live `roll_balance_enabled` |
 | **Roll Balance** (leveling) | `level 1` / `level 0` | by live `roll_leveling_enabled` (as the fixed Tk GUI) |
 | **Controller** POLICY / LQR | `ctrl 0` / `ctrl 1` | greyed out while balancing; the firmware refuses it anyway |
-| **Obstacle & edge stop** | `rider/safety/enable` `{"on": bool}`, **retained** | toggles by the governor's reported `on`; off = it reports but never limits |
+| **Obstacle stop** (edge stop removed 10-27) | `rider/safety/enable` `{"on": bool}`, **retained** | toggles by the governor's reported `on`; off = it reports but never limits |
 | **Height ▲ ▼** (hold) | `legrate ±50` every 100 ms while held, `legrate 0` on release | the firmware stops the legs if the 100 ms heartbeat stops (300 ms timeout) — a closed tab can't leave legs moving |
 | **Ride height** | `leghome` | same as DS4 R3 |
 | **Top speed** slider | `posvmax v` + `posvmaxb v` (m/s) | caps full stick for both controllers; replaces the dead Tk speed slider |
@@ -120,7 +120,7 @@ Narrow screens (phone) stack the columns: status bar, camera, balance, legs, det
 2. **Status bar + pose + E-stop** (read-only except E-stop).
 3. **Balance card:** Balance, Roll Balance, Controller, Top speed, Reset position.
 4. **Legs:** hold-to-move height + ride height (verify the heartbeat stop by closing the tab mid-move).
-5. **Camera v1**, then ToF heat-map and the system buttons. (ToF card + obstacle/edge stop switch
+5. **Camera v1**, then ToF heat-map and the system buttons. (ToF card + obstacle stop switch
    done first, 2026-10-19.)
 6. **Retire the Tk GUI** once Marc has used the page for a while: delete `gui/` and
    `start_gui.sh`, purge references (no dead code).
