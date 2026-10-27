@@ -423,7 +423,7 @@ cv3.addEventListener("pointermove", (ev) => {
   const dx = ev.clientX - D3.drag.x, dy = ev.clientY - D3.drag.y;
   if (D3.drag.pan) { D3.panX = D3.drag.panX + dx; D3.panY = D3.drag.panY + dy; }          // middle drag: move
   else {
-    D3.az = Math.max(-170, Math.min(170, D3.drag.az + dx * 0.4));                         // turn
+    D3.az = Math.max(-170, Math.min(170, D3.drag.az - dx * 0.4));                         // turn: scene follows the drag
     D3.el = Math.max(2, Math.min(88, D3.drag.el + dy * 0.3));                             // tilt: flat .. top-down
   }
   depth3d();
