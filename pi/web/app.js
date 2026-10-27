@@ -324,7 +324,7 @@ $("tofviewbtn").addEventListener("click", () => {
 
 // ---- 3D view: the governor's floor-referenced zone points (rider/safety/fwd_limit "pts", mm: forward, left,
 // up; origin on the floor under the sensor), drawn as an orthographic three-quarter view. Drag sideways to turn,
-// up/down to tilt, middle-button drag to move, scroll wheel or two-finger pinch to zoom, Reset view button (or a
+// up/down to tilt, middle-button drag to move, scroll wheel or two-finger pinch to zoom, Reset button (or a
 // mouse double-click) to reset.
 const D3_HOME = { az: 35, el: 28, zoom: 1, panX: 0, panY: 0 };
 const D3 = { ...D3_HOME, drag: null };   // azimuth (deg, + = behind-right), elevation (deg), zoom, pan (px) after the fit
