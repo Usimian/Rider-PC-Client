@@ -411,7 +411,7 @@ function depth3d() {
     const col = D3_COL[p.c] || "#e8ecf8";
     if (p.c === "o") { g.strokeStyle = col; g.globalAlpha = .45; path([[p.x, p.y, 0], [p.x, p.y, p.z]]); g.stroke(); g.globalAlpha = 1; }
     const [u, v] = P(p.x, p.y, p.z);
-    g.fillStyle = col; g.beginPath(); g.arc(u, v, 3.5, 0, 2 * Math.PI); g.fill();
+    g.fillStyle = col; g.beginPath(); g.arc(u, v, 2.8, 0, 2 * Math.PI); g.fill();
   }
 }
 const cv3 = $("depth3d");
