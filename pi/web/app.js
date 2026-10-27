@@ -313,6 +313,7 @@ function showTofView() {
   $("tofviewgrid").hidden = view3d;
   $("tofview3d").hidden = !view3d;
   $("tofviewbtn").textContent = view3d ? "Grid view" : "3D view";
+  $("tofresetbtn").hidden = !view3d;
   if (view3d) depth3d();
 }
 $("tofviewbtn").addEventListener("click", () => {
@@ -323,7 +324,8 @@ $("tofviewbtn").addEventListener("click", () => {
 
 // ---- 3D view: the governor's floor-referenced zone points (rider/safety/fwd_limit "pts", mm: forward, left,
 // up; origin on the floor under the sensor), drawn as an orthographic three-quarter view. Drag sideways to turn,
-// up/down to tilt, middle-button drag to move, scroll wheel to zoom (toward the pointer), double-click to reset.
+// up/down to tilt, middle-button drag to move, scroll wheel or two-finger pinch to zoom, Reset view button (or a
+// mouse double-click) to reset.
 const D3_HOME = { az: 35, el: 28, zoom: 1, panX: 0, panY: 0 };
 const D3 = { ...D3_HOME, drag: null };   // azimuth (deg, + = behind-right), elevation (deg), zoom, pan (px) after the fit
 const D3_COL = { o: "#ff5a5a", f: "#3ecf72", d: "#ffc53d", b: "#c9a24a", h: "#7d86a8" };
@@ -426,6 +428,7 @@ const startDrag = (x, y, pan) => { D3.drag = { x, y, az: D3.az, el: D3.el, panX:
 // phone: touches by pointerId; two fingers = pinch to zoom + move, anchored at the fingers' midpoint
 const touches = new Map();
 let pinch = null;
+const resetView = () => { Object.assign(D3, D3_HOME); depth3d(); };
 const twoFingers = () => {
   const [a, b] = [...touches.values()];
   return { mid: fromCentre((a.x + b.x) / 2, (a.y + b.y) / 2), dist: Math.hypot(a.x - b.x, a.y - b.y) || 1 };
@@ -479,6 +482,7 @@ cv3.addEventListener("wheel", (ev) => {
   zoomAt(D3.zoom, clampZoom(D3.zoom * Math.exp(-ev.deltaY * 0.0015)), m, m, [D3.panX, D3.panY]);
   depth3d();
 }, { passive: false });
-cv3.addEventListener("dblclick", () => { Object.assign(D3, D3_HOME); depth3d(); });
+cv3.addEventListener("dblclick", resetView);   // mouse only: phones send no dblclick here (the view takes all touch)
+$("tofresetbtn").addEventListener("click", resetView);
 new ResizeObserver(() => depth3d()).observe(cv3);
 showTofView();

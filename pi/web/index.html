@@ -94,6 +94,7 @@
     <div class="row">
       <button class="btn" id="tofbtn" disabled title="Forward speed is capped near an obstacle (slows from 40 cm, stops at 10 cm). It does not see table edges. Reverse is never limited.">Obstacle stop: –</button>
       <button class="btn" id="tofviewbtn" title="Switch between the sensor's 8 × 8 grid and the 3D view">3D view</button>
+      <button class="btn" id="tofresetbtn" hidden title="Back to the default angle and zoom">Reset view</button>
     </div>
     <div class="row"><span class="k">ahead</span><span id="tofstate">–</span></div>
     <div id="tofviewgrid">
@@ -105,11 +106,11 @@
         (the columns the stop uses).</p>
     </div>
     <div id="tofview3d" hidden>
-      <canvas id="depth3d" title="Drag to turn and tilt, middle-drag to move, scroll to zoom, double-click to reset"></canvas>
+      <canvas id="depth3d" title="Drag to turn and tilt, middle-drag to move, scroll to zoom"></canvas>
       <p class="hint">Each sensor zone as a point in the room, corrected for pitch, roll and leg height: the same
         points the obstacle stop decides from. <span class="bad">Obstacle</span> (with a stalk to the floor),
         <span class="on">floor</span>, <span class="warn">floor dropped away</span>, grey = overhead. Grid = 10 cm
-        on the floor; the shaded lane is the drive path: amber = slowing, red = stopping. Drag sideways to turn, up/down to tilt; middle-button drag moves it; scroll to zoom; double-click resets. Phone: one finger turns/tilts, two fingers pinch to zoom and move.</p>
+        on the floor; the shaded lane is the drive path: amber = slowing, red = stopping. Drag sideways to turn, up/down to tilt; middle-button drag moves it; scroll to zoom. Phone: one finger turns/tilts, two fingers pinch to zoom and move. Reset view (or a mouse double-click) goes back to the start.</p>
     </div>
   </section>
 </main>
