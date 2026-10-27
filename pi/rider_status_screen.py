@@ -455,9 +455,6 @@ def render():
     else:
         s_txt, s_col = "---", (110, 110, 110)                               # nothing within range
     d.text((10, 90), s_txt, fill=s_col, font=f_m)
-    # the Pi's WiFi address, right-justified: where a phone finds the web page (home 10.0.0.x, phone hotspot 172.20.10.x)
-    ip = wifi_ip()
-    d.text((312 - _text_w(d, ip, f_s), 94), ip, fill=(150, 165, 205), font=f_s)
 
     # position (wheel travel since balance-on, wx) and the dead-reckoned pose x, y (px, py) -- the web page's
     # POSE numbers -- laid out like the tilt/roll/yaw row
@@ -466,13 +463,19 @@ def render():
         d.text((x, 122), lbl, fill=(150, 165, 205), font=f_s)
         d.text((x, 140), fmt % val, fill=(255, 255, 255), font=f_m)
 
-    # drive source (Start-button toggle): cyan = joystick, orange = computer/MQTT -- just above CPU row
+    # bottom line, just above the CPU row: drive source (Start-button toggle; cyan = JOYSTICK, orange = COMPUTER)
+    # left, active controller (POLICY green / LQR purple) right, and between them the Pi's WiFi address --
+    # where a phone finds the web page (home 10.0.0.x, phone hotspot 172.20.10.x)
+    dm_txt = g_drivemode.upper()
     dm_col = (80, 200, 255) if g_drivemode == "joystick" else (255, 170, 60)
-    d.text((10, 186), "DRIVE: %s" % g_drivemode.upper(), fill=dm_col, font=f_m)
-    # active controller (compile-time build), right-justified on the same line: POLICY (green) / LQR (purple)
+    d.text((10, 186), dm_txt, fill=dm_col, font=f_m)
     ctrl_disp = {"POL": "POLICY", "LQR": "LQR"}.get(g_ctrl, g_ctrl)
     ctrl_col = (150, 220, 150) if g_ctrl == "POL" else (190, 170, 255)
-    d.text((312 - _text_w(d, ctrl_disp, f_m), 186), ctrl_disp, fill=ctrl_col, font=f_m)
+    ctrl_x = 312 - _text_w(d, ctrl_disp, f_m)
+    d.text((ctrl_x, 186), ctrl_disp, fill=ctrl_col, font=f_m)
+    ip = wifi_ip()
+    gap_l = 10 + _text_w(d, dm_txt, f_m)
+    d.text((int((gap_l + ctrl_x - _text_w(d, ip, f_s)) / 2), 190), ip, fill=(150, 165, 205), font=f_s)
 
     cpu = psutil.cpu_percent(); temp = cpu_temp_c(); pw = cm5_power_w(); ghz = cpu_ghz()
     dim = (170, 195, 235)
