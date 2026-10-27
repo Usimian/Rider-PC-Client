@@ -291,7 +291,7 @@ function tofShow() {
   $("depth3d").classList.toggle("stale", !safeLive());
   const b = $("tofbtn"), ok = safeLive();
   b.disabled = !ok;
-  b.textContent = "Obstacle stop: " + (!ok ? "–" : SAFE.on ? "ON" : "off");
+  b.textContent = "Obstacle: " + (!ok ? "–" : SAFE.on ? "ON" : "off");
   b.className = "btn" + (ok && SAFE.on ? " active" : "");
   if (!ok) { set("tofstate", "ToF governor not running", "off"); return; }
   const dist = SAFE.reason === "obstacle" && SAFE.min_mm >= 0 ? `obstacle ${Math.round(SAFE.min_mm / 10)} cm` : "clear";
