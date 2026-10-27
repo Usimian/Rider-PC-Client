@@ -4,7 +4,7 @@ Read at session start. Facts live in the repo (commit messages carry the numbers
 provenance, `docs/HARDWARE.md` -> Power / Audio the hardware facts); this is only the running story, the open
 list, and what not to trust.
 
-## Where it stands (2026-10-22)
+## Where it stands (2026-10-26)
 
 - **Flashed + committed: `ppo_lb25_s4`** -- the spin shimmy fixed on the floor (spin pitch-rate RMS 3.1 / 5.3 /
   3.4 °/s by drivecap, ld8_s6 13-23). Backup `ppo_lb25_s1`. Training lever: `--lead_lambda` + a firm
@@ -22,6 +22,11 @@ list, and what not to trust.
 - **Pi power: a bad contact in the 5 V lead**, reseated 10-21 (full-load min 4.60 -> 4.72 V, no alarms); it
   will loosen again. The web fault item shows Pi under-voltage alarms and WiFi dropouts.
 - **WiFi:** watchdog (`rider-wifi-watchdog`); field network = Marc's iPhone hotspot (home has priority).
+- **Braking rate** (`f9fe690`, 10-26): the drive ramp brakes at `gPosDmax` 0.8 m/s² (live `posdmax`), speeds up
+  at 0.4. Floor, LQR: from 0.30 m/s at rest in 0.3-0.5 s, peak 11-12 cm, 7.5-9.6° lean, no falls. The policy is
+  unchanged (17-27 cm over 1.8-3 s, only 2.4-3.9° lean: it follows the commanded speed loosely). Options for
+  the policy put to Marc, not chosen: make the sim reproduce the 2 Hz wobble then retrain firmer; LQR does the
+  braking; leave it.
 - **Cleanup 10-22:** the old `Rider-Robot-Controller` project is gone (folder trashed, GitHub repo deleted);
   the abandoned sim experiments and their firmware paths (balance+turn, position-aware, diff-drive) are removed.
 
@@ -37,14 +42,19 @@ list, and what not to trust.
    news-reader fallback, and it works in the field over the phone hotspot. It sends voice/text off-site --
    Marc's explicit OK under the local-only rule. The workstation's local model is the at-home alternative.
 4. Watch the Pi under-voltage count after floor driving.
-5. **ToF obstacle/edge stop: PARKED, switched OFF (Marc's call to me, 10-26).** Two table runs: with it off,
-   the edge was called only ~23 cm / 0.78 s out at 0.30 m/s (too late to stop); with it ON at ~0.22 m/s the edge
-   rule NEVER fired before the drop -- the obstacle rule cut speed ~9 cm out, too late -- and near the edge it
-   flickered edge/clear many times. Open-floor false triggers: not measured (both runs were on the table). The
-   rule does not match what the sensor reports at a real edge. To revive: record RAW rider/tof frames + telem
-   near an edge without driving off anything, rework the rule offline against them, then a hard stop for edges
-   and a lower top speed while on; test on a low step, never a table. Recorder `tools/tof/tof_safety_capture.py`
-   (it keeps the governor's conclusions only, not raw frames); captures `data/captures/2026-10-26_tof_*.csv`.
+5. **ToF edge stop: ACTIVE again (Marc, 10-26 evening) -- a rule change is proposed, awaiting his go.**
+   Third table run (LQR, stop ON, stick held full): the safety service braked only ~10-12 cm out and it went
+   over (Marc caught it). Walls stop well. Why, from the per-zone classes of the three table drives
+   (`data/captures/2026-10-26_tof_*.csv`, replay `tools/tof/tof_edge_replay.py`): the old rule takes the edge as
+   the FARTHEST table-height return (a return ~1.9 m out said "table continues" -> no slowdown), and it flickers
+   stop/clear near the edge (each "clear" re-sends full speed). **Continuity rule** (Marc: what matters is the
+   table continuing to the edge): corridor column with the near row (7) on the surface whose next row out (6) is
+   d/b/. = ends; >= 2 of the 4 corridor columns, 2 frames -> edge 1.18 / 1.37 / 1.37 s before the drop (old: 0.78
+   letting go / 1.57 flickering / 0.40 = the wall rule). Needed ~0.7 s (0.3 react + 0.4 LQR stop). Row 5 as well
+   reads "ends" all the time on that table -- unusable. **Proposed change** (rider_tof_safety.py): continuity rule;
+   edge = hard stop, latched until continuous for 1 s; walls slow from 0.40 m and stop at 0.10 m (Marc asked,
+   half the old 0.80 / 0.20, both controllers). Then: open floor first (false stops, wall distance), then the
+   table edge, `tof_safety_capture.py` running each time. Open-floor behaviour of the rule is unknown.
 6. `/home/pi/riderlog.txt` is never rotated (321 MB on 10-21). Filter on the Pi; never copy it whole over WiFi.
 7. The controller low-battery cutoff (<= 15 %, unplugged) is untested.
 
