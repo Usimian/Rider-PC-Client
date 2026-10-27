@@ -297,7 +297,7 @@ function tofShow() {
   const dist = SAFE.reason === "obstacle" && SAFE.min_mm >= 0 ? `obstacle ${Math.round(SAFE.min_mm / 10)} cm` : "clear";
   const lim = SAFE.on ? Number(SAFE.factor) : Number(SAFE.would);
   const pct = `${Math.round(100 * lim)} %`;
-  const txt = dist + (lim < 0.999 ? (SAFE.on ? ` — forward speed capped at ${pct}` : ` — would cap forward at ${pct}`) : "");
+  const txt = dist + (lim < 0.999 ? (SAFE.on ? ` — FWD speed capped at ${pct}` : ` — would cap FWD at ${pct}`) : "");
   set("tofstate", txt, !SAFE.on ? "off" : lim <= 0.001 ? "bad" : lim < 0.999 ? "warn" : "on");
 }
 setInterval(tofShow, 250);
