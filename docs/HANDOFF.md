@@ -53,9 +53,13 @@ list, and what not to trust.
    wall: all 64 zones status 5 from 47 cm down to 1.9 cm; at contact 56 valid (0-13 mm) + 8 status 255. Cause of
    the blank governor frames UNKNOWN. The robot did NOT hit the wall and the sensor showed no bad data (Marc, who
    watched it); commit b9a73ff's "came after the policy hit the wall" is wrong -- my speculation. So the fault is
-   between the sensor and the governor's verdict. Next: repeat a stick-driven policy approach with
-   tof_raw_capture.py AND tof_safety_capture.py running, compare raw vs verdict frame by frame. Status 9 shows
-   up in row 6 at ~45 cm; the governor and page accept only 5/6. Blind-hold fix (designed, not built): while the corridor returns almost
+   between the sensor and the governor's verdict. Raw vs verdict on a 0.30 m/s drive to 50 cm
+   (`tools/tof/tof_raw_vs_verdict.py`, local `data/captures/2026-10-27_drive_*.csv`): the governor's rejected zones
+   equal the raw status-not-5/6 zones in every frame -- its code does not corrupt frames; the morning's striped
+   blanks did NOT reproduce (3-5 invalid while driving). Found instead: (a) frames arrive every 0.196 s = **5 Hz,
+   not 10** -- the Pi I2C bus is at its 100 kHz default (no i2c_arm_baudrate in config.txt), and
+   rider_tof.py swallows a failed set_ranging_frequency_hz(10) silently; (b) status 9 (valid range, large pulse)
+   is 1-6 zones/frame near the wall and the governor + page reject it (VALID = 5, 6). Blind-hold fix (designed, not built): while the corridor returns almost
    nothing and the last obstacle was inside the slowdown zone, hold the last cap; say "blind" on the LCD/page.
    Policy wall stops: not decided. Why no edge stop: at ride height the sensor is
    ~6 cm up, so row 6 (the row that sees an edge in time, ~30 cm out) meets the surface at ~11 deg and goes blank
