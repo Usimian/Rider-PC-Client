@@ -413,12 +413,47 @@ function depth3d() {
   }
 }
 const cv3 = $("depth3d");
+const fromCentre = (x, y) => { const r = cv3.getBoundingClientRect(); return [x - r.left - r.width / 2, y - r.top - r.height / 2]; };
+// zoom to z1 keeping the canvas point m (px from the centre) on screen where the zoom-z0 view had point m0
+const zoomAt = (z0, z1, m0, m, pan0) => {
+  D3.zoom = z1;
+  D3.panX = m[0] - (z1 / z0) * (m0[0] - pan0[0]);
+  D3.panY = m[1] - (z1 / z0) * (m0[1] - pan0[1]);
+};
+const clampZoom = (z) => Math.max(0.5, Math.min(8, z));
+// one drag (mouse, or one finger): turn/tilt, or move with the middle button
+const startDrag = (x, y, pan) => { D3.drag = { x, y, az: D3.az, el: D3.el, panX: D3.panX, panY: D3.panY, pan }; };
+// phone: touches by pointerId; two fingers = pinch to zoom + move, anchored at the fingers' midpoint
+const touches = new Map();
+let pinch = null;
+const twoFingers = () => {
+  const [a, b] = [...touches.values()];
+  return { mid: fromCentre((a.x + b.x) / 2, (a.y + b.y) / 2), dist: Math.hypot(a.x - b.x, a.y - b.y) || 1 };
+};
 cv3.addEventListener("pointerdown", (ev) => {
   if (ev.button === 1) ev.preventDefault();              // middle button: no browser autoscroll, it pans the view
-  D3.drag = { x: ev.clientX, y: ev.clientY, az: D3.az, el: D3.el, panX: D3.panX, panY: D3.panY, pan: ev.button === 1 };
-  cv3.setPointerCapture(ev.pointerId);
+  try { cv3.setPointerCapture(ev.pointerId); } catch { /* pointer already gone */ }
+  if (ev.pointerType === "touch") {
+    touches.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    if (touches.size >= 2) {                             // second finger: the turn stops, the pinch starts
+      D3.drag = null;
+      const f = twoFingers();
+      pinch = { mid: f.mid, dist: f.dist, zoom: D3.zoom, pan: [D3.panX, D3.panY] };
+      return;
+    }
+  }
+  startDrag(ev.clientX, ev.clientY, ev.button === 1);
 });
 cv3.addEventListener("pointermove", (ev) => {
+  if (ev.pointerType === "touch" && touches.has(ev.pointerId)) {
+    touches.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    if (pinch && touches.size >= 2) {
+      const f = twoFingers();
+      zoomAt(pinch.zoom, clampZoom(pinch.zoom * f.dist / pinch.dist), pinch.mid, f.mid, pinch.pan);
+      depth3d();
+      return;
+    }
+  }
   if (!D3.drag) return;
   const dx = ev.clientX - D3.drag.x, dy = ev.clientY - D3.drag.y;
   if (D3.drag.pan) { D3.panX = D3.drag.panX + dx; D3.panY = D3.drag.panY + dy; }          // middle drag: move
@@ -429,14 +464,19 @@ cv3.addEventListener("pointermove", (ev) => {
   depth3d();
 });
 cv3.addEventListener("mousedown", (ev) => { if (ev.button === 1) ev.preventDefault(); });   // autoscroll starts here
-for (const t of ["pointerup", "pointercancel"]) cv3.addEventListener(t, () => { D3.drag = null; });
+for (const t of ["pointerup", "pointercancel"]) cv3.addEventListener(t, (ev) => {
+  touches.delete(ev.pointerId);
+  if (pinch && touches.size < 2) {                       // back to one finger: carry on turning from where it is
+    pinch = null;
+    const [rest] = [...touches.values()];
+    if (rest) { startDrag(rest.x, rest.y, false); return; }
+  }
+  D3.drag = null;
+});
 cv3.addEventListener("wheel", (ev) => {
   ev.preventDefault();                                   // zoom the view, not the page
-  const r = cv3.getBoundingClientRect(), mx = ev.clientX - r.left - r.width / 2, my = ev.clientY - r.top - r.height / 2;
-  const z0 = D3.zoom, z1 = Math.max(0.5, Math.min(8, z0 * Math.exp(-ev.deltaY * 0.0015)));
-  D3.panX = mx - (z1 / z0) * (mx - D3.panX);             // keep the point under the pointer where it is
-  D3.panY = my - (z1 / z0) * (my - D3.panY);
-  D3.zoom = z1;
+  const m = fromCentre(ev.clientX, ev.clientY);          // keep the point under the pointer where it is
+  zoomAt(D3.zoom, clampZoom(D3.zoom * Math.exp(-ev.deltaY * 0.0015)), m, m, [D3.panX, D3.panY]);
   depth3d();
 }, { passive: false });
 cv3.addEventListener("dblclick", () => { Object.assign(D3, D3_HOME); depth3d(); });
