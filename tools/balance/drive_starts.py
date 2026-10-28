@@ -6,8 +6,8 @@ before or during the lean when driving forward and back at 0.3-0.45 m/s).
 
 A start = the robot's speed (both wheel registers) leaving +/-0.03 m/s after standing, or changing sign while driving.
 Per start: the command's zero crossings in -0.3..+0.3 s (each one flips the LQR's friction compensation between
--32.5 and +32.5 units), the largest command jump between two cycles, and the gyro's fast part (above 8 Hz, rms and
-peak) in the same span against the standing level -- a twitch shows up there. --detail N prints start N every 20 ms.
+-32.5 and +32.5 units), the largest command jump between two cycles, the body's peak swing (gyro), and the gyro's
+fast part (above 8 Hz, rms and peak) in the same span against the standing level -- a twitch shows up there. --detail N prints start N every 20 ms.
 """
 import os
 import sys
@@ -56,7 +56,8 @@ def main():
             kind = ("reversal " if flip else "start ") + ("forward" if vs[i] > 0 else "backward")
             print(f"{n:2d}. window {int(w) + 1:2d} at {t[i]:4.2f} s, {kind:17s}: command crosses zero "
                   f"{len(crossings)}x (at {', '.join(f'{(t[m][c] - t[i]) * 1000:+.0f}' for c in crossings[:4])} ms); "
-                  f"largest step {jump:4.0f}; gyro above 8 Hz rms {hf[m].std():4.1f}, peak {np.abs(hf[m]).max():4.1f} deg/s")
+                  f"largest step {jump:4.0f}; body swing peak {np.abs(rate[m]).max():4.0f} deg/s; "
+                  f"gyro above 8 Hz rms {hf[m].std():4.1f}, peak {np.abs(hf[m]).max():4.1f} deg/s")
             if detail == n:
                 for k in np.nonzero(m)[0][::5]:
                     print(f"      {(t[k] - t[i]) * 1000:+5.0f} ms  speed {vs[k]:+5.2f}  pitch {r['pitch_cdeg'][k] / 100:+6.2f}"
