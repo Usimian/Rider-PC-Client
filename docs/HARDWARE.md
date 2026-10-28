@@ -19,6 +19,12 @@ services), `factory_roll_balance.md` (decompiled stock leveling).
 - `fw: Null` from an xgolib probe means xgolib couldn't handshake — true for **both** balance
   **and** passthrough fw, so it does NOT identify which is flashed. Disambiguate by scanning the
   servo bus (`scservo_sdk` ping): a silent bus = not passthrough.
+- ✅ **IMU (ICM-42670) on top of the body, 100 mm above the wheel axle's centre** (vertical, legs
+  at ride height 480/920; Marc, ruler, 2026-10-28). The firmware's lever-arm correction assumes
+  120 mm (`KIMU` in `main.cpp`) — not yet changed.
+- ❔ **Wheel encoders read the wheel's turn against the body** (the wheel servos sit on the legs), not
+  the axle's travel: axle = `wheel_x` − 0.52 mm per degree of `th`. Forward lean making `th` decrease
+  is measured (`tools/balance/encoder_axle_check.py`); the size and sign await a hand-tilt test.
 
 ## Servo bus
 - Servos are **NBD-branded, customized from K-power parts** (per Luwu source 2026-06-24). They
