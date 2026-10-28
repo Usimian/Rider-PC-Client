@@ -32,7 +32,12 @@ list, and what not to trust.
   servo (kv 5, 1 N m cap; lags fitted on top) where the measured one is a DC motor whose speed sags with load
   (b 1.63e-3 per motor, ~0.076 N m stall at the policy's full command) -- the big one; CoM 45 vs 40.5 mm; body
   inertia ~14.7 (box) vs 17.5 kg cm^2; wheel armature 3e-3 vs 3e-5 kg m^2; wheels 80 vs 110 g; 230 vs ~240 Hz.
-  Same already: the encoder reads the wheel against the body; friction ~35 vs 33 units. Not changed yet; (2) the ~10 Hz ringing after a stop or
+  Same already: the encoder reads the wheel against the body; friction ~35 vs 33 units. **Built (`96ee0b5`):
+  `RiderParams.plant = "measured"`** (`sim/measured_plant.py`, straight-line only). `ppo_lb25_s4` in it: standing
+  rate rms 1.8-2.1 deg/s (floor 1.6-2.8, servo 3.2-3.4); release from 0.30 rolls 22.4 cm, the servo 22.1, the floor
+  ~20 (`*_policy_baseline_07`: 197 mm, 1.46 s) -- the roll-on is the firmware's policy position loop, not the
+  motor; retraining alone will not stop it. Floor baseline 10-28: standing 0.14-0.29 deg sd (LQR 0.03-0.08),
+  206-225 Hz, start/release swings 3.6-6.3 deg, no reversal caught; (2) the ~10 Hz ringing after a stop or
   drive, three times now (`*_hover_exact_watch` w18, `*_renamed_check` w15, `*_smooth_home` w12); (3) the balance
   point moved: 3.9-4.3 deg on the IMU in the last run against the 2.8 reference (2.9-3.0 earlier that evening, legs
   at ride height both times, cause unknown) -- it parks 1-3 cm off home until the slow integral catches up;
