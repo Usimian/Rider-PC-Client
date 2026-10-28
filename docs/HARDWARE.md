@@ -19,12 +19,17 @@ services), `factory_roll_balance.md` (decompiled stock leveling).
 - `fw: Null` from an xgolib probe means xgolib couldn't handshake — true for **both** balance
   **and** passthrough fw, so it does NOT identify which is flashed. Disambiguate by scanning the
   servo bus (`scservo_sdk` ping): a silent bus = not passthrough.
-- ✅ **IMU (ICM-42670) on top of the body, 100 mm above the wheel axle's centre** (vertical, legs
-  at ride height 480/920; Marc, ruler, 2026-10-28). The firmware's lever-arm correction assumes
-  120 mm (`KIMU` in `main.cpp`) — not yet changed.
-- ❔ **Wheel encoders read the wheel's turn against the body** (the wheel servos sit on the legs), not
-  the axle's travel: axle = `wheel_x` − 0.52 mm per degree of `th`. Forward lean making `th` decrease
-  is measured (`tools/balance/encoder_axle_check.py`); the size and sign await a hand-tilt test.
+- ✅ **IMU (ICM-42670) on top of the body, on the XGOR/V1.1 mainboard** (centre, right of the
+  "XGOR/V1.1" label; local photo `data/photos/IMG_0018_imu.jpg`), **96–100 mm above the wheel axle's
+  centre and within ~10 mm of directly above it** (2026-10-28, legs powered at ride height 480/921:
+  hand-rocked with balance off, `tools/capture/tilt_capture.py` + `tools/balance/imu_position_fit.py`;
+  Marc's ruler: 100). The firmware's lever-arm correction is effectively **60 mm** (`KIMU` 120 mm ×
+  `imucomp` −0.5) — not yet changed.
+- ✅ **Wheel encoders read the wheel's turn against the body** (the wheel servos sit on the legs), not
+  the axle's travel: axle = `wheel_x` − 0.52 mm per degree of `th` (forward lean makes `th` decrease).
+  Hand-rocked about a held axle, encoder speed = −0.92 × r × lean rate (−1 = a perfectly still axle),
+  R² 0.96 (same tools). Telemetry `legR`/`legL` show the ride-height defaults when a leg has no target
+  (limp): read `legst` (1 limped, 4/8 right/left powered) for the real state.
 
 ## Servo bus
 - Servos are **NBD-branded, customized from K-power parts** (per Luwu source 2026-06-24). They

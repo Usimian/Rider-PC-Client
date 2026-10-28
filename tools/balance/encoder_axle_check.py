@@ -12,9 +12,10 @@ pol_xvel_mm), no robot needed:
     acceleration against the firmware pitch says which way forward lean runs in 'th'.
  2. AXLE: the lever-compensated accelerometer pitch minus the fused pitch reads the axle's true
     acceleration (-kappa*a/g). Fitted on [encoder acceleration, body angular acceleration] at 0.5-6 Hz,
-    the ratio of the two coefficients is an effective lever L = s*r - (IMU-height error)/kappa:
-    ~+30 mm if the encoder carries the body's rocking and the firmware's 120 mm IMU height is right,
-    ~0 if the encoder were a true axle reading. Only the SUM is identifiable from these signals.
+    the ratio of the two coefficients is an effective lever L = s*r + (IMU height - the firmware's
+    correction). The correction is 60 mm (KIMU 120 mm x imucomp -0.5) and the IMU is ~100 mm up
+    (docs/HARDWARE.md), so: ~+70 mm if the encoder carries the body's rocking, ~+40 if it read the axle.
+    2026-10-28: +67 mm median over the well-fitted runs. Confirmed directly by imu_position_fit.py.
 
 Run:  /usr/bin/python3 tools/balance/encoder_axle_check.py [capture.csv ...]   (default: every drivecap
       file with pacc_x100). Spin episodes are skipped (one wheel's speed is not the axle's in a spin).
@@ -115,7 +116,7 @@ def main():
     (cb, cc), r2b = fit([XA, XB])
     print(f"\n2. AXLE   accelerometer gap vs encoder accel only:          kappa {-ca:.2f}, R^2 {r2a:.3f}")
     print(f"          + body angular accel:  kappa {-cb:.2f}, lever L = {cc / cb * 1000:+.1f} mm, R^2 {r2b:.3f}")
-    print(f"          (encoder = axle -> L ~ 0;  encoder against the body, 120 mm IMU right -> L ~ +{R*1000:.0f} mm)")
+    print(f"          (IMU 100 mm, correction 60 mm: encoder = axle -> L ~ +40 mm;  against the body -> ~+70 mm)")
     for lab, s_ in [(f"axle = enc + r*theta_fwd", +1), (f"axle = enc - r*theta_fwd", -1), ("axle = enc", 0)]:
         (c1,), r2_ = fit([XA + s_ * R * XB])
         print(f"          {lab:26s}  kappa {-c1:.2f}  R^2 {r2_:.3f}")
