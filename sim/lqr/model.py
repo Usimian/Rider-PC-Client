@@ -49,8 +49,11 @@ class Params:
     m_wheels: float = 0.110    # kg, both wheel assemblies at the axle, shared with the Hover (ASSUMED 55 g
                                # each there; the RL sim assumed 40 g -- one of the two is wrong)
     iw_one: float = 3.0e-5     # kg m^2, one wheel's rotating part about the axle, shared (ASSUMED)
-    ib_axle: float = 15.9e-4   # kg m^2, body about the axle, ASSUMED: the RL sim's 50 x 100 mm box
-                               # (4.7e-4 about its centre) + mb L^2; to be fitted (drop tests, not yet run)
+    ib_axle: float = 19.5e-4   # kg m^2, body about the axle, DERIVED 2026-10-28 (fit_drop.py): four hand drop
+                               # tests, legs at ride height, the shared motor at u = 0; angle within 0.06-0.82 deg
+                               # rms, encoder travel 1.9-2.9 mm rms, release to 30 deg. With the damping free too:
+                               # 17.7 at x1.6 damping and no better fit, so the shared motor stays. Gyro-only
+                               # tipping rate 8.9-9.6 /s (drop_rate.py; Hover 8.0). Was the RL sim's box, 15.9
     ku_over_b: float = 0.100   # rad/s per unit, shared (Hover MEASURED in the air: 3.0 mm/s per unit);
                                # Rider bench 2026-06-19: 0.129 from a speed chain later found 26 % strong
                                # (rider_params.vel_max_rad_s) -> 0.102
