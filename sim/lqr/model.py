@@ -19,8 +19,9 @@ motor with friction:
     T_one = ku * dz(u) - b * rel - fric * tanh(rel / fric_w) + b * cogging_rate(phi)
     rel = v/r - w (wheel rate against the body), dz(u) = sign(u) * max(|u| - u0, 0)
 
-u is in the firmware's wheel-command units, + driving forward (on the Rider the firmware's
-balance output drives backward when positive: model u = -u_fw, closed_loop.py).
+u is in the firmware's wheel-command units, + driving forward: the firmware's balance output u_fw
+as sent to the left wheel (cmdL = u_fw + turn, cmdR = -u_fw + turn), so model u = (cmdL - cmdR) / 2
+= u_fw (MEASURED: cmdL against the encoder's forward speed, +0.85 in the 10-19 sweeps).
 
 The encoders are in the wheel servos on the legs: they read the wheel's turn against the body
 (encoder()), MEASURED on the Rider 2026-10-28 (tools/balance/imu_position_fit.py, -0.92 of r x lean
@@ -49,18 +50,23 @@ class Params:
     m_wheels: float = 0.110    # kg, both wheel assemblies at the axle, shared with the Hover (ASSUMED 55 g
                                # each there; the RL sim assumed 40 g -- one of the two is wrong)
     iw_one: float = 3.0e-5     # kg m^2, one wheel's rotating part about the axle, shared (ASSUMED)
-    ib_axle: float = 19.5e-4   # kg m^2, body about the axle, DERIVED 2026-10-28 (fit_drop.py): four hand drop
-                               # tests, legs at ride height, the shared motor at u = 0; angle within 0.06-0.82 deg
-                               # rms, encoder travel 1.9-2.9 mm rms, release to 30 deg. With the damping free too:
-                               # 17.7 at x1.6 damping and no better fit, so the shared motor stays. Gyro-only
-                               # tipping rate 8.9-9.6 /s (drop_rate.py; Hover 8.0). Was the RL sim's box, 15.9
+    # The body's inertia and the motor's loaded behaviour were fitted against each other until both agreed
+    # (2026-10-28, three rounds, as on the Hover): fit_drop.py on four hand drop tests (legs at ride height, the
+    # motor at u = 0), fit_sweep.py on the 10-19 LQR standing sweep (ku_over_b kept shared).
+    ib_axle: float = 17.5e-4   # kg m^2, body about the axle, DERIVED: angle within 0.24-0.99 deg rms, encoder
+                               # travel 1.2-2.5 mm rms, release to 30 deg. Gyro-only tipping rate 8.9-9.6 /s
+                               # (drop_rate.py; Hover 8.0). Was the RL sim's box, 15.9
     ku_over_b: float = 0.100   # rad/s per unit, shared (Hover MEASURED in the air: 3.0 mm/s per unit);
                                # Rider bench 2026-06-19: 0.129 from a speed chain later found 26 % strong
                                # (rider_params.vel_max_rad_s) -> 0.102
-    b: float = 1.53e-3         # N m s/rad, one motor's damping, shared (Hover DERIVED, its fit_sweep.py)
-    u0: float = 0.0            # dead zone in the drive, units, shared (Hover DERIVED: none)
-    fric: float = 3.55e-3      # N m, Coulomb friction per wheel, shared (Hover DERIVED; ~23 units)
-    fric_w: float = 0.094      # rad/s, the friction rounded off (tanh) below this, shared (Hover DERIVED)
+    # The motor, DERIVED: the Hover's values (b 1.53e-3, fric 3.55e-3 = 23 units, fric_w 0.094) unchanged already
+    # explained 80 % of the standing sweep's pitch and 85 % of its wheel motion over 60 ms, and 96-98 % of the
+    # wheel motion in the driving sweeps, with no speed-dependent lag; these ~94 % / 94 % standing. The friction is
+    # ~1.4x the Hover's, as the weight on the wheels is (560 vs 415 g): ASSUMED the cause.
+    b: float = 1.63e-3         # N m s/rad, one motor's damping (back-EMF through the driver)
+    u0: float = 0.0            # dead zone in the drive, units (none, as on the Hover)
+    fric: float = 5.29e-3      # N m, Coulomb friction per wheel (33 units)
+    fric_w: float = 0.844      # rad/s, the friction rounded off (tanh) below this
     cog20_rate: float = 0.30   # cogging per wheel at 20 and 24 per turn of the wheel against the body,
     cog24_rate: float = 0.23   # rad/s of speed ripple (torque = that x b), shared (Hover MEASURED in the air)
     cog_phase2: float = 1.3    # rad, wheel 2's offset against wheel 1, shared (ASSUMED)
