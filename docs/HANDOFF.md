@@ -4,7 +4,17 @@ Read at session start. Facts live in the repo (commit messages carry the numbers
 provenance, `docs/HARDWARE.md` -> Power / Audio the hardware facts); this is only the running story, the open
 list, and what not to trust.
 
-## Where it stands (2026-10-28): LQR2, the Hover's LQR on the Rider
+## Where it stands (2026-10-28 evening): LQR2 = the Hover's LQR exactly, physical numbers apart
+
+- **Flashed + committed (`e387674`), Marc: "it drove great".** One IMU loop (the Hover's imu_task, core 0, the only
+  IMU reader), the Hover's IMU step, law order and drive plan (1 m/s^2); gains -1916 / -7.46 / 59.4 / 1.39 (Tightest
+  1936 / 8.26 / 53.8 / 1.25); top speed 0.45. Rule (Marc): copy the Hover exactly, change only what is physically
+  different, name every difference -- so a remaining problem is the robot's, not the implementation's.
+- **Next:** redesign at the measured ~240 Hz (the gains assume 200; the loop no longer waits on the IMU); a 10.5 Hz
+  ringing at one stop (`2026-10-28_lqr2_hover_exact_watch.csv` window 18); the gyro bias (the Hover measures it each
+  boot, the Rider uses a stored -1.19); the +/-400 command limit (the Hover's is +/-1000; 1000 browned out ID21 once).
+
+## Earlier on 2026-10-28
 
 - **Flashed + committed (`510957a`): LQR2 (`ctrl 2`)**, beside LQR and the policy: the Hover's method and its
   choices on the Rider's measured model (`sim/lqr/`, system Python): encoder corrected (it reads the wheel
