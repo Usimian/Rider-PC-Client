@@ -42,6 +42,8 @@ def peak(x, fs, lo, hi):
     X = np.abs(np.fft.rfft((x - x.mean()) * np.hanning(len(x))))
     fr = np.fft.rfftfreq(len(x), 1 / fs)
     m = (fr >= lo) & (fr <= min(hi, fs / 2 * 0.95))
+    if not m.any():
+        return float("nan"), float("nan")
     k = int(np.argmax(X[m]))
     return float(fr[m][k]), float(X[m][k] / (X[m].mean() + 1e-12))
 
@@ -55,9 +57,9 @@ def sample_times(i, t_us):
 
 def analyse(rows, ctrl="?"):
     """rows: dict of column arrays for one window -> the summary line."""
+    if len(rows["t_us"]) < 300 or np.any(np.diff(rows["i"]) != 1):
+        return f"{ctrl:4s} incomplete window ({len(rows['t_us'])} samples) -- skipped"
     t = sample_times(rows["i"], rows["t_us"])
-    if len(t) < 64:
-        return f"{ctrl:4s} too short ({len(t)} samples)"
     fs = 1.0 / np.median(np.diff(t))
     u = rows["cmd"]
     on = np.mean(u != 0) > 0.5
@@ -104,6 +106,14 @@ def main():
     if sys.argv[1:2] == ["--analyse"]:
         analyse_file(sys.argv[2])
         return
+    # one recorder at a time: two would both arm the firmware's single capture buffer and take each other's samples
+    # (2026-10-28: a forgotten earlier run did exactly that and garbled a recording)
+    import fcntl
+    lock = open("/tmp/rider_balance_watch.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit("another balance_watch.py is already recording -- stop it first")
     out = sys.argv[1] if len(sys.argv) > 1 else "balance_watch.csv"
     windows = int(sys.argv[2]) if len(sys.argv) > 2 else 40
     c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="balance_watch")
