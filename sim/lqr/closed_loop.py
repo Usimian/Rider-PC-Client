@@ -53,6 +53,7 @@ VREF, CMD_FF = 270.0, 360.0
 L2_SPEED = 327.6 * 0.828                         # LQR2's scaled units per m/s (271, main.cpp L2_SPEED_PER_MPS)
 # The Hover's plan (robot.cc kPlan*): the lead limit and the plan's own position integral (command units)
 PLAN_MAX_LEAD_M, PLAN_KI, PLAN_IMAX = 0.15, 100.0, 100.0
+HOME_K, HOME_VMAX = 2.0, 0.15                     # main.cpp LQR_HOME_*: the held home's gentle return (Marc, 10-28)
 # The Hover's IMU path (its boards/common/imu.cc, run per ~2.5 ms sample), for LQR2 verbatim (hover_sample()).
 HOVER_DQ_TAU = -0.0025 / np.log(0.6)             # 4.9 ms, the Hover's rate smoothing in time (for reference)
 # LQR2's IMU path runs in its own task like the Hover's imu_task (main.cpp imuTask: read, then vTaskDelay 2 ms): a
@@ -200,8 +201,16 @@ class Firmware:
         if self.plan_x is None:                                        # plan_start: here, at the measured speed
             self.plan_x, self.v_r, self.a_r = x, self.vel_s / L2_SPEED, 0.0
             self.v_r_f, self.plan_i = self.v_r, 0.0
+            self.home, self.stick_held = x, False
         xerr = x - self.plan_x                                         # before the plan's step, as the Hover
-        a_des = np.clip(R["gain"] * (float(np.clip(stick, -VMAX, VMAX)) - self.v_r), -R["a_max"], R["a_max"])
+        held = abs(stick) > 0.001                                      # main.cpp: the home is held (Marc, 10-28)
+        if self.stick_held and not held:
+            self.home = x                                              # the stick released: hold this spot
+        self.stick_held = held
+        target = float(np.clip(stick, -VMAX, VMAX))
+        if not held:                                                   # released: back home, gently (main.cpp)
+            target = float(np.clip(HOME_K * (self.home - self.plan_x), -HOME_VMAX, HOME_VMAX))
+        a_des = np.clip(R["gain"] * (target - self.v_r), -R["a_max"], R["a_max"])
         jerk = R["a_max"] / R["t_jerk"]
         self.a_r += np.clip(a_des - self.a_r, -jerk * dt, jerk * dt)
         self.v_r += self.a_r * dt

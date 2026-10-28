@@ -83,6 +83,14 @@ static const float LQR_SPEED_PER_MPS = 327.6f * 4.5f * (60.0f * 3.14159265f / 10
 // plan's command is fed forward (per m/s and per m/s^2), and the plan's own integral always runs. The lean and command
 // per speed / acceleration are the Rider model's steady values (sim/lqr/drive_design.py feedforward()); the rest are
 // the Hover's numbers. 'ptgt' distance moves do not drive the LQR (the stick does).
+// ONE CHANGE FROM THE HOVER (Marc, 2026-10-28): the home is held. When the stick is released, the robot's position at
+// that moment becomes the home; while released, the plan's target speed is LQR_HOME_K x (home - plan), at most
+// LQR_HOME_VMAX: with the plan's own closing (gain 8) that is a critically damped approach, no overshoot, no step in
+// the plan's speed, lean or command (a first version braked at the full rate and stopped the plan dead on arrival:
+// its lean reference jumped ~10 deg in a cycle -- twitching, floor 10-28). The 15 cm lead then only keeps the plan
+// near the robot; it no longer moves the home (the Hover's plan, at rest, sat wherever a push of > 15 cm left it).
+static const float LQR_HOME_K    = 2.0f;      // 1/s: target speed per m from home (8 x 2 = 16 = (2 x 4)^2: critical)
+static const float LQR_HOME_VMAX = 0.15f;     // m/s: the most the plan heads home at
 volatile float gLqrAMax = 1.0f;               // plan acceleration limit, m/s^2 ('lqramax'; the Hover's 1.0)
 static const float LQR_PLAN_TJERK = 0.12f;    // s for the acceleration to build up (Hover kPlanTJerk)
 static const float LQR_PLAN_GAIN  = 8.0f;     // 1/s, how the plan's speed closes on the stick's (Hover kPlanGain)
@@ -987,6 +995,8 @@ static void balanceTask(void*){
       wheel1_x = 0; wheel2_x = 0; wheel_x = 0; //   are zeroed TOGETHER so posErr stays 0 -> no jolt, balance holds
       gHdgTarget = 0;
       gPosTarget = 0; gPosTargetEff = 0; posErrInt = 0; vdesS = 0; polPrevX = 0;
+      lqrInit = false;                         // the LQR: the Hover's Reset home -- plan_start where the robot is, at its
+                                               // speed (its plan kept the old position: the robot drove to it)
       gOdoReset = true;                        // dead-reckoned pose origin too
       gPosZeroReq = false;
     }
@@ -1124,6 +1134,7 @@ static void balanceTask(void*){
     // (lqrInit is declared up top alongside polInit so the position-runaway cutout's posRef can read it.)
     static float lqrV=0, lqrULp=0; static bool lqrVInit=false;  // the axle's smoothed speed; the smoothed command (friction sign)
     static float planX=0, planV=0, planA=0, planVF=0, planI=0;  // the plan: position (axle), speed, acceleration, smoothed speed, integral
+    static float lqrHome=0; static bool lqrStick=false;          // the held home (axle) and whether the stick was held
     if(gEnabled && !fallen){
       float odt = (dt>1e-4f ? dt : 0.004f);
       float q  = lqrPitch - gLqrUp;                                 // lqr_q: the pitch against the measured upright
@@ -1135,10 +1146,15 @@ static void balanceTask(void*){
       float xax = wheel_x - LQR_WHEEL_R * q * 0.0174533f;           // x_axle
       if(!lqrInit){                                                 // plan_start: where the robot is, at its speed
         planX = xax; planV = planVF = lqrV / LQR_SPEED_PER_MPS; planA = 0.0f; planI = 0.0f; lqrInit = true;
+        lqrHome = xax; lqrStick = false;
       }
       float lqr_x = xax - planX;                                    // before the plan's step
       {                                                             // plan_step(stick, dt, x_axle, lqr_x)
+        bool held = fabsf(gDriveVel) > 0.001f;
+        if(lqrStick && !held) lqrHome = xax;                        // the stick released: hold this spot
+        lqrStick = held;
         float stick = clampf(gDriveVel, -gPosVmaxBack, gPosVmax);
+        if(!held) stick = clampf(LQR_HOME_K * (lqrHome - planX), -LQR_HOME_VMAX, LQR_HOME_VMAX);   // back home, gently
         float ades = clampf(LQR_PLAN_GAIN * (stick - planV), -gLqrAMax, gLqrAMax);
         float jerk = gLqrAMax / LQR_PLAN_TJERK * odt;
         planA += clampf(ades - planA, -jerk, jerk);
