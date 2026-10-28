@@ -44,6 +44,12 @@ FF, FF_BAND, U_MAX = 10.0, 20.0, 400.0
 # the law pushes, blended through zero by tanh(u / FRIC_WIDTH), the direction from the command smoothed over
 # FRIC_TAU; replaces the factory boost in the new law. Rider friction: model.Params fric / ku = 32.5 units.
 FRIC_UNITS, FRIC_WIDTH, FRIC_TAU = 32.5, 20.0, 0.030
+# Driving (main.cpp): the stick's speed is ramped (driveRamp) at POS_AMAX up / POS_DMAX braking, capped at VMAX
+# (gPosVmax, 0.60 since 10-28); the law's speed reference is VREF x vdes, its command feedforward CMD_FF x vdes.
+VMAX, POS_AMAX, POS_DMAX = 0.60, 0.4, 0.8
+VREF, CMD_FF = 270.0, 360.0
+# The Hover's plan (robot.cc kPlan*): the lead limit and the plan's own position integral (command units)
+PLAN_MAX_LEAD_M, PLAN_KI, PLAN_IMAX = 0.15, 100.0, 100.0
 LP_VEL = 0.85
 SPEED_COUNTS = 327.6     # speed register counts per m/s
 SCALED_PER_COUNT = 0.828 # 4.5 x K_V
@@ -53,9 +59,11 @@ R_WHEEL = 0.030
 
 class Firmware:
     def __init__(self, k=None, up_deg=2.8, rng=None, gyro_noise=0.06, acc_noise=0.02, corrected=False, a_v=LP_VEL,
-                 fric_comp=False):
+                 fric_comp=False, plan=None):
         """corrected: the encoders' body part taken off (the new law, lqr_design.py): position wheel_x + r*pitch,
-        speed register + r*rate before its smoothing a_v (per cycle; today LP_VEL 0.85)."""
+        speed register + r*rate before its smoothing a_v (per cycle; today LP_VEL 0.85). plan: drive by the
+        Hover's plan (drive_design.py: a_max, t_jerk, gain, th_v, th_a, u_v, u_a) instead of the LQR's drive
+        handling; it implies corrected readings and uses its own integral (k['xi'] unused)."""
         self.k = dict(K_TODAY if k is None else k)
         self.corrected, self.a_v = corrected, a_v
         self.fric_comp, self.u_lp = fric_comp, 0.0
@@ -69,8 +77,14 @@ class Firmware:
         self.alpha_f = 0.0
         self.vel_s = 0.0
         self.wheel_x = 0.0
-        self.home = None
         self.ix = 0.0
+        self.tgt = self.tgt_eff = None           # the LQR drive handling's home and moving target (m)
+        self.vdes, self.was_vel = 0.0, False
+        self.plan = plan
+        self.plan_x = None                       # the plan's position, speed, acceleration, smoothed speed, integral
+        self.v_r = self.a_r = self.v_r_f = self.plan_i = 0.0
+        if plan is not None:
+            self.corrected = True
 
     def read_wheels(self, p, s):
         x_enc, v_enc = plant_module(p).encoder(p, s)
@@ -100,19 +114,74 @@ class Firmware:
         self.dqf = 0.6 * self.dqf + 0.4 * rate
         self.rate = rate
 
-    def control(self, dt):
-        if self.home is None:
-            self.home = self.wheel_x
+    def drive_today(self, dt, stick):
+        """The LQR's drive handling as main.cpp has it (both LQR and LQR2): the stick speed ramps (driveRamp,
+        POS_AMAX up / POS_DMAX braking), the target advances at it; on release the home is where the brake ramp
+        stops (releaseStop) and the integral clears; holding, the target brakes onto it. Returns vdes, m/s."""
+        if stick != 0.0:
+            self.vdes = drive_ramp(self.vdes, float(np.clip(stick, -VMAX, VMAX)), dt)
+            self.tgt_eff += self.vdes * dt
+            self.tgt = self.tgt_eff
+            self.was_vel = True
+        else:
+            if self.was_vel:
+                self.tgt = self.tgt_eff + np.sign(self.vdes) * self.vdes ** 2 / (2 * POS_DMAX)
+                self.ix = 0.0
+                self.was_vel = False
+            dist = self.tgt - self.tgt_eff
+            vcap = min(VMAX, np.sqrt(2 * POS_DMAX * abs(dist)))
+            self.vdes = drive_ramp(self.vdes, vcap if dist >= 0 else -vcap, dt)
+            self.tgt_eff += self.vdes * dt
+            if (dist >= 0 and self.tgt_eff > self.tgt) or (dist < 0 and self.tgt_eff < self.tgt):
+                self.tgt_eff, self.vdes = self.tgt, 0.0
+        return self.vdes
+
+    def control(self, dt, stick=0.0):
+        """One cycle of the balance law; stick = the drive command (m/s, the firmware's gDriveVel)."""
         k = self.k
         v = self.raw_v
         pitch = self.theta - SET_DEG
-        x = self.wheel_x - self.home
         if self.corrected:                       # firmware frame: forward lean makes pitch and rate negative
-            x -= R_WHEEL * np.radians(pitch)
             v -= R_WHEEL * np.radians(self.rate) * SPEED_COUNTS * SCALED_PER_COUNT
         self.vel_s = self.a_v * self.vel_s + (1 - self.a_v) * v
+        if self.plan is not None:
+            return self._control_plan(dt, stick, pitch)
+        if self.tgt is None:
+            self.tgt = self.tgt_eff = self.wheel_x
+        vdes = self.drive_today(dt, stick)
+        x = self.wheel_x - self.tgt_eff
         self.ix = float(np.clip(self.ix + x * dt, -IX_MAX, IX_MAX))
-        u = -(k["x"] * x + k["xi"] * self.ix + k["vx"] * self.vel_s + k["q"] * pitch + k["dq"] * self.dqf)
+        if self.corrected:
+            x -= R_WHEEL * np.radians(pitch)
+        u = -(k["x"] * x + k["xi"] * self.ix + k["vx"] * (self.vel_s - VREF * vdes) + k["q"] * pitch
+              + k["dq"] * self.dqf) + CMD_FF * vdes
+        return self._output(u, dt)
+
+    def _control_plan(self, dt, stick, pitch):
+        """The Hover's driving plan (robot.cc plan_step, its sim/closed_loop.py _control_plan), on the corrected
+        readings: the planned speed closes on the stick's at up to a_max, its acceleration building over t_jerk;
+        its position never gets more than PLAN_MAX_LEAD_M from the axle; the law tracks the plan's position,
+        smoothed speed and lean, the plan's command is fed forward, and the plan's own integral always runs."""
+        R, k = self.plan, self.k
+        x = self.wheel_x - R_WHEEL * np.radians(pitch)                 # the axle (firmware frame)
+        if self.plan_x is None:
+            self.plan_x, self.v_r, self.a_r = x, self.vel_s / VREF, 0.0
+            self.v_r_f, self.plan_i = self.v_r, 0.0
+        a_des = np.clip(R["gain"] * (float(np.clip(stick, -VMAX, VMAX)) - self.v_r), -R["a_max"], R["a_max"])
+        jerk = R["a_max"] / R["t_jerk"]
+        self.a_r += np.clip(a_des - self.a_r, -jerk * dt, jerk * dt)
+        self.v_r += self.a_r * dt
+        self.plan_x = float(np.clip(self.plan_x + self.v_r * dt, x - PLAN_MAX_LEAD_M, x + PLAN_MAX_LEAD_M))
+        self.v_r_f = self.a_v * self.v_r_f + (1 - self.a_v) * self.v_r
+        lean_fw = -np.degrees(R["th_v"] * self.v_r + R["th_a"] * self.a_r)   # forward lean is negative pitch
+        u_ff = R["u_v"] * self.v_r + R["u_a"] * self.a_r
+        xerr = x - self.plan_x
+        self.plan_i = float(np.clip(self.plan_i + PLAN_KI * xerr * dt, -PLAN_IMAX, PLAN_IMAX))
+        u = -(k["x"] * xerr + k["vx"] * (self.vel_s - VREF * self.v_r_f) + k["q"] * (pitch - lean_fw)
+              + k["dq"] * self.dqf) + self.plan_i + u_ff
+        return self._output(u, dt)
+
+    def _output(self, u, dt):
         if self.fric_comp:
             a = np.exp(-dt / FRIC_TAU)
             self.u_lp = a * self.u_lp + (1 - a) * u
@@ -122,6 +191,16 @@ class Firmware:
         elif u < -FF_BAND:
             u -= FF
         return float(np.clip(u, -U_MAX, U_MAX))
+
+
+def drive_ramp(v, tgt, dt):
+    """main.cpp driveRamp: POS_DMAX while the speed falls (never through zero), POS_AMAX while it rises."""
+    braking = (v > 0 and tgt < v) or (v < 0 and tgt > v)
+    d = (POS_DMAX if braking else POS_AMAX) * dt
+    n = v + d if tgt > v + d else (v - d if tgt < v - d else tgt)
+    if braking and ((v > 0 and n < 0) or (v < 0 and n > 0)):
+        n = 0.0
+    return n
 
 
 def chirp(t, a, f0, f1, dur):
@@ -134,10 +213,11 @@ def chirp(t, a, f0, f1, dur):
     return a * env * np.sin(ph)
 
 
-def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5, kick=None):
+def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5, kick=None, drive=None, log_all=False):
     """Simulate T s standing; sweep = (a, f0, f1, dur) starts at sweep_at. Returns the recorded rows (every 2nd
     cycle, as the robot's capture) and whether it fell. kick = (t, deg/s): a shove, the body's pitch rate
-    changed at once (+ forward)."""
+    changed at once (+ forward). drive = (times s, m/s): the stick's speed command, held between the times.
+    log_all: return every cycle (t, stick, u, axle speed m/s, body lean deg + forward) instead of the capture rows."""
     p = p or Params()
     fw = fw or Firmware()
     m = plant_module(p)
@@ -150,6 +230,10 @@ def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5, kick=None
     for c in range(int(T / CYCLE_S)):
         t = c * CYCLE_S
         inj = chirp(t + READ_S - sweep_at, *sweep) if sweep else 0.0
+        stick = 0.0
+        if drive is not None:
+            j = np.searchsorted(drive[0], t, side="right") - 1
+            stick = float(drive[1][j]) if j >= 0 else 0.0
         if kick and abs(t - kick[0]) < CYCLE_S / 2:
             s[B + 1] += np.radians(kick[1])
         for k in range(n_sub):
@@ -158,12 +242,14 @@ def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5, kick=None
             if k == i_read:
                 fw.read_imu(s[B], s[B + 1], m.accel_body(p, s, u), CYCLE_S)
             if k == i_cmd:
-                u_fw = fw.control(CYCLE_S)
+                u_fw = fw.control(CYCLE_S, stick)
                 u = u_fw + inj
             s = m.step(p, s, u, SUB_S)
         if abs(s[B]) > np.radians(45):
             return np.array(rows), True
-        if c % 2 == 0:
+        if log_all:
+            rows.append((t, stick, u, s[1], np.degrees(s[B])))
+        elif c % 2 == 0:
             rows.append((t * 1e6, inj, u, -u, fw.wheel_x * 1e4, fw.theta * 100, np.degrees(fw.om_prev) * 10))
     return np.array(rows), False
 
