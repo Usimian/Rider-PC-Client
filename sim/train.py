@@ -5,6 +5,7 @@ runs in microseconds at 250 Hz.
 """
 import argparse
 import os
+from dataclasses import replace
 import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
@@ -12,23 +13,28 @@ from stable_baselines3.common.vec_env import VecNormalize
 
 from rider_env import RiderBalanceEnv
 from rider_env_twowheel import RiderTwoWheelEnv
+from rider_params import DEFAULT
 from caps_ppo import CAPS_PPO       # PPO + spatial action-smoothness (used when --caps_lambda > 0)
 
 
 def make_env(domain_rand=False, frame_stack=1, vel_pen=0.0, mirror_aug=True, rate_dr=True,
              pos_anchor=0.0, rate_pen=0.30, drive_train=False,
-             fw_obs=True, drive_lead=False, pitch_dis=False, spin_prob=0.0, turn_obs=False):
+             fw_obs=True, drive_lead=False, pitch_dis=False, spin_prob=0.0, turn_obs=False, plant="servo",
+             stick_events=0.0):
     # spin_prob > 0: the TWO-WHEEL env (rider_env_twowheel) -- real turns/spins through the firmware turn controller
+    # (servo plant only: the measured plant has no spin model yet, and the two-wheel env refuses it)
     cls, extra = (RiderTwoWheelEnv, dict(spin_prob=spin_prob)) if spin_prob > 0.0 else (RiderBalanceEnv, {})
-    return lambda: cls(add_noise=True, domain_rand=domain_rand, frame_stack=frame_stack,
+    params = replace(DEFAULT, plant=plant)
+    return lambda: cls(params=params, add_noise=True, domain_rand=domain_rand, frame_stack=frame_stack,
                        mirror_aug=mirror_aug, vel_pen=vel_pen, rate_dr=rate_dr, rate_pen=rate_pen,
                        pos_anchor=pos_anchor,
                        drive_train=drive_train, fw_obs=fw_obs, drive_lead=drive_lead, pitch_dis=pitch_dis,
-                       turn_obs=turn_obs, **extra)
+                       turn_obs=turn_obs, stick_events=stick_events, **extra)
 
 
-def evaluate(model, vecnorm, frame_stack=1, n=20, fw_obs=True, turn_obs=False):
-    env = RiderBalanceEnv(add_noise=False, frame_stack=frame_stack, fw_obs=fw_obs, turn_obs=turn_obs)
+def evaluate(model, vecnorm, frame_stack=1, n=20, fw_obs=True, turn_obs=False, plant="servo"):
+    env = RiderBalanceEnv(params=replace(DEFAULT, plant=plant), add_noise=False, frame_stack=frame_stack,
+                          fw_obs=fw_obs, turn_obs=turn_obs)
     results = []
     for s in range(n):
         obs, _ = env.reset(seed=100 + s)
@@ -85,10 +91,13 @@ def anchor_set(model, vecnorm, args):
     'moving' (without the stick) left starts and reversals free: ppo_da5_s0 learned a violent start and fell
     backwards twice on the floor (full stick from standing, and full forward into reverse)."""
     import torch as th
-    env = RiderTwoWheelEnv(add_noise=True, domain_rand=args.domain_rand, frame_stack=args.frame_stack,
-                           mirror_aug=not args.no_mirror, rate_dr=not args.no_rate_dr, rate_pen=args.rate_pen,
-                           drive_train=args.drive_train, drive_lead=args.drive_lead, pitch_dis=args.pitch_dis,
-                           spin_prob=0.0, turn_obs=args.turn_obs)
+    # the plant being trained on (the two-wheel env with no spins is the servo's straight drive; the measured plant
+    # has only the one-wheel env)
+    cls, extra = (RiderBalanceEnv, {}) if args.plant == "measured" else (RiderTwoWheelEnv, dict(spin_prob=0.0))
+    env = cls(params=replace(DEFAULT, plant=args.plant), add_noise=True, domain_rand=args.domain_rand,
+              frame_stack=args.frame_stack, mirror_aug=not args.no_mirror, rate_dr=not args.no_rate_dr,
+              rate_pen=args.rate_pen, drive_train=args.drive_train, drive_lead=args.drive_lead,
+              pitch_dis=args.pitch_dis, turn_obs=args.turn_obs, stick_events=args.stick_events, **extra)
     obs, _ = env.reset(seed=args.seed)
     states = []
     while len(states) < args.anchor_steps:
@@ -180,6 +189,10 @@ if __name__ == "__main__":
     ap.add_argument("--lead_data", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                          "floor_spins_ld8s6_2026-10-20.csv"))
     ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--plant", default="servo", choices=("servo", "measured"))   # RiderParams.plant (2026-10-28):
+                                                               # "measured" = measured_plant.py; no spins (spin_prob 0)
+    ap.add_argument("--stick_events", type=float, default=0.0)  # share of drive episodes with a release or a
+                                                               # reversal partway through (2026-10-28)
     ap.add_argument("--turn_obs", action="store_true")         # 8th obs per frame: |turnrate command| (two-wheel env).
                                                                # With --init of a 7-obs policy, its network is WIDENED
                                                                # with zero weights -> it starts as exactly that policy
@@ -192,7 +205,7 @@ if __name__ == "__main__":
                                  pos_anchor=args.pos_anchor, rate_pen=args.rate_pen,
                                  drive_train=args.drive_train, fw_obs=not args.legacy_obs,
                                  drive_lead=args.drive_lead, pitch_dis=args.pitch_dis, spin_prob=args.spin_prob,
-                                 turn_obs=args.turn_obs),
+                                 turn_obs=args.turn_obs, plant=args.plant, stick_events=args.stick_events),
                         n_envs=args.nenv, seed=args.seed)
     common = dict(verbose=1, device="cpu", n_steps=1024, batch_size=2048, gamma=0.997,
                   gae_lambda=0.95, learning_rate=args.lr, policy_kwargs=dict(net_arch=[64, 64]),
@@ -234,5 +247,5 @@ if __name__ == "__main__":
 
     venv.training = False
     print("eval (deterministic, noise off, 20 seeds):")
-    res = evaluate(model, venv, args.frame_stack, fw_obs=not args.legacy_obs, turn_obs=args.turn_obs)
+    res = evaluate(model, venv, args.frame_stack, fw_obs=not args.legacy_obs, turn_obs=args.turn_obs, plant=args.plant)
     summarize(res)

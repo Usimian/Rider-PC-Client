@@ -36,7 +36,7 @@ class RiderParams:
     # loop rate (~12 ms / ~8 ms at 234 Hz). See docs/loop_delay_budget.md.
     fw_pol_vel_lp: float = 0.7             # KNOWN  gPolVelLP: xvelP = lp*xvelP + (1-lp)*d(wheel_x)/dt
     fw_rate_lp: float = 0.6                # KNOWN  dqf = 0.6*dqf + 0.4*gyro_rate
-    fw_drive_vel_lp: float = 0.9           # KNOWN  gPosVelLP: LP on the velocity feeding the drive loop's D term
+                                           # (gPosVelLP and the rest of the position loop: fw_drive.Gains)
 
     # ---------- mass / inertia (MEASURED 2026-06-13, except wheel split) ----------
     track_width_m: float = 0.097           # MEASURED  wheel center-to-center (97 mm)

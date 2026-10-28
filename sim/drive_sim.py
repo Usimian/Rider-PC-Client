@@ -23,20 +23,20 @@ import argparse
 import numpy as np
 from collections import deque
 from dataclasses import replace
-from rider_env import RiderBalanceEnv, SpinActuator, drive_ramp
+from rider_env import RiderBalanceEnv, SpinActuator
+from fw_drive import Gains, PolicyStickDrive, drive_ramp
 from rider_env_twowheel import RiderTwoWheelEnv
 from rider_params import DEFAULT
 
-# --- firmware drive gains (main.cpp POLICY defaults, reconciled 2026-08-13) ---
-K, KI, KD = 20.0, 1.0, 10.0         # gPosHoldK (poshold) / gPosHoldKi (poshi) / gDriveKd (drivekd, MOVING regime)
-POSMAX_DEG = 8.0                    # gPosHoldMax: setpoint-bias clamp (deg). 5 -> 8 with the LQR-like drive (2026-10-19):
-                                    # at 5 it pinned in low-legs reverse (3 deg offset + reverse lean) -> 0.25 m/s
-AMAX = 0.4                          # gPosAmax: accel cap (m/s^2) -- 0.8 -> 0.4 fw default 2026-10-19
-DMAX = 0.8                          # gPosDmax: BRAKING cap (m/s^2), separate from AMAX since 2026-10-26
-VEL_LP = DEFAULT.fw_drive_vel_lp    # gPosVelLP: LP on velocity feeding the D term
-INTBAND = 0.15                      # gPosIntBand: integrate only within this of the FINAL target
-DEADBAND = 0.012                    # gPosDeadband: no P term / no integration this close to the hold target
-VMAX = 0.30                         # gPosVmax = gPosVmaxBack (full stick, both directions) -- 0.25 -> 0.30 2026-10-19
+# --- firmware drive gains: fw_drive.Gains (main.cpp's position loop around the policy, its one source); module
+# names kept so sweeps can set them (drive_gain_sweep.py: ds.K = ...) ---
+_G = Gains()
+K, KI, KD = _G.K, _G.KI, _G.KD      # gPosHoldK (poshold) / gPosHoldKi (poshi) / gDriveKd (drivekd, MOVING regime)
+POSMAX_DEG = _G.POSMAX              # gPosHoldMax: setpoint-bias clamp (deg)
+AMAX, DMAX = _G.AMAX, _G.DMAX       # gPosAmax / gPosDmax: speeding up / braking (m/s^2)
+VEL_LP = _G.VELLP                   # gPosVelLP: LP on velocity feeding the D term
+INTBAND, DEADBAND = _G.INTBAND, _G.DEADBAND   # gPosIntBand / gPosDeadband (m)
+VMAX = _G.VMAX                      # gPosVmax = gPosVmaxBack (full stick, both directions)
 HOLD_S = 1.5                        # stick runs start from a HOLD this long (the hold integral builds, as on the robot)
 DEG2RAD = 0.017453292
 WHEEL_R = 0.03
@@ -156,6 +156,9 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
     tgt = x0 + direction * 5.0                              # far target => cruise at vmax the whole run
     tgt_eff = x0; vdes_s = 0.0; xvelF = 0.0; prevX = x0; pint = 0.0; pint_pos = 0.0
     vest = 0.0; lqr_ix = 0.0; was_driving = False; hold_tgt = x0
+    pdrive = PolicyStickDrive(x0, Gains(K=K, KI=KI, KD=KD, POSMAX=POSMAX_DEG, AMAX=AMAX, DMAX=DMAX, VMAX=VMAX,
+                                        VELLP=VEL_LP, LEASH=leash, DEADBAND=DEADBAND, INTBAND=INTBAND),
+                              lead=(drive == "lead"), drive_int=drive_int)
     stack = deque(maxlen=2)
     log = []
     n = int(T / dt)
@@ -203,39 +206,10 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
             bias_deg = 0.0
         else:
             if stick:
-                # STICK (main.cpp): HOLD until hold_s (target latched at x0; the hold integral builds, with
-                # the deadband), then full stick: vdes ramps at AMAX. Released: the hold trapezoid brakes the
-                # target to the home (x0, or the release stop point) from the current speed.
-                if driving:
-                    vcmd = sdir * vmax
-                else:
-                    dist = hold_tgt - tgt_eff
-                    vcap = min(VMAX, np.sqrt(2 * DMAX * abs(dist)))
-                    vcmd = vcap if dist >= 0 else -vcap
-                vdes_s = drive_ramp(vdes_s, vcmd, dt, AMAX, DMAX)
-                vdes = vdes_s
-                if driving and drive == "latch":
-                    # target tracks wheel_x every cycle (posErr 0), integral FROZEN: lean = KD*(xvelF - vdes) + cancel
-                    tgt_eff = x
-                    pos_err = 0.0
-                elif driving:
-                    # 'lead': the target advances at the commanded speed; the robot is held to it (LQR-like)
-                    tgt_eff += vdes_s * dt
-                    tgt_eff = float(np.clip(tgt_eff, x - leash, x + leash))   # dragged, never further than the leash
-                    pos_err = x - tgt_eff
-                    if drive_int:
-                        pint_pos = float(np.clip(pint_pos + pos_err * dt, -kiLim, kiLim))
-                else:
-                    tgt_eff += vdes_s * dt
-                    if (dist >= 0 and tgt_eff > hold_tgt) or (dist < 0 and tgt_eff < hold_tgt):
-                        tgt_eff = hold_tgt; vdes_s = 0.0               # never coast past the home
-                    vdes = vdes_s
-                    pos_err = x - tgt_eff
-                    inband = abs(pos_err) < DEADBAND
-                    if tgt_eff == hold_tgt and abs(pos_err) < INTBAND and not inband:
-                        pint_pos = float(np.clip(pint_pos + pos_err * dt, -kiLim, kiLim))
-                    if inband:
-                        pos_err = 0.0
+                # STICK (main.cpp): HOLD until hold_s, then full stick; released, the hold trapezoid brakes the
+                # target to the home -- fw_drive.PolicyStickDrive, the copy the training env runs too
+                bias_deg = pdrive.step(sdir * vmax if driving else 0.0, x, xvel, dt)
+                vdes_s = pdrive.vdes_s
             else:
                 # 'ptgt' distance move: trapezoidal profile (brake-distance capped) to a far target, P-term lean
                 dist = tgt - tgt_eff
@@ -248,7 +222,7 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
                 pos_err = x - tgt_eff
                 if tgt_eff == tgt and abs(pos_err) < INTBAND:
                     pint_pos = float(np.clip(pint_pos + pos_err * dt, -kiLim, kiLim))
-            bias_deg = np.clip(K * pos_err + KI * pint_pos + KD * (xvelF - vdes), -POSMAX_DEG, POSMAX_DEG)
+                bias_deg = np.clip(K * pos_err + KI * pint_pos + KD * (xvelF - vdes), -POSMAX_DEG, POSMAX_DEG)
             bias_rad = bias_deg * DEG2RAD
             pr_pitch = pitch_obs + bias_rad                 # setpoint-tilted (possibly accel-corrupted) pitch obs
             pint = float(np.clip(pint + pr_pitch * dt, -1.0, 1.0))

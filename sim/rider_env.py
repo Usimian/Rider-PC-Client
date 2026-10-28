@@ -16,6 +16,7 @@ from dataclasses import replace
 from rider_params import DEFAULT, RiderParams
 from rider_model import build_mjcf
 import measured_plant
+from fw_drive import Gains, PolicyStickDrive
 
 # Domain-randomization ranges. Now that the actuator is MEASURED, these are tight
 # around the measured values (the residual uncertainty), not wide guesses -- which
@@ -43,7 +44,8 @@ DR_RANGES = {
 # The same for the measured plant (RiderParams.plant = "measured"), whose motor has no lag or dead zone of its own
 # to randomize: ASSUMED ranges (2026-10-28), not measured -- the battery (motor strength), the friction, a cycle late.
 DR_MEASURED = {
-    "motor_gain":  (0.85, 1.15),       # ku: a full pack drives harder than a low one
+    "motor_gain":  (0.75, 1.15),       # ku: a full pack drives harder than a low one. 0.85 -> 0.75 (2026-10-28): the
+                                       # floor fall at 69 % battery matched the sim at ~0.85 (0.47 m/s overshoot)
     "motor_fric":  (0.7, 1.3),         # the Coulomb friction (33 units)
     "delay_steps": (0, 1),             # whole control steps between the policy's output and the motor
 }
@@ -107,39 +109,15 @@ class FirmwareSensing:
         self.rate_f = rl * self.rate_f + (1.0 - rl) * gyro_rate
         return self.rate_f, self.xvelP, self.xvelP / self.p.wheel_radius_m
 
-# --- drive-in-training loop (matches esp32_rider_fw main.cpp + drive_sim.py) ---
-# When drive_train=True, each episode commands a random cruise velocity and runs the firmware's
-# EXACT setpoint-tilt loop, so the policy learns to hold the driving lean at the real 34 ms delay
-# (a pure balance-in-place policy has no forward-drive authority -> falls at full stick).
-DRIVE_K, DRIVE_KI, DRIVE_KD = 20.0, 1.0, 10.0   # gPosHoldK / gPosHoldKi / gDriveKd (MOVING regime)
-DRIVE_POSMAX_DEG = 8.0                           # gPosHoldMax (setpoint-bias clamp, deg); 5 -> 8 with drive_lead (2026-10-19)
-DRIVE_AMAX  = 0.4                                 # gPosAmax  (accel cap m/s^2) -- 0.8 -> 0.4 fw default 2026-10-19
-DRIVE_DMAX  = 0.8                                 # gPosDmax  (BRAKING cap m/s^2, 2026-10-26): the ramp while speed falls
-DRIVE_VMAX  = 0.30                                # gPosVmax  (full-stick speed cap m/s) -- 0.25 -> 0.30 2026-10-19
+# --- drive-in-training loop: the firmware's position loop around the policy (fw_drive.PolicyStickDrive, the one
+# copy drive_sim runs too; main.cpp's gains in fw_drive.Gains). When drive_train=True each episode holds, then
+# drives at a random speed, so the policy learns to hold the driving lean (a pure balance-in-place policy has no
+# forward-drive authority -> falls at full stick). stick_events (2026-10-28): that share of the drive episodes
+# also has a release or a reversal partway through, as the floor drives do.
 DRIVE_TRAIN_VMAX = 0.35                           # training samples cruise speeds up to this: margin over the fw cap
-DRIVE_VELLP = 0.9                                 # gPosVelLP (LP on velocity feeding the D term)
-# HOLD integral (main.cpp posErrInt): integrates position error while HOLDING (target settled, within
-# gPosIntBand, outside the gPosDeadband), clamped to gPosHoldMax/gPosHoldKi; it cancels the policy's own
-# command bias at rest. Since 2026-10-18 it is KEPT (frozen) through a stick drive. Before 2026-10-19 the
-# training env never integrated it at all (always 0) -- unlike every real drive, which starts from a hold.
-DRIVE_INTBAND  = 0.15                             # gPosIntBand (m)
-DRIVE_DEADBAND = 0.012                            # gPosDeadband (m)
-DRIVE_KILIM    = DRIVE_POSMAX_DEG / DRIVE_KI      # integral clamp (m*s)
 DRIVE_HOLD_S   = (1.0, 2.5)                       # drive episodes start with a hold this long (real use: hold, then drive)
-DRIVE_LEASH    = 0.25                             # drive_lead: the moving target stays within this of the robot (m)
-
-
-def drive_ramp(v, tgt, dt, amax=None, dmax=None):
-    """One step of the firmware's drive-speed ramp (main.cpp driveRamp): DRIVE_DMAX while the speed falls (braking),
-    DRIVE_AMAX while it rises; a braking step stops at 0 instead of carrying through it. amax/dmax override."""
-    amax = DRIVE_AMAX if amax is None else amax
-    dmax = DRIVE_DMAX if dmax is None else dmax
-    braking = (v > 0.0 and tgt < v) or (v < 0.0 and tgt > v)
-    d = (dmax if braking else amax) * dt
-    n = v + d if tgt > v + d else (v - d if tgt < v - d else tgt)
-    if braking and ((v > 0.0 and n < 0.0) or (v < 0.0 and n > 0.0)):
-        n = 0.0
-    return n
+EVENT_AFTER_S  = (1.0, 3.5)                       # a stick event this long after the drive starts
+EVENT_DEADZONE_S = (0.0, 0.2)                     # a reversal passes through the stick's dead zone for this long
 # pitch_dis: errors in the pitch the controller is fed, as MEASURED on the floor 2026-10-19 -- a balance point moved
 # by the leg height (~3 deg at the lowest legs) and a sensor drift that builds during fast turns (~2 deg).
 PDIS_OFFSET_DEG = (-4.0, 4.0)                     # per-episode constant offset
@@ -257,8 +235,11 @@ class RiderBalanceEnv(gym.Env):
                  mirror_aug: bool = False, vel_pen: float = 0.0, rate_dr: bool = True,
                  pos_anchor: float = 0.0, rate_pen: float = 0.30,
                  drive_train: bool = False, fw_obs: bool = True, drive_lead: bool = False,
-                 pitch_dis: bool = False, turn_obs: bool = False):
+                 pitch_dis: bool = False, turn_obs: bool = False, stick_events: float = 0.0,
+                 drive_gains: Gains = None):
         super().__init__()
+        self.stick_events = stick_events            # share of drive episodes with a release or reversal partway
+        self.drive_gains = drive_gains or Gains()   # the firmware's position-loop settings (fw_drive.Gains)
         # turn_obs (2026-10-20): an 8th obs per frame, |turnrate command| (full stick 1.0) -- the policy can tell a
         # spin from holding still. Mirror-invariant (it is a size). Always 0 in the 2-D env (no turns).
         self.turn_obs = turn_obs
@@ -428,37 +409,19 @@ class RiderBalanceEnv(gym.Env):
             return
         dt = self.ctrl_dt
         x = float(self._raw_state()[2])                        # forward travel, not world x (the two-wheel env turns)
-        if self._steps >= self._drive_start_step:              # hold first, then the stick goes over
-            self._vdes_cmd = self._drive_cmd
-        self._vdes_s = drive_ramp(self._vdes_s, self._vdes_cmd, dt)   # the firmware's driveRamp
-        self._tgt_eff += self._vdes_s * dt
+        self._vdes_cmd = 0.0                                    # the stick: hold first, then over; then any event
+        for step, cmd in self._stick_plan:
+            if self._steps >= step:
+                self._vdes_cmd = cmd
         # the firmware's drive loop differences the same ENCODER wheel_x the policy's velocity comes from
         xvel = self.sense.xvel_raw if self.fw_obs else (x - self._prevX) / dt
         self._prevX = x
-        self._xvelF = DRIVE_VELLP * self._xvelF + (1.0 - DRIVE_VELLP) * xvel
-        if abs(self._vdes_cmd) > 0.001 and self.drive_lead:
-            # LQR-LIKE STICK DRIVE: the target advanced at the ramped speed above; the robot is held to it by
-            # the position P (dragged along if more than DRIVE_LEASH away); the hold integral stays frozen.
-            self._tgt_eff = float(np.clip(self._tgt_eff, x - DRIVE_LEASH, x + DRIVE_LEASH))
-            posErr = x - self._tgt_eff
-        elif abs(self._vdes_cmd) > 0.001:
-            # STICK DRIVE (main.cpp): the target tracks wheel_x every cycle (posErr == 0) and the hold
-            # integral is FROZEN (kept, not zeroed -- fw 2026-10-18), so the lean is the velocity-D term
-            # plus the integral's bias cancel. (Before 2026-09-16 the sim let the target run away and
-            # leaned up to 5 deg on the P term -- authority the firmware never gives.)
-            self._tgt_eff = x
-            posErr = 0.0
-        else:
-            posErr = x - self._tgt_eff
-            inband = abs(posErr) < DRIVE_DEADBAND
-            if abs(posErr) < DRIVE_INTBAND and not inband and abs(self._vdes_s) < 1e-6:
-                self._posErrInt = float(np.clip(self._posErrInt + posErr * dt, -DRIVE_KILIM, DRIVE_KILIM))
-            if inband:
-                posErr = 0.0
-        bias_deg = float(np.clip(DRIVE_K * posErr + DRIVE_KI * self._posErrInt
-                                 + DRIVE_KD * (self._xvelF - self._vdes_s),
-                                 -DRIVE_POSMAX_DEG, DRIVE_POSMAX_DEG))
-        self._bias_rad = bias_deg * _DEG2RAD
+        self._bias_rad = self._drive.step(self._vdes_cmd, x, xvel, dt) * _DEG2RAD
+
+    @property
+    def _vdes_s(self):
+        """The firmware's ramped drive speed (m/s) -- train.anchor_set reads it."""
+        return self._drive.vdes_s if self.drive_train else 0.0
 
     def _pitch_dis_now(self):
         """The pitch error (rad, real frame) at this step: the episode's offset + the turn-style drift profile."""
@@ -535,7 +498,16 @@ class RiderBalanceEnv(gym.Env):
                 float(self.np_random.uniform(-DRIVE_TRAIN_VMAX, DRIVE_TRAIN_VMAX))
             self._drive_start_step = int(self.np_random.uniform(*DRIVE_HOLD_S) / self.ctrl_dt)
             self._vdes_cmd = 0.0
-            self._tgt_eff = x0; self._vdes_s = 0.0; self._xvelF = 0.0; self._prevX = x0; self._posErrInt = 0.0
+            self._stick_plan = [(self._drive_start_step, self._drive_cmd)]      # (from this step, the stick's speed)
+            if self.stick_events > 0.0 and self._drive_cmd != 0.0 and self.np_random.uniform() < self.stick_events:
+                ev = self._drive_start_step + int(self.np_random.uniform(*EVENT_AFTER_S) / self.ctrl_dt)
+                if self.np_random.uniform() < 0.5:
+                    self._stick_plan.append((ev, 0.0))                          # a release: let go, leave it
+                else:                                                           # a reversal through the dead zone
+                    dz = int(self.np_random.uniform(*EVENT_DEADZONE_S) / self.ctrl_dt)
+                    self._stick_plan += [(ev, 0.0), (ev + dz, -self._drive_cmd)]
+            self._drive = PolicyStickDrive(x0, self.drive_gains, lead=self.drive_lead)
+            self._prevX = x0
         if self.pitch_dis:
             u = self.np_random.uniform
             self._dis_off = u(*PDIS_OFFSET_DEG)
