@@ -66,7 +66,7 @@ def lowp(x, hi):
 def main():
     files = sys.argv[1:] or sorted(f for f in glob.glob(os.path.join(
         os.path.dirname(__file__), "..", "..", "data", "captures", "*.csv"))
-        if "pacc_x100" in open(f).readline())
+        if open(f).readline().startswith("episode,") and "pacc_x100" in open(f).readline())
     segs = [s for f in files for s in segments(f)]
     print(f"{len(segs)} non-spin runs from {len(files)} captures")
 
