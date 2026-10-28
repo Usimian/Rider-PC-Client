@@ -115,11 +115,10 @@ function controls() {
   lb.textContent = "Roll Balance: " + (!ok ? "–" : lev ? "ON" : "off");
   lb.className = "btn" + (lev ? " active" : "");
   // controller: switchable only while NOT balancing (the firmware refuses it anyway)
-  const pol = ok && S.mode === "POL", lqr = ok && S.mode === "LQR", lqr2 = ok && S.mode === "LQR2";
+  const pol = ok && S.mode === "POL", lqr = ok && S.mode === "LQR";
   $("ctrlpol").className = "btn pol" + (pol ? " active" : "");
   $("ctrllqr").className = "btn lqr" + (lqr ? " active" : "");
-  $("ctrllqr2").className = "btn lqr" + (lqr2 ? " active" : "");
-  $("ctrlpol").disabled = $("ctrllqr").disabled = $("ctrllqr2").disabled = !ok || bal;
+  $("ctrlpol").disabled = $("ctrllqr").disabled = !ok || bal;
   set("ctrlhint", ok && bal ? "stop balancing to switch" : "");
   $("speed").disabled = !ok;
   $("zero").disabled = !ok;
@@ -137,7 +136,6 @@ $("levbtn").addEventListener("click", () => {
 });
 $("ctrlpol").addEventListener("click", () => { if (live() && !S.roll_balance_enabled) line("ctrl 0"); });
 $("ctrllqr").addEventListener("click", () => { if (live() && !S.roll_balance_enabled) line("ctrl 1"); });
-$("ctrllqr2").addEventListener("click", () => { if (live() && !S.roll_balance_enabled) line("ctrl 2"); });
 $("zero").addEventListener("click", () => { if (live()) line("poszero"); });
 
 // Top speed: a RETAINED message the joystick service reads (full stick = this speed). Shown from the

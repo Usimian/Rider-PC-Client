@@ -42,7 +42,8 @@ DEG2RAD = 0.017453292
 WHEEL_R = 0.03
 LEASH = 0.25                        # 'lead' drive: the moving target may run at most this far from the robot (m)
 POL_FULL_CMD = 30.0 * 7.764         # raw wheel-cmd at policy action 1 (main.cpp POL_VELMAX_RADS x POL_RAW_PER_RADS)
-# --- firmware LQR (main.cpp defaults, floor-tuned 2026-06-19 + drive rework 2026-10-18) ---
+# --- the June LQR (main.cpp until 2026-10-28, git tag lqr-and-lqr2-2026-10-28): REMOVED from the firmware, kept here
+# only to reproduce the floor recordings made under it (wheel_sweep.py replays the 10-19 LQR sweeps). ---
 LQR_X, LQR_XI, LQR_VX, LQR_Q, LQR_DQ = -500.0, -30.0, -6.0, 32.0, 3.0   # gLqrX / gLqrXi / gLqrVx / gLqrQ / gLqrDq
 LQR_IXMAX = 3.0                     # gLqrIxMax (m*s)
 LQR_VREF = 270.0                    # gLqrVRef: speed units per m/s of vdes
@@ -78,7 +79,7 @@ def spin_encoders(env):
 
 
 def lqr_controller(params):
-    """The firmware's LQR (main.cpp, floor-tuned gains + 2026-10-18 drive rework), in the sim frame.
+    """The June LQR (main.cpp until 2026-10-28, floor-tuned gains + 2026-10-18 drive rework), in the sim frame.
     Firmware: u = -(X*x + Xi*Ix + Vx*vx + Q*q + Dq*dq) + CmdFF*vdes, with q = theta - set (robot frame, forward lean
     makes it DECREASE) = -pitch_sim, dq = -rate_sim, x = wheel_x - target (m), vx = wheel speed (scaled units,
     ~265 per m/s) - VRef*vdes; then the stiction boost and the gUMax clamp. Returns u in raw wheel-cmd units."""
@@ -106,7 +107,7 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
       lowered (floor 2026-10-19: ~-3 at the lowest height -> forward creep, no reverse).
     drift_deg: a pitch-sensor drift (sim frame, deg) that builds over 1.5 s starting 1 s into the stick drive, as in
       a fast turn (floor 2026-10-19: ~-2 -> the robot sped up and fell forward).
-    controller: 'policy' (infer) or 'lqr' (the firmware LQR; infer unused).
+    controller: 'policy' (infer) or 'lqr' (the June LQR, for recordings made under it; infer unused).
     drive: the policy's stick-drive structure -- 'latch' (firmware now: target = wheel_x every cycle, only the
       velocity-D acts, hold integral frozen) or 'lead' (LQR-like: the target advances at the commanded speed and
       the position P keeps acting; it is dragged along if the robot falls more than `leash` m behind/ahead).

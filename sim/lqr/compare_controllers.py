@@ -7,8 +7,8 @@ noise), the firmware cycle as closed_loop.py copies it:
   standing   10 s after 2 s to settle: pitch sd, wheel sd, command sd (the noise the readings put in)
   push       a 30 deg/s shove forward at 3 s: largest lean, largest travel, mean distance from home 1-2 s after
   push, motors x2   the same with the motors twice as strong as modelled (the robot answers up to 1.6x more)
-LQR = the flashed law (raw encoder, speed smoothing 0.85 per cycle, its drive handling); LQR2 = main.cpp's: the
-Hover's IMU path, law, plan (1 m/s^2) and friction compensation, lqr_design.py's gains.
+June LQR = the law flashed until 2026-10-28 (raw encoder, speed smoothing 0.85 per cycle, its drive handling); LQR =
+main.cpp's now: the Hover's IMU path, law, plan (1 m/s^2) and friction compensation, lqr_design.py's gains.
 """
 import argparse
 from dataclasses import replace
@@ -55,9 +55,9 @@ def main():
     a = ap.parse_args()
     p = Params()
     p2 = replace(p, ku_over_b=2 * p.ku_over_b)
-    ctrls = [("LQR (as flashed)", lambda: Firmware(up_deg=UP))]
+    ctrls = [("June LQR (removed 10-28)", lambda: Firmware(up_deg=UP))]
     plan = dict(feedforward(p), a_max=1.0, t_jerk=0.12, gain=8.0)
-    ctrls.append(("LQR2 (as flashed: the Hover's)", lambda: Firmware(k=LQR2, up_deg=UP, fric_comp=True, plan=plan,
+    ctrls.append(("LQR (as flashed: the Hover's)", lambda: Firmware(k=LQR2, up_deg=UP, fric_comp=True, plan=plan,
                                                                      hover_imu=True, tau_v=0.100)))
     print(f"{'controller':44s} {'standing: pitch sd  wheel sd  cmd sd':38s} {'push: lean  travel  1-2 s after':31s} "
           f"{'motors x2: lean  travel  1-2 s after'}")

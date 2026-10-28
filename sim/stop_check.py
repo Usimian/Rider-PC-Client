@@ -8,7 +8,8 @@ only follows -- see drive_gain_sweep.py. Full flips swung the pitch 2.6-3.4 deg 
 Per controller, both directions, several seeds (drive_sim, the floor's 'lead' stick drive):
   RELEASE  full stick 1.5 -> 4.5 s, then released: travel in the next 3 s (cm), pitch swing in the next 1.5 s
   FLIP     full stick, at 4.5 s 0.15 s in the dead zone, then full the other way: pitch swing in the next 1.5 s
-Run:  ./.venv/bin/python stop_check.py ppo_lb25_s4 [more policies] [--seeds 5]   (LQR is always included)
+Run:  ./.venv/bin/python stop_check.py ppo_lb25_s4 [more policies] [--seeds 5]
+(The June LQR, the floor reference above, was removed from the firmware 2026-10-28; it is no longer run here.)
 """
 import argparse
 import numpy as np
@@ -30,12 +31,12 @@ def one(infer, kw0, d, seed, **kw):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("policies", nargs="*")
+    ap.add_argument("policies", nargs="+")
     ap.add_argument("--seeds", type=int, default=5)
     a = ap.parse_args()
     print(f"{'controller':14s} {'release travel cm':>18s} {'release swing':>14s} {'flip swing':>11s} {'falls':>6s}")
-    for name in ["LQR"] + a.policies:
-        infer, kw0 = (None, dict(controller="lqr")) if name == "LQR" else (ds.load_policy(name), dict(drive="lead"))
+    for name in a.policies:
+        infer, kw0 = ds.load_policy(name), dict(drive="lead")
         rel, fl, falls = [], [], 0
         for d in (+1, -1):
             for s in range(a.seeds):

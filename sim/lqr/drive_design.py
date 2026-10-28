@@ -26,7 +26,8 @@ import linear_model as L
 from closed_loop import CYCLE_S, U_MAX, Firmware, run
 from model import Params
 
-LQR2 = dict(x=-1916.0, xi=0.0, vx=-7.46, q=59.4, dq=1.39)      # main.cpp gL2* (its own plan integral, not xi)
+LQR2 = dict(x=-1916.0, xi=0.0, vx=-7.46, q=59.4, dq=1.39)      # main.cpp gLqr* (named LQR2 until 2026-10-28; its own
+                                                                # plan integral, not xi)
 UP = 2.8
 
 
@@ -74,10 +75,10 @@ def main():
     ff = feedforward(p0)
     print(f"plan per m/s^2: lean {np.degrees(ff['th_a']):.2f} deg, command {ff['u_a']:.0f}; per m/s: lean "
           f"{np.degrees(ff['th_v']):.2f} deg, command {ff['u_v']:.0f}  (Hover: 14 deg per m/s^2, 333 per m/s)")
-    ctrls = [("LQR, today's drive", lambda: Firmware(up_deg=UP))]
+    ctrls = [("June LQR (removed)", lambda: Firmware(up_deg=UP))]
     for am in a.a_max:                                  # LQR2 as main.cpp has it: the Hover's IMU path, law and plan
         plan = dict(ff, a_max=am, t_jerk=a.t_jerk, gain=a.gain)
-        ctrls.append((f"LQR2, Hover plan {am:g} m/s^2",
+        ctrls.append((f"LQR, Hover plan {am:g} m/s^2",
                       lambda plan=plan: Firmware(k=LQR2, up_deg=UP, fric_comp=True, plan=plan, hover_imu=True,
                                                  tau_v=0.100)))
     for motor in a.motors:

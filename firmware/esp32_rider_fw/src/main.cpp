@@ -1,23 +1,16 @@
-// XGO Rider — self-balance firmware (Milestone 5: 4-state LQR).
+// XGO Rider — self-balance firmware: the RL policy (ctrl 0) or the LQR (ctrl 1), chosen at runtime.
 //
-// Replaces the tilt-only PID with the same FULL-STATE feedback the factory /
-// RIG-Omni firmware uses, which is what let it "home to a position" and move
-// fast enough to catch itself:
+// The LQR is the Hover's (~/hover: robot.cc Tightest, plan_step, friction; imu.cc; hover_board.cc imu_task), with the
+// Rider's measured numbers (sim/lqr/): one IMU loop (imuTask), the axle from the encoders corrected for the body's
+// rocking, a driving plan, friction compensation; u is applied L:+u / R:-u, clamped to +/-gUMax.
 //
-//   u = POL * ( K0*(wheel_x - stable_pos)   // wheel POSITION error (m)  <-- new
-//             + K1*(wheel_vx - vx)          // wheel VELOCITY error      <-- new
-//             + K2*(tilt - setpoint)        // tilt angle (deg)
-//             + K3*tilt_rate )              // tilt rate (deg/s)
-//   + stiction boost (+/-10 past +/-20), clamped to +/-Umax, applied L:+u / R:-u.
-//
-//   IMU   : ICM-42670, I2C GPIO18(SDA)/19(SCL) addr 0x69. tilt=atan2(ay,az).
+//   IMU   : ICM-42670, I2C GPIO18(SDA)/19(SCL) addr 0x69, read only by imuTask.
 //   Wheels: UART2 servo bus GPIO13(RX)/14(TX) @1Mbps, IDs 11(L)/21(R).
 //           torque  = SYNC_WRITE reg 0x1E ; read pos/vel = reg 0x24 (6 bytes).
 //           odom: 10-bit, wrap thresh 800; RIGHT wheel mirrored (matches L:+u/R:-u).
-//   Legs  : IDs 12/22 — torque FORCED OFF, never enabled (bad right encoder).
+//   Legs  : IDs 12/22, held at the chosen height while balancing (the leg state machine below).
 //   Hosts : UART0 (USB-C) and UART1 (Pi, RX=IO4/TX=IO5) both carry cmd+telemetry.
 //
-// Gains default to the factory values (1400 / 6.8 / 32 / 1.6); all live-tunable.
 // Build: ~/.xgo-cal/bin/pio run -d esp32_rider_fw ; flash firmware.bin @0x10000
 
 #include <Arduino.h>
@@ -62,118 +55,64 @@ volatile float gImuZero = 0.0f;     // base lean trim (deg); setpoint carries th
 volatile float gSetpoint = 3.55f;   // balance tilt (deg); pitch = theta - set. 3.64->3.55 (2026-06-19, FLOOR):
                                     // bare-balance crept backward at 3.64; 3.55 = true no-creep balance point (0.0 mm/s
                                     // drift over 24s on the floor). Higher = rearward drive. 'set' to tune.
-// ---- LQR full-state feedback: u = -(Kx*x + Kvx*vx + Kq*q + Kdq*dq) ----
-// Ported from RIG-Omni hover/xgo.cc (the ESP32-S3 SUCCESSOR product -- a sibling reference, NOT the Rider's
-// own factory firmware). x=position err (m), vx=velocity err (m/s), q=pitch err (deg), dq=pitch rate (deg/s).
-// Torque-direct (wheel L:+u/R:-u). FLOOR-TUNED on the real plant (the stand masks the dynamics). RIG-Omni's
-// magnitudes (1400/6.8/32/1.6) do NOT transfer -- our wheel frame is inverted (pos/vel gains NEGATIVE) and
-// 1400 diverges here. Live-tune: 'lqrx/lqrvx/lqrq/lqrdq'.
-volatile float gLqrX  = -500.0f;    // position-error gain. FLOOR-TUNED 2026-06-19: NEGATIVE (our wheel frame is
-                                    // inverted vs factory's +1400, which diverges here). Sweet spot -500 (holds tight,
-                                    // stable; -600 plateaus, -700 diverges). 'lqrx' to tune.
-volatile float gLqrVx = -6.0f;      // velocity-error gain (damping). NEGATIVE (frame-inverted). -6 w/ vlp=0.85 holds
-                                    // ~4.7mm; cliff ~-7. Capped by quantization-noisy encoder velocity -> velocity
-                                    // observer (gObsA/B below) gives a cleaner v -> allows more damping. 'lqrvx'.
-volatile float gLqrQ  = 32.0f;      // pitch-error gain (factory 32) -- balances; sign matches our working PD
-volatile float gLqrVRef   = 270.0f; // LQR speed reference scale: vel_est units per m/s of vdes. 270 = matched
-                                    // (MEASURED 2026-10-18; default since 2026-10-19, floor-verified with lqrcff);
-                                    // 1 = the old unit-mismatched drive. 'lqrvref'
-volatile float gLqrAccLean = 0.0f;  // LQR acceleration lean, deg per m/s^2 of commanded accel (0 = off; physics ~5.8). 'lqracclean'
-volatile float gLqrCmdFF  = 360.0f; // LQR wheel-command feedforward, cmd per m/s of vdes (360 = loaded-wheel fit,
-                                    // default since 2026-10-19; 0 = off). 'lqrcff'
-volatile float gLqrInLP   = 0.0f;   // FACTORY input filter on the LQR's pitch + rate: per-cycle LP coefficient
-                                    // (0 = off = June LQR; factory R-1.1.3 = 0.95 at 167 Hz). 'lqrinlp'
-volatile float gLqrInSlew = 5.0f;   // slew limit on the filtered pitch, deg/cycle (factory 5; 0 = none). 'lqrinslew'
-volatile float gLqrDq = 3.0f;       // pitch-rate gain. 1.6->3.0 (2026-06-19, FLOOR): factory 1.6 underdamps on our
-                                    // plant -> push-fall AND falls on placement at boot. 3.0 survives pushes (mild ~20Hz
-                                    // buzz, accepted). >=6 rings (rate-loop limit cycle). live-tune via 'lqrdq'.
-// position INTEGRAL: the factory position loop has a Ki (~0.0007) that drives the steady-state position
-// error to ZERO -- our proportional-only gLqrX parks NEAR home but leaves an offset ("not homing to
-// position"). Same sign as gLqrX. Anti-windup clamped; reset whenever the home re-anchors (enable / drive-stop).
-volatile float gLqrXi  = -30.0f;    // position-integral gain ('lqrxi'); 0 = off. raise |.| to home faster (watch fore-aft hunt)
-volatile float gLqrIxMax = 3.0f;    // anti-windup clamp on the position-error integral (m*s) ('lqrixmax')
-// ---- LQR2 (ctrl 2, 2026-10-28): the designed law, sim/lqr/ (the Hover's method on a model fitted to the
-// Rider's drops and floor sweeps). Same form and units as the LQR above, on corrected readings: the wheel
-// servos read the wheel's turn against the body, so the axle is wheel_x - r*pitch and its speed the
-// register + r*(forward lean rate) (MEASURED, tools/balance/imu_position_fit.py). The speed is smoothed
-// over a time constant in seconds after that correction (the LQR's LP_VEL is per reading). Friction
-// compensation replaces the factory boost: the measured friction (sim/lqr/model.py: 32.5 units) in the
-// direction the law pushes, tanh-blended through zero, read from the command smoothed over 30 ms (the
-// Hover's robot.cc kFric*). Gains: sim/lqr/lqr_design.py --tau-v 0.1, Bryson weights 15 mm, 0.03 m/s, 1 deg,
-// 20 deg/s, 100 units, stable with the motors x1/x2 and a cycle more delay. It drives by its own plan (gL2AMax,
-// below), not the LQR's drive handling; it shares the LQR block's fall cutout, enable/disable and telemetry.
-// The Hover's choices (2026-10-28): its 0.1 s speed smoothing gives gains next to its Tightest's (1936 / 8.26 /
-// 53.8 / 1.25). Floor: standing gyro rms 0.3-0.6 deg/s, no fast mode; pushes and drives to 0.28 m/s clean. The
-// first flash had 8 ms smoothing (-1844 / -6.89 / 46.0 / 3.67): it shook at 14 Hz on the floor, pinned at +/-400.
-// Redesigned on the Hover's IMU path in its own task (imuTask) (2026-10-28 evening; was -1694 / -6.78 / 53.3 / 1.32 on
-// the shared pitch estimate). The Hover's Tightest: 1936 / 8.26 / 53.8 / 1.25.
-volatile float gL2X    = -1916.0f;  // position gain, per m ('l2x')
-volatile float gL2Vx   = -7.46f;    // speed gain, per scaled speed unit ('l2vx')
-volatile float gL2Q    = 59.4f;     // pitch gain, per deg ('l2q')
-volatile float gL2Dq   = 1.39f;     // pitch-rate gain, per deg/s ('l2dq')
-volatile float gL2Up   = 2.8f;      // LQR2's pitch reference, deg on its IMU path: the measured balance point (the
-                                    // Hover's measured upright, imu_zero), drop tests + standing 10-28 ('l2up')
-volatile float gL2VTau = 0.100f;    // speed smoothing time constant, s ('l2vtau')
-volatile float gL2Fric = 32.5f;     // friction compensation, command units ('l2fric'; 0 = off)
-static const float L2_FRIC_WIDTH = 20.0f;   // command units: the tanh blend through zero
-static const float L2_FRIC_TAU   = 0.030f;  // s: smoothing of the command whose sign sets the friction's direction
-static const float L2_WHEEL_R    = 0.030f;  // m
-static const float L2_SPEED_PER_MPS = 327.6f * 4.5f * (60.0f * 3.14159265f / 1024.0f);   // scaled units per m/s (271)
-// LQR2 drives by the Hover's plan (2026-10-28; robot.cc plan_step, the Hover's sim/drive_design.py), in place of the
-// LQR's drive handling: the planned speed closes on the stick's at up to gL2AMax, its acceleration building over
-// L2_PLAN_TJERK; its position (the law's home) never gets more than L2_PLAN_LEAD from the axle; the law tracks the
-// plan's position, smoothed speed and lean (L2_PLAN_LEAN_PER_ACC per m/s^2), the plan's command is fed forward
-// (per m/s and per m/s^2), and the plan's own integral always runs (it replaces gLqrXi's). The lean and command per
-// speed / acceleration are the Rider model's steady values (sim/lqr/drive_design.py feedforward()); the rest are the
-// Hover's numbers. 'ptgt' distance moves do not drive LQR2 (the stick does). sim/lqr/drive_design.py ran it first.
-volatile float gL2AMax = 1.0f;                // plan acceleration limit, m/s^2 ('l2amax'; the Hover's 1.0)
-static const float L2_PLAN_TJERK = 0.12f;     // s for the acceleration to build up (Hover kPlanTJerk)
-static const float L2_PLAN_GAIN  = 8.0f;      // 1/s, how the plan's speed closes on the stick's (Hover kPlanGain)
-static const float L2_PLAN_LEAD  = 0.15f;     // m (Hover kPlanMaxLeadM)
-static const float L2_PLAN_KI    = 100.0f;    // command units per m s (Hover kPlanKi)
-static const float L2_PLAN_IMAX  = 100.0f;    // command units (Hover kPlanIMax)
-static const float L2_PLAN_LEAN_PER_ACC = 10.68f;   // deg per m/s^2 (Rider model; the Hover's 14.0)
-static const float L2_PLAN_U_PER_ACC    = 58.0f;    // command per m/s^2 (Rider model; the Hover's 47.2)
-static const float L2_PLAN_U_PER_SPEED  = 333.0f;   // command per m/s (Rider model; the Hover's 333.3)
-// ---- velocity observer (alpha-beta / g-h filter on wheel_x) ----
-// Raw wheel_vx (1024-cnt encoder differentiated) is quantization-noisy -> caps the velocity-damping
-// gain (the lqrvx cliff). This integrates a constant-velocity model and corrects with the encoder
-// position -> a SMOOTH, low-lag velocity. Feeds the LQR's velocity term -> should allow higher |lqrvx|
-// -> tighter hold (toward a couple mm). DEFAULT OFF (gObsA=0 -> falls back to raw wheel_vx, the known-good
-// 4.7mm config). Enable on the floor with 'obsa 0.5' then re-raise lqrvx. 'obsa'(alpha) / 'obsb'(beta).
-volatile float gObsA = 0.0f;        // alpha: position-correction gain (0=observer OFF; ~0.3-0.6 typical)
-volatile float gObsB = 0.10f;       // beta: velocity-correction gain (~0.05-0.2; higher tracks faster/noisier)
-// ---- drive velocity FEEDFORWARD ----
-// The LQR's velocity FEEDBACK (gLqrVx) is hold-tuned and pinned under the stability cliff, so it leans
-// the robot only weakly per unit speed -> drive tops out ~0.10 m/s. This FF commands drive directly,
-// proportional to the commanded velocity (vdes), decoupled from the hold gains, so it can drive fast
-// while the LQR keeps balance. Sign: NEGATIVE (forward = -u in our frame, like the other forward gains).
-// DEFAULT 0 (off) -> boots at the known-good no-drive config; ramp on the floor with 'driveff'.
-// NOW a LEAN feedforward: degrees of setpoint tilt per m/s commanded (folded into lqr_q, clamped +-6deg).
-// NEGATIVE = forward (forward drive leans th below setpoint). Try ~ -4 to -6; sign-verify on floor.
-volatile float gDriveFF = 0.0f;     // lean-FF: deg of setpoint tilt per m/s commanded velocity
+// ---- LQR (ctrl 1): the Hover's balance law (2026-10-28; ~/hover robot.cc), designed on a model fitted to the Rider's
+// drops and floor sweeps (sim/lqr/). It replaced the hand-tuned June LQR (-500 / -6 / 32 / 3 on the raw encoder; git tag
+// lqr-and-lqr2-2026-10-28 has both). The wheel servos read the wheel's turn against the body, so the axle is
+// wheel_x - r*pitch and its speed the register + r*(forward lean rate) (MEASURED, tools/balance/imu_position_fit.py),
+// smoothed over gLqrVTau. Friction compensation (the Hover's kFric*): the measured friction (sim/lqr/model.py: 32.5
+// units) in the direction the law pushes, tanh-blended through zero, read from the command smoothed over 30 ms. Gains:
+// sim/lqr/lqr_design.py, Bryson weights 15 mm, 0.03 m/s, 1 deg, 20 deg/s, 100 units, stable with the motors x1/x2 and a
+// cycle more delay; the Hover's Tightest is 1936 / 8.26 / 53.8 / 1.25. Floor 2026-10-28 (2026-10-28_lqr2_hover_exact_
+// watch.csv): standing pitch sd 0.02-0.09 deg, drives to 0.44 m/s, no falls. Its pitch comes from the Hover's IMU path
+// (lqrImuStep). The first version (8 ms smoothing, -1844 / -6.89 / 46.0 / 3.67) shook at 14 Hz on the floor.
+volatile float gLqrX    = -1916.0f; // position gain, per m ('lqrx')
+volatile float gLqrVx   = -7.46f;   // speed gain, per scaled speed unit ('lqrvx')
+volatile float gLqrQ    = 59.4f;    // pitch gain, per deg ('lqrq')
+volatile float gLqrDq   = 1.39f;    // pitch-rate gain, per deg/s ('lqrdq')
+volatile float gLqrUp   = 2.8f;     // the pitch reference, deg on its IMU path: the measured balance point (the Hover's
+                                    // measured upright, imu_zero), drop tests + standing 10-28 ('lqrup')
+volatile float gLqrVTau = 0.100f;   // speed smoothing time constant, s ('lqrvtau'; the Hover's 0.1)
+volatile float gLqrFric = 32.5f;    // friction compensation, command units ('lqrfric'; 0 = off)
+static const float LQR_FRIC_WIDTH = 20.0f;   // command units: the tanh blend through zero
+static const float LQR_FRIC_TAU   = 0.030f;  // s: smoothing of the command whose sign sets the friction's direction
+static const float LQR_WHEEL_R    = 0.030f;  // m
+static const float LQR_SPEED_PER_MPS = 327.6f * 4.5f * (60.0f * 3.14159265f / 1024.0f);   // scaled units per m/s (271)
+// The LQR drives by the Hover's plan (robot.cc plan_step): the planned speed closes on the stick's at up to gLqrAMax,
+// its acceleration building over LQR_PLAN_TJERK; its position (the law's home) never gets more than LQR_PLAN_LEAD
+// from the axle; the law tracks the plan's position, smoothed speed and lean (LQR_PLAN_LEAN_PER_ACC per m/s^2), the
+// plan's command is fed forward (per m/s and per m/s^2), and the plan's own integral always runs. The lean and command
+// per speed / acceleration are the Rider model's steady values (sim/lqr/drive_design.py feedforward()); the rest are
+// the Hover's numbers. 'ptgt' distance moves do not drive the LQR (the stick does).
+volatile float gLqrAMax = 1.0f;               // plan acceleration limit, m/s^2 ('lqramax'; the Hover's 1.0)
+static const float LQR_PLAN_TJERK = 0.12f;    // s for the acceleration to build up (Hover kPlanTJerk)
+static const float LQR_PLAN_GAIN  = 8.0f;     // 1/s, how the plan's speed closes on the stick's (Hover kPlanGain)
+static const float LQR_PLAN_LEAD  = 0.15f;    // m (Hover kPlanMaxLeadM)
+static const float LQR_PLAN_KI    = 100.0f;   // command units per m s (Hover kPlanKi)
+static const float LQR_PLAN_IMAX  = 100.0f;   // command units (Hover kPlanIMax)
+static const float LQR_PLAN_LEAN_PER_ACC = 10.68f;  // deg per m/s^2 (Rider model; the Hover's 14.0)
+static const float LQR_PLAN_U_PER_ACC    = 58.0f;   // command per m/s^2 (Rider model; the Hover's 47.2)
+static const float LQR_PLAN_U_PER_SPEED  = 333.0f;  // command per m/s (Rider model; the Hover's 333.3)
 // ---- neural-policy control. 'pol 1' to enable. ----
 // SIM-TRAINED, NOT YET HW-VERIFIED. Obs/action signs almost certainly need an
 // on-robot check (flip with 'polsign', and watch the obs match the sim's SI units).
 // ---- controller selection: RUNTIME, one binary carries both (2026-10-18) ----
 // Was a compile-time #ifdef split (env esp32 = policy, env esp32_lqr = LQR) so the wrong one
 // could never be armed by accident. The runtime switch keeps that guarantee a different way:
-// 'ctrl 0|1|2' is ACCEPTED ONLY WHILE DISABLED (en=0), and the active controller is reported in
-// every telemetry line (ctrl=POL|LQR|LQR2 -> LCD + GUI). LQR2 (2026-10-28) is the designed law
-// (sim/lqr/), beside today's LQR for the floor comparison; the loser is removed after it.
+// 'ctrl 0|1' is ACCEPTED ONLY WHILE DISABLED (en=0), and the active controller is reported in
+// every telemetry line (ctrl=POL|LQR -> LCD + GUI).
 // PERSISTED (2026-10-19): the choice is saved in the ESP32's NVS (namespace "rider", key "ctrl") on
 // every accepted 'ctrl' command and read back in setup(), so it survives power cycles and flashes.
-// A blank / unreadable NVS boots as CTRL_POL. (The NVS write briefly stalls the other core -- fine,
-// 'ctrl' is only accepted while balancing is off.)
-enum { CTRL_POL = 0, CTRL_LQR = 1, CTRL_LQR2 = 2 };
+// A blank / unreadable NVS boots as CTRL_POL; a stored 2 (LQR2, the LQR's name 2026-10-28) is the LQR.
+// (The NVS write briefly stalls the other core -- fine, 'ctrl' is only accepted while balancing is off.)
+enum { CTRL_POL = 0, CTRL_LQR = 1 };
 volatile int gCtrl = CTRL_POL;
 static Preferences gPrefs;
-static const char* ctrlName(){ return gCtrl == CTRL_LQR2 ? "LQR2" : gCtrl == CTRL_LQR ? "LQR" : "POL"; }
-static int ctrlFrom(int c){ return (c == CTRL_LQR || c == CTRL_LQR2) ? c : CTRL_POL; }
+static const char* ctrlName(){ return gCtrl == CTRL_LQR ? "LQR" : "POL"; }
+static int ctrlFrom(int c){ return (c == 1 || c == 2) ? CTRL_LQR : CTRL_POL; }
 volatile float gPolSign  = 1.0f;    // action->wheel-command sign (verify on robot)
 volatile float gPolULP   = 0.0f;    // low-pass on the POLICY output cmd (0=off; adds command lag, can destabilize)
 volatile float gPolFF    = 0.0f;    // stiction feed-forward on the POLICY output (raw counts added past +/-gFFband;
-                                    // 0=off). Same mechanism as the LQR build's gFF / the factory boost: keeps the
+                                    // 0=off). The factory boost's mechanism: keeps the
                                     // wheel out of the loaded dead zone (~35 raw) that drives the ~1 Hz hold
                                     // see-saw (ppo_fw_s9, floor 2026-09-16). Live-tune 'polff' (try 20..35).
 volatile float gPolVelLP = 0.7f;    // low-pass on the velocity FED TO THE POLICY (kills quantization shimmy at the input)
@@ -207,7 +146,7 @@ volatile float gPosVmax    = 0.45f; // move speed cap (m/s), the most the stick 
                                     // fell on a 34 % battery; sim/lqr/drive_design.py); 0.60 earlier that day (as the Hover).
                                     // The DS4 service starts full stick at 0.30. ->0.30 (2026-10-19, Marc; matches the
                                     // joystick's MAX_SPEED). ->0.25 (2026-06-19, LQR): allow
-                                    // real drive speeds now that the lean-FF (gDriveFF) gives drive authority. The cap
+                                    // real drive speeds. The cap
                                     // only bounds the target ramp; no motion without a command. live-tune via 'posvmax'.
 volatile float gPosVmaxBack= 0.45f; // BACKWARD speed cap (m/s). matched to forward (0.45 since 2026-10-28, 0.30 since 2026-10-19).
                                     // (the +setpoint lean + ppo_v_pure's forward cruise make backward the "against"
@@ -260,7 +199,6 @@ volatile int   gUMax     = 400;     // output clamp (current limit). 1000 browne
                                     // rail sags under high wheel current -> right wheel drops off the bus
                                     // -> latched runaway). 400 (Marc, 2026-06-18) = below the free-spin hold
                                     // (500), runaway guard for the first armed balance test. 'umax' to tune.
-volatile float gFF       = 10.0f;   // stiction boost beyond +/-FFband (factory: +10 past 20)
 volatile float gFFband   = 20.0f;   // boost threshold
 volatile float gDqUMax   = 60.0f;   // clamp on rate-damping term
 volatile float gVelIClamp= 8.0f;    // velocity integral anti-windup clamp (deg of lean)
@@ -465,24 +403,24 @@ static void imuData(int16_t*ax,int16_t*ay,int16_t*az,int16_t*gx,int16_t*gy,int16
 }
 
 // THE IMU LOOP (2026-10-28), like the Hover's imu_task (hover_board.cc: imu_read_once(); vTaskDelay(pdMS_TO_TICKS(2));
-// repeat): the only code that reads the IMU. Each sample is stored (imuLatest) and run through LQR2's IMU path, the
-// Hover's boards/common/imu.cc verbatim (l2ImuStep): the plain accelerometer angle (no lever correction), the rate
+// repeat): the only code that reads the IMU. Each sample is stored (imuLatest) and run through the LQR's IMU path, the
+// Hover's boards/common/imu.cc verbatim (lqrImuStep): the plain accelerometer angle (no lever correction), the rate
 // smoothed 0.6/0.4 per sample, the complementary filter with weight 1/(|rate|+200) per sample. Everything else
 // (the balance task's shared estimate theta/dqf, the gyro calibration) takes the latest sample. Pinned to core 0
 // (the Hover's is on its control core): on core 1 it would cut into the Rider's 2 ms-timeout servo reads.
-static float l2Theta = 0.0f, l2Dq = 0.0f;   // LQR2's pitch (deg) and smoothed rate (deg/s), firmware frame
-static uint32_t l2ImuUs = 0;
-static void l2ImuStep(int16_t ay, int16_t az, int16_t gx){
+static float lqrPitch = 0.0f, lqrRate = 0.0f;   // the LQR's pitch (deg) and smoothed rate (deg/s), firmware frame
+static uint32_t lqrImuUs = 0;
+static void lqrImuStep(int16_t ay, int16_t az, int16_t gx){
   uint32_t now = micros();
-  float dts = (now - l2ImuUs) * 1e-6f;
+  float dts = (now - lqrImuUs) * 1e-6f;
   float pit_gyro = (float)gx / GYRO_LSB_PER_DPS - gGyroBias;
   float pit_acc = atanf((float)ay / (float)az) * 57.2958f;
-  if(l2ImuUs == 0){ l2Theta = pit_acc; l2Dq = pit_gyro; dts = 0.0f; }   // the first sample
-  l2ImuUs = now;
-  l2Dq = 0.6f * l2Dq + 0.4f * pit_gyro;
+  if(lqrImuUs == 0){ lqrPitch = pit_acc; lqrRate = pit_gyro; dts = 0.0f; }   // the first sample
+  lqrImuUs = now;
+  lqrRate = 0.6f * lqrRate + 0.4f * pit_gyro;
   float pit_freq = 1.0f / (fabsf(pit_gyro) + 200.0f);
   if(fabsf(pit_acc) < 100.0f && fabsf(pit_gyro) < 1000.0f)
-    l2Theta = pit_freq * pit_acc + (1.0f - pit_freq) * (l2Theta + pit_gyro * dts);
+    lqrPitch = pit_freq * pit_acc + (1.0f - pit_freq) * (lqrPitch + pit_gyro * dts);
 }
 static portMUX_TYPE gImuMux = portMUX_INITIALIZER_UNLOCKED;
 static int16_t gImuLast[6];                 // the IMU loop's latest raw sample (ax ay az gx gy gz)
@@ -491,7 +429,7 @@ static void imuTask(void*){
   for(;;){
     int16_t a[6]; imuData(&a[0],&a[1],&a[2],&a[3],&a[4],&a[5]);
     portENTER_CRITICAL(&gImuMux); memcpy(gImuLast, a, sizeof(a)); gImuN++; portEXIT_CRITICAL(&gImuMux);
-    l2ImuStep(a[1], a[2], a[3]);
+    lqrImuStep(a[1], a[2], a[3]);
     vTaskDelay(pdMS_TO_TICKS(2));
   }
 }
@@ -772,7 +710,7 @@ static void calibrateGyro(){
 // ---------------- wheel odometry state ----------------
 static float wheel1_x=0, wheel2_x=0;       // accumulated counts (L, R-mirrored)
 static float wheel1_vel=0, wheel2_vel=0;   // filtered scaled velocity
-static float wheel1_vr=0, wheel2_vr=0;     // the same, unfiltered (this reply's speed register) -- LQR2 filters its own
+static float wheel1_vr=0, wheel2_vr=0;     // the same, unfiltered (this reply's speed register) -- the LQR filters its own
 static int   last11=-1, last21=-1;
 static float wheel_x=0, wheel_vx=0;        // fused: meters, scaled vel
 static float wheel_vr=0;                   // fused unfiltered scaled vel
@@ -1180,155 +1118,46 @@ static void balanceTask(void*){
       if(!gEnabled && gTestTor!=0) u = (float)gTestTor;         // stand-only debug
     }
     } else {
-    // ===== LQR full-state controller =====
-    // (lqrInit declared up top alongside polInit so the position-runaway cutout's posRef can read it)
-    static float obsX=0, obsV=0; static bool obsInit=false;   // velocity-observer state (alpha-beta on wheel_x)
-    static float lqrInQ=0, lqrInDq=0; static bool lqrInInit=false;  // factory input-filter state (pitch, rate)
-    static float lqrVdesPrev=0, lqrAdesF=0;                         // drive-ramp acceleration (for the accel lean)
-    static float lqrIx=0;                                     // position-error integral accumulator (m*s); homes steady-state pos error to 0
-    static float l2V=0, l2ULp=0; static bool l2Init=false;    // LQR2: its smoothed axle speed, smoothed command (friction sign)
-    static float l2PX=0, l2PV=0, l2PA=0, l2PVF=0, l2PI=0;   // LQR2's plan: position (axle), speed, acceleration, smoothed speed, integral
+    // ===== LQR (see gLqrX): the Hover's law (robot.cc: Tightest's form, plan_start / plan_step, friction), on the
+    // Hover's IMU path (lqrPitch, lqrRate: lqrImuStep), in its order. Firmware frame: forward lean makes pitch and rate
+    // NEGATIVE, so the axle is wheel_x - r*q and its speed the register - r*dq (sim/lqr/closed_loop.py, its copy).
+    // (lqrInit is declared up top alongside polInit so the position-runaway cutout's posRef can read it.)
+    static float lqrV=0, lqrULp=0; static bool lqrVInit=false;  // the axle's smoothed speed; the smoothed command (friction sign)
+    static float planX=0, planV=0, planA=0, planVF=0, planI=0;  // the plan: position (axle), speed, acceleration, smoothed speed, integral
     if(gEnabled && !fallen){
-      // ---- DRIVE MANAGEMENT: the SAME gDriveVel velocity-drive interface as the policy build, so
-      //      the DS4 'dv' stick drives the LQR identically. Slew vdesS (accel-capped) toward the
-      //      stick speed; the position target gPosTargetEff tracks it; releasing the stick latches the
-      //      current spot as the new hold-home. The LQR then tracks gPosTargetEff (position loop)
-      //      with vdes as the velocity feedforward. ----
-      float vdes = 0.0f, sdt = (dt>1e-4f ? dt : 0.004f);
-      if(gCtrl != CTRL_LQR2){                          // LQR2 drives by its own plan (in its law, below)
-      if(!lqrInit){ gPosTarget=wheel_x; gPosTargetEff=wheel_x; vdesS=0.0f; lqrIx=0.0f; lqrInit=true; }  // fresh home -> clear integral
-      else {
-        bool turning = (fabsf(gYawRateCmd) > 0.001f);
-        // re-anchor home at the spin center -> clear integral; ONLY for a turn from a HOLD. Mid-drive the
-        // target leads the robot by ~20 cm and that lead IS the drive command: re-anchoring it collapsed u
-        // to ~0 at every turn start -> the robot stopped, spun, then re-accelerated (floor log 2026-10-18).
-        if(turning && !wasTurning && fabsf(gDriveVel) <= 0.001f){ gPosTargetEff=wheel_x; gPosTarget=releaseStop(wheel_x, vdesS); lqrIx=0.0f; }
-        wasTurning = turning;
-        if(fabsf(gDriveVel) > 0.001f){                                   // VELOCITY DRIVE (stick held)
-          float vtgt = clampf(gDriveVel, -gPosVmaxBack, gPosVmax);        // clamp BOTH dirs (forward was uncapped)
-          vdesS = driveRamp(vdesS, vtgt, sdt);
-          gPosTargetEff += vdesS*sdt; gPosTarget=gPosTargetEff; wasVelDrive=true;  // ADVANCE target at cmd velocity
-                                                                                   // -> position term drives it (like ptgt)
-        } else {                                                          // HOLD / 'ptgt' move (stick released)
-          if(wasVelDrive){ gPosTarget = releaseStop(gPosTargetEff, vdesS); lqrIx=0.0f; wasVelDrive=false; }   // ramp to rest (releaseStop) -> clear integral
-          float dist=gPosTarget-gPosTargetEff;
-          float vstop=sqrtf(2.0f*gPosDmax*fabsf(dist));
-          float vcap=fminf((dist>=0.0f)?gPosVmax:gPosVmaxBack, vstop);
-          float vcmd=(dist>=0.0f)?vcap:-vcap;
-          vdesS = driveRamp(vdesS, vcmd, sdt);
-          gPosTargetEff += vdesS*sdt;
-          if((dist>=0.0f && gPosTargetEff>gPosTarget)||(dist<0.0f && gPosTargetEff<gPosTarget)){ gPosTargetEff=gPosTarget; vdesS=0.0f; }
-        }
-        vdes = vdesS;
-      }
-      }  // end the LQR's drive handling
-      // commanded ACCELERATION of the drive ramp (m/s^2), lightly low-passed (~40 ms) so the lean reference
-      // below eases in/out instead of stepping when a ramp starts or ends. Reset with the drive state.
-      {
-        float ades = lqrInit ? (vdesS - lqrVdesPrev) / sdt : 0.0f;
-        lqrVdesPrev = vdesS;
-        lqrAdesF = 0.9f*lqrAdesF + 0.1f*ades;
-      }
-      tTgtEff=gPosTargetEff; tVdes=vdes;                                   // driving telemetry
-      // --- LQR full-state feedback: u = -(Kx*x + Kvx*vx + Kq*q + Kdq*dq) (RIG-Omni hover port) ---
-      // States in OUR units (identical to the factory's): x position err (m), vx velocity err (m/s),
-      // q pitch err (deg), dq pitch rate (deg/s). gPosTargetEff/vdes come from the drive interface above
-      // (so 'dv' drive + turn still work; pos error is measured from the slewed target).
       float odt = (dt>1e-4f ? dt : 0.004f);
-      float lqr_x  = wheel_x - gPosTargetEff;           // position error (m)
-      lqrIx += lqr_x * odt;                             // INTEGRATE position error (factory has a Ki here -> exact homing)
-      if(lqrIx >  gLqrIxMax) lqrIx =  gLqrIxMax; else if(lqrIx < -gLqrIxMax) lqrIx = -gLqrIxMax;  // anti-windup
-      // the drive's lean reference, both laws: lean INTO the commanded speed / acceleration (gDriveFF, gLqrAccLean; 0 = off)
-      float leanRef = clampf(gDriveFF*vdes, -6.0f, 6.0f) - clampf(gLqrAccLean*lqrAdesF, -6.0f, 6.0f);
-      float uraw;
-      if(gCtrl == CTRL_LQR2){
-      // ===== LQR2: the Hover's law (robot.cc: Tightest's form, plan_start / plan_step, friction), on the Hover's IMU
-      // path (l2Theta, l2Dq: l2ImuStep), in its order. Firmware frame: forward lean makes pitch and rate NEGATIVE, so the
-      // axle is wheel_x - r*q and its speed the register - r*dq (sim/lqr/closed_loop.py, the copy this was checked on).
-      float q  = l2Theta - gL2Up;                                  // lqr_q: the pitch against the measured upright
-      float dq = l2Dq;                                              // lqr_dq
-      float vax = wheel_vr - L2_WHEEL_R * dq * 0.0174533f * L2_SPEED_PER_MPS;   // wheek_vx + v_corr (one smoothing of
-      float av = (gL2VTau > 0.0f) ? expf(-odt / gL2VTau) : 0.0f;    // the sum = the Hover's two of the same time constant)
-      if(!l2Init){ l2V = vax; l2ULp = 0.0f; l2Init = true; }
-      l2V = av*l2V + (1.0f-av)*vax;                                 // v_axle, scaled units
-      float xax = wheel_x - L2_WHEEL_R * q * 0.0174533f;            // x_axle
+      float q  = lqrPitch - gLqrUp;                                 // lqr_q: the pitch against the measured upright
+      float dq = lqrRate;                                           // lqr_dq
+      float vax = wheel_vr - LQR_WHEEL_R * dq * 0.0174533f * LQR_SPEED_PER_MPS;   // wheek_vx + v_corr (one smoothing of
+      float av = (gLqrVTau > 0.0f) ? expf(-odt / gLqrVTau) : 0.0f;  // the sum = the Hover's two of the same time constant)
+      if(!lqrVInit){ lqrV = vax; lqrULp = 0.0f; lqrVInit = true; }
+      lqrV = av*lqrV + (1.0f-av)*vax;                               // v_axle, scaled units
+      float xax = wheel_x - LQR_WHEEL_R * q * 0.0174533f;           // x_axle
       if(!lqrInit){                                                 // plan_start: where the robot is, at its speed
-        l2PX = xax; l2PV = l2PVF = l2V / L2_SPEED_PER_MPS; l2PA = 0.0f; l2PI = 0.0f; lqrInit = true;
+        planX = xax; planV = planVF = lqrV / LQR_SPEED_PER_MPS; planA = 0.0f; planI = 0.0f; lqrInit = true;
       }
-      float l2x = xax - l2PX;                                       // lqr_x, before the plan's step
+      float lqr_x = xax - planX;                                    // before the plan's step
       {                                                             // plan_step(stick, dt, x_axle, lqr_x)
         float stick = clampf(gDriveVel, -gPosVmaxBack, gPosVmax);
-        float ades = clampf(L2_PLAN_GAIN * (stick - l2PV), -gL2AMax, gL2AMax);
-        float jerk = gL2AMax / L2_PLAN_TJERK * odt;
-        l2PA += clampf(ades - l2PA, -jerk, jerk);
-        l2PV += l2PA * odt;
-        l2PX = clampf(l2PX + l2PV * odt, xax - L2_PLAN_LEAD, xax + L2_PLAN_LEAD);
-        l2PVF = av * l2PVF + (1.0f - av) * l2PV;
-        l2PI = clampf(l2PI + L2_PLAN_KI * l2x * odt, -L2_PLAN_IMAX, L2_PLAN_IMAX);
+        float ades = clampf(LQR_PLAN_GAIN * (stick - planV), -gLqrAMax, gLqrAMax);
+        float jerk = gLqrAMax / LQR_PLAN_TJERK * odt;
+        planA += clampf(ades - planA, -jerk, jerk);
+        planV += planA * odt;
+        planX = clampf(planX + planV * odt, xax - LQR_PLAN_LEAD, xax + LQR_PLAN_LEAD);
+        planVF = av * planVF + (1.0f - av) * planV;
+        planI = clampf(planI + LQR_PLAN_KI * lqr_x * odt, -LQR_PLAN_IMAX, LQR_PLAN_IMAX);
       }
-      float lean = -L2_PLAN_LEAN_PER_ACC * l2PA;                    // plan_lean_deg, firmware frame
-      float uPlan = L2_PLAN_U_PER_SPEED * l2PV + L2_PLAN_U_PER_ACC * l2PA;
-      gPosTarget = gPosTargetEff = l2PX; vdesS = l2PV;              // the home, for the runaway cutout
-      tTgtEff = l2PX; tVdes = l2PV; tVest = l2V; tLqrInQ = q;       // telemetry
-      uraw = -(gL2X*l2x + gL2Vx*(l2V - l2PVF*L2_SPEED_PER_MPS) + gL2Q*(q - lean) + gL2Dq*dq) + l2PI + uPlan;
-      float af = expf(-odt / L2_FRIC_TAU);                          // friction, its direction from the smoothed command
-      l2ULp = af*l2ULp + (1.0f-af)*uraw;
-      uraw += gL2Fric * tanhf(l2ULp / L2_FRIC_WIDTH);   // friction compensation (replaces the factory boost)
-      } else {
-      // ===== LQR law (floor-tuned 2026-06-19) =====
-      // velocity observer: alpha-beta filter on wheel_x -> smooth low-lag velocity (vs noisy raw wheel_vx).
-      float vel_est;
-      if(gObsA > 0.0f){
-        if(!obsInit){ obsX=wheel_x; obsV=0.0f; obsInit=true; }
-        float resid = wheel_x - (obsX + obsV*odt);      // measurement - prediction
-        obsX += obsV*odt + gObsA*resid;
-        obsV += (gObsB/odt)*resid;
-        vel_est = obsV;
-      } else { vel_est = wheel_vx; obsInit=false; }      // observer OFF -> raw velocity
-      tVest = vel_est;
-      // DRIVE REWORK (2026-10-18): vel_est (raw wheel_vx) is in 'scaled vel' units, MEASURED ~270 per m/s on the
-      // floor, but vdes is m/s -- so the reference cancelled ~0.4 % of the speed and the LQR fought all motion; the
-      // target had to run 20-37 cm ahead to drag it. gLqrVRef scales vdes into vel_est's units (default 1 = the old
-      // behavior; ~270 = matched). The observer path (gObsA>0) already estimates m/s, so it keeps the raw vdes.
-      float vref = (gObsA > 0.0f) ? vdes : vdes * gLqrVRef;
-      float lqr_vx = vel_est - vref;                    // velocity error (m/s) -- observer or raw
-      // FACTORY INPUT FILTER (R-1.1.3 FUN_400d529c, Ghidra): low-pass pitch AND pitch rate per cycle,
-      // then slew-limit the smoothed pitch. Factory: 0.95 LP, 5 deg/cycle. Default OFF (gLqrInLP 0) =
-      // the LQR exactly as floor-tuned in June; step it up live ('lqrinlp'). Only the CONTROLLER sees
-      // the filtered signals -- the fall cutout above keeps using raw pitch, so the lag can't delay it.
-      float pitchIn = pitch, dqIn = dqf;
-      if(!lqrInInit){ lqrInQ = pitch; lqrInDq = dqf; lqrInInit = true; }   // seed at enable: no startup transient
-      if(gLqrInLP > 0.0f){
-        float tgt = gLqrInLP*lqrInQ + (1.0f-gLqrInLP)*pitch;
-        float step = tgt - lqrInQ;
-        if(gLqrInSlew > 0.0f) step = clampf(step, -gLqrInSlew, gLqrInSlew);  // deg per cycle
-        lqrInQ += step;
-        lqrInDq = gLqrInLP*lqrInDq + (1.0f-gLqrInLP)*dqf;
-        pitchIn = lqrInQ; dqIn = lqrInDq;
-      } else { lqrInQ = pitch; lqrInDq = dqf; }          // off: track raw so switching it on is seamless
-      tLqrInQ = pitchIn;                                 // telemetry: what the LQR actually sees ('lqrq')
-      // ACCELERATION LEAN (2026-10-18, leanRef above): tilt the balance point INTO the commanded acceleration, so
-      // the LQR leans early + gently instead of late + hard (floor: starts overshot 6-10 deg). Physics: lean =
-      // atan(a/g) ~= 5.8 deg per m/s^2. Sign DERIVED (fwd lean makes th DECREASE): positive gLqrAccLean -> reference
-      // pitch goes DOWN on forward acceleration. 'lqracclean' (default 0 = off); verify the sign on the floor.
-      float lqr_q  = pitchIn - leanRef;                 // pitch err; LEAN-FF tilts the setpoint
-                                                        // forward ~gDriveFF deg per m/s -> robot leans to cruise (works
-                                                        // for the dv/joystick path; a command-FF gets cancelled by balance)
-      float lqr_dq = dqIn;                              // pitch rate (deg/s)
-      // Sign anchor: the pitch term -gLqrQ*q with q=+ pitch, plus the wheel L:+u/R:-u mapping below, is our
-      // verified balance sign -- so it stays UP on the first arm. pos/vel gains floor-verified NEGATIVE.
-      uraw = -(gLqrX*lqr_x + gLqrXi*lqrIx + gLqrVx*lqr_vx + gLqrQ*lqr_q + gLqrDq*lqr_dq);  // +position integral; lean-FF in lqr_q
-      // wheel-COMMAND feedforward: the wheel servo is a velocity source, so the steady command for a speed is
-      // known (MEASURED floor fit: wheel v_raw ~= 0.9*(cmd-35) -> cmd ~= 35 + 360*v[m/s]; the 35 breakaway is
-      // left to the stiction boost below). Supplying it directly leaves the feedback only the deviations.
-      uraw += gLqrCmdFF * vdes;                         // 'lqrcff' cmd per m/s (default 0 = off; matched ~360)
-      if(uraw > gFFband) uraw += gFF; else if(uraw < -gFFband) uraw -= gFF;   // factory stiction boost (+/-10 past +/-20)
-      }  // end LQR / LQR2 law
-      uF = gPolULP*uF + (1.0f-gPolULP)*uraw;            // output LP available ('polulp', default 0=off=raw)
-      u = clampf(uF, -(float)gUMax, (float)gUMax);
+      float lean = -LQR_PLAN_LEAN_PER_ACC * planA;                  // plan_lean_deg, firmware frame
+      float uPlan = LQR_PLAN_U_PER_SPEED * planV + LQR_PLAN_U_PER_ACC * planA;
+      gPosTarget = gPosTargetEff = planX; vdesS = planV;            // the home, for the runaway cutout
+      tTgtEff = planX; tVdes = planV; tVest = lqrV; tLqrInQ = q;    // telemetry
+      float uraw = -(gLqrX*lqr_x + gLqrVx*(lqrV - planVF*LQR_SPEED_PER_MPS) + gLqrQ*(q - lean) + gLqrDq*dq) + planI + uPlan;
+      float af = expf(-odt / LQR_FRIC_TAU);                         // friction, its direction from the smoothed command
+      lqrULp = af*lqrULp + (1.0f-af)*uraw;
+      uraw += gLqrFric * tanhf(lqrULp / LQR_FRIC_WIDTH);
+      u = clampf(uraw, -(float)gUMax, (float)gUMax);
     } else {
-      uF = 0.0f; lqrInit=false; obsInit=false; lqrIx=0.0f; l2Init=false;   // reset output-LP + drive + observer + pos-integral (+ LQR2) for next enable
-      lqrInInit = false; lqrVdesPrev = 0.0f; lqrAdesF = 0.0f;                                       // + the factory input filter (re-seeded at enable)
+      lqrInit = false; lqrVInit = false;                            // restart from where the robot is on the next enable
       if(!gEnabled && gTestTor!=0) u = (float)gTestTor;          // stand-only debug
     }
     }  // end controller select (gCtrl)
@@ -1632,8 +1461,8 @@ static void emit(const char* b, int k){ Serial.write((const uint8_t*)b,k); Seria
 static void ackState(){
   char b[210];
   int k = snprintf(b, sizeof(b),
-    "# en=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f izero=%.1f set=%.2f Umax=%d ff=%.0f ffb=%.0f posmode=%d torlim=%d fault=%d gbias=%.2f\n",
-    gEnabled,gLqrX,gLqrVx,gLqrQ,gLqrDq,gImuZero,gSetpoint,gUMax,gFF,gFFband,gPosMode,gTorLim,gWheelFault,gGyroBias);
+    "# en=%d lqrx=%.0f lqrvx=%.2f lqrq=%.1f lqrdq=%.2f lqrup=%.2f izero=%.1f set=%.2f Umax=%d ffb=%.0f posmode=%d torlim=%d fault=%d gbias=%.2f\n",
+    gEnabled,gLqrX,gLqrVx,gLqrQ,gLqrDq,gLqrUp,gImuZero,gSetpoint,gUMax,gFFband,gPosMode,gTorLim,gWheelFault,gGyroBias);
   emit(b,k);
 }
 static void applyCmd(char* s){
@@ -1645,7 +1474,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"d"))     gEnabled=false;
   else if (!strcmp(s,"izero")) gImuZero=v;
   else if (!strcmp(s,"dqmax")) gDqUMax=v;
-  else if (!strcmp(s,"ctrl")){                                   // controller select: 0=POL (policy), 1=LQR, 2=LQR2
+  else if (!strcmp(s,"ctrl")){                                   // controller select: 0=POL (policy), 1=LQR
     if(gEnabled){ emit("# ctrl REFUSED: disable first (en 0)\n", 37); return; }   // never swap mid-balance
     gCtrl = ctrlFrom((int)v);
     if(gPrefs.getUChar("ctrl", 255) != (uint8_t)gCtrl) gPrefs.putUChar("ctrl", (uint8_t)gCtrl);  // persist (only on change)
@@ -1658,28 +1487,14 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"iclamp")) gVelIClamp=v;
   else if (!strcmp(s,"umax"))  gUMax=(int)v;
   else if (!strcmp(s,"set"))   gSetpoint=v;
-  else if (!strcmp(s,"lqrx"))  gLqrX=v;                 // LQR position-error gain (floor-tuned -500)
-  else if (!strcmp(s,"lqrvx")) gLqrVx=v;                // LQR velocity-error gain (floor-tuned -6)
-  else if (!strcmp(s,"lqrq"))  gLqrQ=v;                 // LQR pitch-error gain (32)
-  else if (!strcmp(s,"lqrvref"))   gLqrVRef=clampf(v,0.0f,600.0f);   // LQR speed-ref scale (1 legacy, ~270 matched)
-  else if (!strcmp(s,"lqracclean")) gLqrAccLean=clampf(v,-20.0f,20.0f); // accel lean deg per m/s^2 (0 off, ~5.8; sign to verify)
-  else if (!strcmp(s,"lqrcff"))    gLqrCmdFF=clampf(v,0.0f,800.0f);  // LQR wheel-cmd feedforward per m/s (0 off, ~360)
-  else if (!strcmp(s,"lqrinlp"))   gLqrInLP=clampf(v,0.0f,0.98f);   // factory input LP on LQR pitch+rate (0=off; factory 0.95)
-  else if (!strcmp(s,"lqrinslew")) gLqrInSlew=clampf(v,0.0f,90.0f); // filtered-pitch slew, deg/cycle (factory 5; 0=none)
-  else if (!strcmp(s,"lqrdq")) gLqrDq=v;                // LQR pitch-rate gain (3)
-  else if (!strcmp(s,"lqrxi")) gLqrXi=v;                // LQR position-INTEGRAL gain (0=off); homes steady-state pos error to 0
-  else if (!strcmp(s,"lqrixmax")) gLqrIxMax=v;          // LQR position-integral anti-windup clamp (m*s)
-  else if (!strcmp(s,"l2x"))    gL2X=v;                  // LQR2 gains (sim/lqr/lqr_design.py) ...
-  else if (!strcmp(s,"l2vx"))   gL2Vx=v;
-  else if (!strcmp(s,"l2q"))    gL2Q=v;
-  else if (!strcmp(s,"l2dq"))   gL2Dq=v;
-  else if (!strcmp(s,"l2vtau")) gL2VTau=clampf(v,0.0f,0.5f);   // ... its speed smoothing (s; 0 = none)
-  else if (!strcmp(s,"l2fric")) gL2Fric=v;               // ... friction compensation (units; 0 = off)
-  else if (!strcmp(s,"l2amax")) gL2AMax=clampf(v,0.1f,3.0f);   // ... its driving plan's acceleration (m/s^2)
-  else if (!strcmp(s,"l2up"))   gL2Up=v;                 // ... and its pitch reference (deg)
-  else if (!strcmp(s,"obsa"))  gObsA=clampf(v,0.0f,1.0f);   // vel-observer alpha (0=OFF->raw wheel_vx)
-  else if (!strcmp(s,"obsb"))  gObsB=clampf(v,0.0f,1.0f);   // vel-observer beta
-  else if (!strcmp(s,"driveff")) gDriveFF=v;                // drive velocity feedforward (wheel-cmd per m/s; ~-300)
+  else if (!strcmp(s,"lqrx"))    gLqrX=v;                 // LQR gains (sim/lqr/lqr_design.py) ...
+  else if (!strcmp(s,"lqrvx"))   gLqrVx=v;
+  else if (!strcmp(s,"lqrq"))    gLqrQ=v;
+  else if (!strcmp(s,"lqrdq"))   gLqrDq=v;
+  else if (!strcmp(s,"lqrvtau")) gLqrVTau=clampf(v,0.0f,0.5f);   // ... its speed smoothing (s; 0 = none)
+  else if (!strcmp(s,"lqrfric")) gLqrFric=v;               // ... friction compensation (units; 0 = off)
+  else if (!strcmp(s,"lqramax")) gLqrAMax=clampf(v,0.1f,3.0f);   // ... its driving plan's acceleration (m/s^2)
+  else if (!strcmp(s,"lqrup"))   gLqrUp=v;                 // ... and its pitch reference (deg)
   else if (!strcmp(s,"cap"))   gSetpoint=tTheta;
   else if (!strcmp(s,"rd")){ gDumpRead=true; return; } // dump next raw read frame
   else if (!strcmp(s,"wt")){ gTestTor=(int)v; }        // stand-only wheel torque test
@@ -1763,7 +1578,6 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"legrate"))  { gLegRate = clampf(v,-200.0f,200.0f); gLegRateMs = millis(); }  // height rate (counts/s, + up); heartbeat
   else if (!strcmp(s,"leghome"))  gLegHomeReq = true;    // legs -> ride height (MID), slow slew; ignored while limp
   else if (!strcmp(s,"leglimp"))  gLegLimpReq = true;    // STOP button: torque-OFF both legs, stay limp until next balance-on
-  else if (!strcmp(s,"ff"))    gFF=v;                  // friction feed-forward magnitude
   else if (!strcmp(s,"ffband")) gFFband=v;             // friction FF deadband
   else if (!strcmp(s,"cfa"))   gCfAlpha=clampf(v,0.9f,0.9999f); // compl-filter gyro weight
   else if (!strcmp(s,"imucomp")) gImuComp=v;                    // IMU lever-arm comp scale/sign (0=off, -0.5 verified)

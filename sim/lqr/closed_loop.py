@@ -37,7 +37,8 @@ SUB_S = 0.00025          # physics step
 IMU_H = 0.098            # m, IMU above the axle (Marc's ruler 100, imu_position_fit 96-98)
 COMP_M = -0.5 * 0.12     # firmware lever-arm correction, m (imucomp x KIMU)
 SET_DEG = 3.55           # gSetpoint
-K_TODAY = dict(x=-500.0, xi=-30.0, vx=-6.0, q=32.0, dq=3.0)
+K_TODAY = dict(x=-500.0, xi=-30.0, vx=-6.0, q=32.0, dq=3.0)   # the June LQR (removed from main.cpp 2026-10-28):
+                                                              # kept to read the floor recordings made under it
 IX_MAX = 3.0
 FF, FF_BAND, U_MAX = 10.0, 20.0, 400.0
 # Friction compensation (the Hover's Phase 3 step 3, robot.cc kFric*): the measured friction in the direction

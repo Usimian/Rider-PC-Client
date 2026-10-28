@@ -15,7 +15,6 @@ Mapping:
   R3 (right stick click) -> height back to the normal ride height (firmware 'leghome', slow)
   Triangle            -> balance controller = RL POLICY  (firmware 'ctrl 0')  } only while balance
   Cross (X)           -> balance controller = LQR        (firmware 'ctrl 1')  } is OFF; LCD shows it
-  R1                  -> balance controller = LQR2       (firmware 'ctrl 2')  } (LQR2: the designed law)
   Square (#)          -> toggle roll-leveling (IMU-roll differential legs; level 1/0)
   Circle (O)          -> reset position (poszero) without dropping balance
   Share               -> BALANCE / STOP: idle -> en 1; balancing -> en 0 + leglimp (legs limp too),
@@ -57,8 +56,6 @@ AXIS_HEIGHT = 4      # right stick Y (stick up = negative). 6-axis DS4 under hid
 BTN_BALANCE     = 8  # Share        -- toggle balance (en 1/en 0); off = stop. (moved to Share 2026-06-24; VERIFY index w/ --test)
 BTN_CTRL_POLICY = 2  # Triangle    -- balance controller = RL policy ('ctrl 0'); only while balance is off
 BTN_CTRL_LQR    = 0  # Cross (X)   -- balance controller = LQR ('ctrl 1');       only while balance is off
-BTN_CTRL_LQR2   = 5  # R1          -- balance controller = LQR2 ('ctrl 2');      only while balance is off
-                     # (5 = R1 in hid_playstation's 13-button layout; VERIFY with --test)
 BTN_DISTZERO    = 1  # Circle (O)  -- poszero / reset position, balance stays on (Cross=0,Circle=1,Triangle=2,Square=3 verified --test 2026-06-16)
 BTN_LEVEL       = 3  # Square       -- toggle roll-leveling (IMU-roll differential legs: level 1/0)
 BTN_MODE        = 9  # Start/Options -- toggles joystick<->computer drive
@@ -331,8 +328,8 @@ def main():
                 send("en 0"); send("leglimp")  # STOP = balance off + legs limp -- same as the LCD button + web E-STOP
             else:
                 send("en 1")                       # firmware homes the target on enable
-        for btn, c, name in ((BTN_CTRL_POLICY, 0, "POLICY"), (BTN_CTRL_LQR, 1, "LQR"), (BTN_CTRL_LQR2, 2, "LQR2")):
-            if edge(btn):                      # Triangle = policy, Cross = LQR, R1 = LQR2
+        for btn, c, name in ((BTN_CTRL_POLICY, 0, "POLICY"), (BTN_CTRL_LQR, 1, "LQR")):
+            if edge(btn):                      # Triangle = policy, Cross = LQR
                 if state["en"]:                # the firmware refuses a swap mid-balance; don't even ask
                     print("ctrl %s ignored: balance is on (Share to stop first)" % name, flush=True)
                 else:

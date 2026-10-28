@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Deeper offline check of seed-sweep finalists, with the firmware LQR as the reference (2026-10-19).
+"""Deeper offline check of seed-sweep finalists (2026-10-19). (Until 2026-10-28 the June LQR ran beside them as the
+reference; the firmware's LQR is now the Hover's law, modelled in sim/lqr/, not in this MuJoCo sim.)
 
 The sweep screen runs one seed per case. This runs every case over several seeds and more conditions, so a
 floor-test pick rests on more than one rollout:
@@ -43,10 +44,7 @@ def cases():
 
 def run_one(args):
     name, drive, seeds = args
-    if name == "LQR":
-        infer, kw0 = None, dict(controller="lqr")
-    else:
-        infer, kw0 = ds.load_policy(name), dict(drive=drive)
+    infer, kw0 = ds.load_policy(name), dict(drive=drive)
     falls, worst_err, worst_a99, fell_cases = 0, 0.0, 0.0, []
     for label, p, d, v, kw in cases():
         for seed in range(seeds):
@@ -80,7 +78,7 @@ def main():
     ap.add_argument("--kd", type=float, default=ds.KD, help="policy position-loop D gain (gDriveKd)")
     a = ap.parse_args()
     ds.K, ds.KD = a.k, a.kd                  # the worker processes fork after this, so they inherit it
-    names = ["LQR"] + a.policies
+    names = list(a.policies)
     print(f"{'controller':14s} {'runs':>5s} {'falls':>5s} {'worst speed err':>16s} {'worst a99':>10s}   hold (stick-slip, 10 s)")
     with ProcessPoolExecutor(max_workers=len(names)) as ex:
         for name, n, falls, err, a99, hold, fc in ex.map(run_one, [(nm, a.drive, a.seeds) for nm in names]):
