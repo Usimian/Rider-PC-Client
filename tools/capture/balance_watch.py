@@ -12,7 +12,7 @@ one line per window:
                 (peak / band mean); a sharp peak = an oscillation, ~1-3 = broadband noise
   cmd           the balance output: mean, sd, strongest frequency, and sign flips per second (a friction
                 compensation chattering around zero flips it tens of times a second)
-  wheel         left wheel speed register sd (mm/s) and the window's speed (mm/s)
+  speed         the robot's speed (both wheels' registers averaged; turns cancel): sd and mean (mm/s)
 
 Files saved before 2026-10-28 ~11:10 kept t_us to 6 digits only (1-10 ms steps): sample_times() rebuilds them.
 
@@ -63,14 +63,14 @@ def analyse(rows, ctrl="?"):
     on = np.mean(u != 0) > 0.5
     pitch = rows["pitch_cdeg"] / 100.0
     rate = rows["rate_x10"] / 10.0
-    v = rows["v"] / V_PER_MPS * 1000
+    v = (rows["v"] - rows["vR"]) / 2.0 / V_PER_MPS * 1000      # the right wheel's register is mirrored
     fr, pr = peak(rate, fs, 1.5, 95)
     fu, pu = peak(u, fs, 1.5, 95)
     s = np.sign(u[u != 0])
     flips = np.sum(s[1:] != s[:-1]) / (t[-1] - t[0]) if len(s) > 1 else 0.0
     return (f"{ctrl:4s} {'ON ' if on else 'off'} {fs:3.0f} Hz | pitch {pitch.mean():6.2f} sd {pitch.std():5.2f} | "
             f"rate rms {np.sqrt(np.mean(rate ** 2)):5.1f} peak {fr:5.1f} Hz x{pr:4.1f} | cmd {u.mean():+6.1f} sd {u.std():5.1f} "
-            f"peak {fu:5.1f} Hz x{pu:4.1f} flips {flips:4.0f}/s | wheel sd {v.std():5.1f} mm/s, mean {v.mean():+6.1f}")
+            f"peak {fu:5.1f} Hz x{pu:4.1f} flips {flips:4.0f}/s | speed sd {v.std():5.1f} mm/s, mean {v.mean():+6.1f}")
 
 
 def analyse_file(path):
