@@ -121,6 +121,9 @@ list, and what not to trust.
 
 ## Do not trust
 
+- The web page / LCD status **while a recorder runs**: each capture dump (~600 lines, ~57 kB at the 115200-baud
+  Pi link) silences telemetry 3.7-6.2 s, so an arm shows up late (the robot balances at once). Gone without a
+  recorder -- only the capture tools send `logdump`.
 - `balance_watch.py` files saved before 2026-10-28 ~11:10 (`*_watch.csv`, `tap_test.csv`): t_us rounded to 1-10 ms;
   use `sample_times()`. The LQR2 8 ms gains (-1844 / -6.89 / 46.0 / 3.67): shook on the floor.
 - The sim/lqr model above ~10 Hz (see above), and anything it rates for light smoothing or high lean-rate gain.
