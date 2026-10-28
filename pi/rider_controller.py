@@ -15,6 +15,7 @@ Mapping:
   R3 (right stick click) -> height back to the normal ride height (firmware 'leghome', slow)
   Triangle            -> balance controller = RL POLICY  (firmware 'ctrl 0')  } only while balance
   Cross (X)           -> balance controller = LQR        (firmware 'ctrl 1')  } is OFF; LCD shows it
+  R1                  -> balance controller = LQR2       (firmware 'ctrl 2')  } (LQR2: the designed law)
   Square (#)          -> toggle roll-leveling (IMU-roll differential legs; level 1/0)
   Circle (O)          -> reset position (poszero) without dropping balance
   Share               -> BALANCE / STOP: idle -> en 1; balancing -> en 0 + leglimp (legs limp too),
@@ -56,6 +57,8 @@ AXIS_HEIGHT = 4      # right stick Y (stick up = negative). 6-axis DS4 under hid
 BTN_BALANCE     = 8  # Share        -- toggle balance (en 1/en 0); off = stop. (moved to Share 2026-06-24; VERIFY index w/ --test)
 BTN_CTRL_POLICY = 2  # Triangle    -- balance controller = RL policy ('ctrl 0'); only while balance is off
 BTN_CTRL_LQR    = 0  # Cross (X)   -- balance controller = LQR ('ctrl 1');       only while balance is off
+BTN_CTRL_LQR2   = 5  # R1          -- balance controller = LQR2 ('ctrl 2');      only while balance is off
+                     # (5 = R1 in hid_playstation's 13-button layout; VERIFY with --test)
 BTN_DISTZERO    = 1  # Circle (O)  -- poszero / reset position, balance stays on (Cross=0,Circle=1,Triangle=2,Square=3 verified --test 2026-06-16)
 BTN_LEVEL       = 3  # Square       -- toggle roll-leveling (IMU-roll differential legs: level 1/0)
 BTN_MODE        = 9  # Start/Options -- toggles joystick<->computer drive
@@ -71,10 +74,9 @@ TURN_DEADZONE = 0.40  # right stick (turn) resting offset has DRIFTED to ~0.32 (
                       # deadzone -> it kept commanding turnrate 0.03 and, with no heartbeat to refresh it, that
                       # value LATCHED in the firmware (robot turned on a centered stick). Widened to 0.40 to
                       # reject the worn-stick rest; the turn heartbeat below now clears/refreshes like drive.
-MAX_SPEED = 0.30     # m/s at full stick (and the web slider's ceiling). ->0.30 (2026-10-19, Marc: "a little faster";
-                     # was 0.25). Must match the firmware's gPosVmax/gPosVmaxBack ('posvmax'/'posvmaxb'): set live to
-                     # 0.30 for the trial -- their compiled default is still 0.25, so after an ESP32 reboot the top
-                     # of the stick clips until the firmware default is raised too.
+MAX_SPEED = 0.60     # m/s, the web slider's ceiling (as the Hover's, 2026-10-28; was 0.30). Must not exceed the
+                     # firmware's gPosVmax/gPosVmaxBack ('posvmax'/'posvmaxb', 0.60), which clip the stick.
+DEFAULT_SPEED = 0.30 # m/s at full stick until the slider says otherwise (the Hover boots at 0.30 too)
 MAX_YAW_RATE = 1.0   # rad/s commanded at full right-stick (firmware closes the loop on the gyro)
 TURN_SIGN = 1        # flip if right-stick-right turns the wrong way
 SEND_HZ = 20
@@ -172,7 +174,7 @@ class Liveness:
 
 
 state = {"en": 0, "pos": 0.0, "fwd_factor": 1.0,   # fwd_factor: ToF safety cap (1=clear..0=stop)
-         "max_speed": MAX_SPEED,                     # full-stick speed (m/s), from TOPIC_MAXSPEED
+         "max_speed": DEFAULT_SPEED,                 # full-stick speed (m/s), from TOPIC_MAXSPEED
          "cbatt": None, "cchg": False}               # DS4 battery % / charging, from rider/status (the bridge)
 
 
@@ -328,8 +330,8 @@ def main():
                 send("en 0"); send("leglimp")  # STOP = balance off + legs limp -- same as the LCD button + web E-STOP
             else:
                 send("en 1")                       # firmware homes the target on enable
-        for btn, c, name in ((BTN_CTRL_POLICY, 0, "POLICY"), (BTN_CTRL_LQR, 1, "LQR")):
-            if edge(btn):                      # Triangle = policy, Cross = LQR
+        for btn, c, name in ((BTN_CTRL_POLICY, 0, "POLICY"), (BTN_CTRL_LQR, 1, "LQR"), (BTN_CTRL_LQR2, 2, "LQR2")):
+            if edge(btn):                      # Triangle = policy, Cross = LQR, R1 = LQR2
                 if state["en"]:                # the firmware refuses a swap mid-balance; don't even ask
                     print("ctrl %s ignored: balance is on (Share to stop first)" % name, flush=True)
                 else:

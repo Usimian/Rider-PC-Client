@@ -309,7 +309,7 @@ def publish():
         "fault": int(tel.get("fault", 0)),
         "undervolt_alarms": undervolt_alarms(),   # Pi 5 V under-voltage alarms since the Pi booted
         "read_fails": int(tel.get("rfails", 0)),   # failed wheel reads since the ESP32 booted (count)
-        "mode": g_ctrl,                 # compiled-in controller ("LQR"/"POL"), parsed from telem ctrl=; firmware picks it at build time (was derived from the removed 'polrun')
+        "mode": g_ctrl,                 # active controller ("POL"/"LQR"/"LQR2"), parsed from telem ctrl= (firmware 'ctrl 0|1|2')
         "position": tel.get("wx", 0.0),
         "target": tel.get("ptgt", 0.0),
         "pose_x": round(tel.get("px", 0.0), 3),
@@ -469,7 +469,7 @@ def render():
     dm_txt = g_drivemode.upper()
     dm_col = (80, 200, 255) if g_drivemode == "joystick" else (255, 170, 60)
     d.text((10, 186), dm_txt, fill=dm_col, font=f_m)
-    ctrl_disp = {"POL": "POLICY", "LQR": "LQR"}.get(g_ctrl, g_ctrl)
+    ctrl_disp = {"POL": "POLICY", "LQR": "LQR", "LQR2": "LQR2"}.get(g_ctrl, g_ctrl)
     ctrl_col = (150, 220, 150) if g_ctrl == "POL" else (190, 170, 255)
     ctrl_x = 312 - _text_w(d, ctrl_disp, f_m)
     d.text((ctrl_x, 186), ctrl_disp, fill=ctrl_col, font=f_m)

@@ -55,8 +55,9 @@ pi/deploy_bridge.sh rider
 cd firmware/esp32_rider_fw && /home/marc/.xgo-cal/bin/pio run -t upload
 ```
 
-One binary carries both balance controllers: the firmware command `ctrl 1` switches to the LQR
-loop (`ctrl 0` back to the RL policy), accepted only while balancing is disabled. The choice is
+One binary carries the balance controllers: the firmware command `ctrl 1` switches to the LQR
+loop, `ctrl 2` to LQR2 (the LQR designed on a measured model, `sim/lqr/`; compared against LQR on the
+floor, then the loser goes), `ctrl 0` back to the RL policy, accepted only while balancing is disabled. The choice is
 saved on the ESP32 and survives power cycles (blank memory = policy). See `docs/BRIDGE_SETUP.md`.
 Flashing overwrites whatever firmware is on the ESP32 — see `docs/HARDWARE.md`.
 

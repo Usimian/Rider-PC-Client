@@ -51,7 +51,8 @@ across power cycles and reflashes. A blank NVS (new board) boots on the policy.
 | command | controller | telemetry `ctrl=` |
 |---|---|---|
 | `ctrl 0` (blank-NVS default) | RL policy (`src/rider_policy.h`) | `POL` |
-| `ctrl 1` | LQR full-state, torque-direct | `LQR` |
+| `ctrl 1` | LQR full-state, torque-direct (floor-tuned June) | `LQR` |
+| `ctrl 2` | LQR2: the designed law (`sim/lqr/`), beside LQR for the floor comparison | `LQR2` |
 
 Send it like any firmware line, e.g. over MQTT `rider/control/line` `{"line": "ctrl 1"}`.
 (Before 2026-10-18 these were two compile-time builds, `esp32` and `esp32_lqr`.)

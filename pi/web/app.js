@@ -12,7 +12,7 @@ const m = (v) => (v === undefined || v === null) ? "–" : `${Number(v).toFixed(
 let lastStatus = 0;
 let S = null;                       // latest rider/status (robot truth); controls decide from it
 let speedRetained = null;           // latest retained rider/control/maxspeed (m/s), null = never set
-const DEFAULT_SPEED = 0.30;         // the joystick service's own default (MAX_SPEED) when nothing is retained
+const DEFAULT_SPEED = 0.30;         // the joystick service's own default (DEFAULT_SPEED) when nothing is retained
 const line = (l) => client.publish("rider/control/line", JSON.stringify({ line: l }));
 
 const client = new MqttLite("ws://" + location.host + "/", {
@@ -115,10 +115,11 @@ function controls() {
   lb.textContent = "Roll Balance: " + (!ok ? "–" : lev ? "ON" : "off");
   lb.className = "btn" + (lev ? " active" : "");
   // controller: switchable only while NOT balancing (the firmware refuses it anyway)
-  const pol = ok && S.mode === "POL", lqr = ok && S.mode === "LQR";
+  const pol = ok && S.mode === "POL", lqr = ok && S.mode === "LQR", lqr2 = ok && S.mode === "LQR2";
   $("ctrlpol").className = "btn pol" + (pol ? " active" : "");
   $("ctrllqr").className = "btn lqr" + (lqr ? " active" : "");
-  $("ctrlpol").disabled = $("ctrllqr").disabled = !ok || bal;
+  $("ctrllqr2").className = "btn lqr" + (lqr2 ? " active" : "");
+  $("ctrlpol").disabled = $("ctrllqr").disabled = $("ctrllqr2").disabled = !ok || bal;
   set("ctrlhint", ok && bal ? "stop balancing to switch" : "");
   $("speed").disabled = !ok;
   $("zero").disabled = !ok;
@@ -136,6 +137,7 @@ $("levbtn").addEventListener("click", () => {
 });
 $("ctrlpol").addEventListener("click", () => { if (live() && !S.roll_balance_enabled) line("ctrl 0"); });
 $("ctrllqr").addEventListener("click", () => { if (live() && !S.roll_balance_enabled) line("ctrl 1"); });
+$("ctrllqr2").addEventListener("click", () => { if (live() && !S.roll_balance_enabled) line("ctrl 2"); });
 $("zero").addEventListener("click", () => { if (live()) line("poszero"); });
 
 // Top speed: a RETAINED message the joystick service reads (full stick = this speed). Shown from the
