@@ -66,20 +66,26 @@ def weighted(p=None):
     return [0, 1, B, B + 1]
 
 
-def plant(p=None, a_v=A_V_TODAY, corrected=True, motor=1.0):
-    """Az, Bz (z_{k+1} = Az z_k + Bz u_k) and C (y_k = C z_k); z = (s, u_prev, vf_prev, dqf_prev)."""
+def plant(p=None, a_v=A_V_TODAY, corrected=True, motor=1.0, a_q=A_Q, v_corr_by_dqf=False, lqr2=False):
+    """Az, Bz (z_{k+1} = Az z_k + Bz u_k) and C (y_k = C z_k); z = (s, u_prev, vf_prev, dqf_prev).
+    a_q: the rate smoothing per cycle (A_Q: the firmware's shared 0.6).
+    v_corr_by_dqf: correct the speed with the smoothed rate (the Hover's robot.cc) instead of the raw one.
+    lqr2: LQR2's IMU path, the Hover's 0.6/0.4 rate smoothing on the IMU task's samples, ~2 a cycle (every ~2.4 ms):
+    taken as two, at the cycle's start and at TI (0.36 / 0.24 / 0.4 per cycle)."""
     p = p or Params()
     m = plant_module(p)
     A, B = continuous(p)
     n = A.shape[0]
     N = n + 3
     B = B * motor
-    PhT, _ = flow(A, B, T)
-    Ph1, G1 = flow(A, B, TAU)               # old command over [0, TAU]
-    Ph2, G2 = flow(A, B, T - TAU)           # new command over [TAU, T]
-    PhI, GI = flow(A, B, TI)                # the IMU's moment
+    Tc, TIc, TAUc, TWc = T, TI, TAU, 0.0
+    PhT, _ = flow(A, B, Tc)
+    Ph1, G1 = flow(A, B, TAUc)              # old command over [0, TAU]
+    Ph2, G2 = flow(A, B, Tc - TAUc)         # new command over [TAU, T]
+    PhI, GI = flow(A, B, TIc)               # the IMU's moment
+    PhW, GW = flow(A, B, TWc)               # the wheels' moment
     # readings as rows on z
-    s_rows = np.hstack([np.eye(n), np.zeros((n, 3))])               # the state at the start
+    s_rows = np.hstack([PhW, GW, np.zeros((n, 2))])                  # the state when the wheels are read
     imu = np.hstack([PhI, GI, np.zeros((n, 2))])                     # the state at TI
     J = np.zeros((2, n))                                             # the encoder (linear in s)
     for j in range(n):
@@ -89,9 +95,12 @@ def plant(p=None, a_v=A_V_TODAY, corrected=True, motor=1.0):
     x_enc, v_enc = J[0] @ s_rows, J[1] @ s_rows
     th_i, w_i = imu[m.BODY], imu[m.BODY + 1]                          # the IMU's body
     e = np.eye(N)
-    v_meas = v_enc + (p.r * w_i if corrected else 0.0)
+    if lqr2:                                # two samples: the cycle's start (the state z) and TI
+        dqf = 0.36 * e[n + 2] + 0.24 * e[m.BODY + 1] + 0.4 * w_i
+    else:
+        dqf = a_q * e[n + 2] + (1 - a_q) * w_i
+    v_meas = v_enc + ((p.r * (dqf if v_corr_by_dqf else w_i)) if corrected else 0.0)
     vf = a_v * e[n + 1] + (1 - a_v) * v_meas
-    dqf = A_Q * e[n + 2] + (1 - A_Q) * w_i
     xpos = x_enc + (p.r * th_i if corrected else 0.0)
     C = np.vstack([xpos, vf, th_i, dqf])
     Az = np.zeros((N, N))

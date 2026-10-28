@@ -70,16 +70,19 @@ def cost(K, plants, Q, R, S0, idx=(0, 1, 2, 3)):
     return total / len(plants)
 
 
-def plants_for(p, a_v, corrected=True):
+HOVER_IMU = dict(lqr2=True, v_corr_by_dqf=True)   # LQR2: the Hover's IMU path on two samples a cycle, its timing
+
+
+def plants_for(p, a_v, corrected=True, imu=None):
     out = []
     for scale, delay in PLANTS:
-        Az, Bz, C = L.plant(p, a_v=a_v, corrected=corrected, motor=scale)
+        Az, Bz, C = L.plant(p, a_v=a_v, corrected=corrected, motor=scale, **(imu or {}))
         out.append((Az, Bz, C, delay))
     return out
 
 
-def design(p, a_v, X, V, TH, W, U, starts=()):
-    pl = plants_for(p, a_v)
+def design(p, a_v, X, V, TH, W, U, starts=(), imu=None):
+    pl = plants_for(p, a_v, imu=imu)
     Q = np.diag([1 / X ** 2, 1 / V ** 2, 1 / TH ** 2, 1 / W ** 2])
     R = 1 / U ** 2
     S0 = np.diag([X ** 2, V ** 2, TH ** 2, W ** 2])
@@ -100,17 +103,17 @@ def design(p, a_v, X, V, TH, W, U, starts=()):
     return (None, np.inf) if best is None else (best.x, best.fun), (pl, Q, R, S0)
 
 
-def report(label, K, p, a_v, J, corrected=True):
+def report(label, K, p, a_v, J, corrected=True, imu=None):
     k = L.to_fw(K)
     print(f"  {label}: gains [{k['x']:.0f} per m, {k['vx']:.2f} per speed unit, {k['q']:.1f} per deg, "
           f"{k['dq']:.2f} per deg/s], cost {J:.2f}")
-    Az, Bz, C = L.plant(p, a_v=a_v, corrected=corrected)
+    Az, Bz, C = L.plant(p, a_v=a_v, corrected=corrected, **(imu or {}))
     for f, z, tau, mag in L.modes(Az + Bz @ K[None, :] @ C):
         if f > 1e-6:
             print(f"      oscillation {f:5.2f} Hz  damping {z:+.2f}")
         elif tau < 10:
             print(f"      decay       time constant {tau * 1000:6.0f} ms")
-    for (Az, Bz, C, delay), (scale, _) in zip(plants_for(p, a_v, corrected), PLANTS):
+    for (Az, Bz, C, delay), (scale, _) in zip(plants_for(p, a_v, corrected, imu), PLANTS):
         Acl, _ = closed(K, Az, Bz, C, delay)
         osc = [m for m in L.modes(Acl) if m[0] > 1e-6]
         z, f = min(((m[1], m[0]) for m in osc), default=(1.0, 0.0))
@@ -126,6 +129,8 @@ def main():
     ap.add_argument("--th", type=float, default=1.0, help="lean, deg")
     ap.add_argument("--w", type=float, default=20.0, help="pitch rate, deg/s")
     ap.add_argument("--u", type=float, default=100.0, help="command, units")
+    ap.add_argument("--rider-imu", action="store_true",
+                    help="design on the Rider's shared pitch path (0.6 per cycle) instead of the Hover's in time")
     ap.add_argument("--tau-v", type=float, nargs="+", default=[0.100],
                     help="speed smoothing, s. 0.100 = the Hover's (its Tightest); the flashed LQR2 uses it. 8 ms "
                          "rated best on this model but shook at 14 Hz on the floor (2026-10-28)")
@@ -137,13 +142,15 @@ def main():
     found = []
     for tv in a.tau_v:
         a_v = float(np.exp(-L.T / tv))
-        (K, J), (pl, Q, R, S0) = design(p, a_v, X, V, TH, W, U, starts=found)
+        imu = None if a.rider_imu else HOVER_IMU
+        (K, J), (pl, Q, R, S0) = design(p, a_v, X, V, TH, W, U, starts=found, imu=imu)
         print(f"speed smoothing {tv * 1000:.0f} ms ({a_v:.3f} per cycle):")
         if K is None:
             print("  no gains found stable on all four plants")
         else:
             found.append(K)
-            report("LQR on the readings", K, p, a_v, J)
+            report("LQR on the readings" + ("" if a.rider_imu else " (the Hover's IMU path)"), K, p, a_v, J,
+                   imu=imu)
         Kt = L.from_fw(K_TODAY)
         report("today's gains, corrected readings", Kt, p, a_v, cost(Kt, pl, Q, R, S0, L.weighted(p)))
     Kt = L.from_fw(K_TODAY)

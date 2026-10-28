@@ -45,11 +45,20 @@ FF, FF_BAND, U_MAX = 10.0, 20.0, 400.0
 # FRIC_TAU; replaces the factory boost in the new law. Rider friction: model.Params fric / ku = 32.5 units.
 FRIC_UNITS, FRIC_WIDTH, FRIC_TAU = 32.5, 20.0, 0.030
 # Driving (main.cpp): the stick's speed is ramped (driveRamp) at POS_AMAX up / POS_DMAX braking, capped at VMAX
-# (gPosVmax, 0.60 since 10-28); the law's speed reference is VREF x vdes, its command feedforward CMD_FF x vdes.
-VMAX, POS_AMAX, POS_DMAX = 0.60, 0.4, 0.8
+# (gPosVmax, 0.45 since 10-28 evening; drive_design.py explores above it with --vmax); the law's speed reference is
+# VREF x vdes, its command feedforward CMD_FF x vdes.
+VMAX, POS_AMAX, POS_DMAX = 0.45, 0.4, 0.8
 VREF, CMD_FF = 270.0, 360.0
+L2_SPEED = 327.6 * 0.828                         # LQR2's scaled units per m/s (271, main.cpp L2_SPEED_PER_MPS)
 # The Hover's plan (robot.cc kPlan*): the lead limit and the plan's own position integral (command units)
 PLAN_MAX_LEAD_M, PLAN_KI, PLAN_IMAX = 0.15, 100.0, 100.0
+# The Hover's IMU path (its boards/common/imu.cc, run per ~2.5 ms sample), for LQR2 verbatim (hover_sample()).
+HOVER_DQ_TAU = -0.0025 / np.log(0.6)             # 4.9 ms, the Hover's rate smoothing in time (for reference)
+# LQR2's IMU path runs in its own task like the Hover's imu_task (main.cpp imuTask: read, then vTaskDelay 2 ms): a
+# sample every HOVER_IMU_PERIOD_S on its own clock; the law takes the latest. The balance cycle is unchanged.
+IMU_READ_S = 0.00036                              # 12 bytes at 400 kHz I2C
+HOVER_IMU_PERIOD_S = 0.002 + IMU_READ_S           # the Hover: "read every ~2-3 ms"
+LQR2_UP_DEG = 2.8                                 # LQR2's pitch reference (gL2Up): the measured balance point
 LP_VEL = 0.85
 SPEED_COUNTS = 327.6     # speed register counts per m/s
 SCALED_PER_COUNT = 0.828 # 4.5 x K_V
@@ -59,13 +68,16 @@ R_WHEEL = 0.030
 
 class Firmware:
     def __init__(self, k=None, up_deg=2.8, rng=None, gyro_noise=0.06, acc_noise=0.02, corrected=False, a_v=LP_VEL,
-                 fric_comp=False, plan=None):
+                 fric_comp=False, plan=None, hover_imu=False, tau_v=None):
         """corrected: the encoders' body part taken off (the new law, lqr_design.py): position wheel_x + r*pitch,
         speed register + r*rate before its smoothing a_v (per cycle; today LP_VEL 0.85). plan: drive by the
         Hover's plan (drive_design.py: a_max, t_jerk, gain, th_v, th_a, u_v, u_a) instead of the LQR's drive
-        handling; it implies corrected readings and uses its own integral (k['xi'] unused)."""
+        handling; it implies corrected readings and uses its own integral (k['xi'] unused). hover_imu: the law
+        reads the Hover's IMU path (theta2, dq2: hover_sample(), twice a cycle) against LQR2_UP_DEG and corrects
+        the speed with its smoothed rate, as the Hover's robot.cc does; the shared estimate (theta, dqf, against
+        SET_DEG) is what the other controllers read."""
         self.k = dict(K_TODAY if k is None else k)
-        self.corrected, self.a_v = corrected, a_v
+        self.corrected, self.a_v, self.tau_v = corrected, a_v, tau_v   # tau_v (s): smoothing in time, as main.cpp
         self.fric_comp, self.u_lp = fric_comp, 0.0
         self.rate = 0.0
         self.up = up_deg
@@ -81,6 +93,8 @@ class Firmware:
         self.tgt = self.tgt_eff = None           # the LQR drive handling's home and moving target (m)
         self.vdes, self.was_vel = 0.0, False
         self.plan = plan
+        self.hover_imu = hover_imu
+        self.theta2, self.dq2 = None, 0.0
         self.plan_x = None                       # the plan's position, speed, acceleration, smoothed speed, integral
         self.v_r = self.a_r = self.v_r_f = self.plan_i = 0.0
         if plan is not None:
@@ -114,6 +128,20 @@ class Firmware:
         self.dqf = 0.6 * self.dqf + 0.4 * rate
         self.rate = rate
 
+    def hover_sample(self, th, w, acc, dts):
+        """One sample of the Hover's IMU path (boards/common/imu.cc), verbatim: dts = time since the last."""
+        xdd, thdd = acc
+        F = -G * np.sin(th) + thdd * IMU_H + xdd * np.cos(th) + self.rng.normal(0, self.an)
+        U = G * np.cos(th) - w * w * IMU_H + xdd * np.sin(th) + self.rng.normal(0, self.an)
+        g = np.round((-np.degrees(w) + self.rng.normal(0, self.gn)) * 16.4) / 16.4
+        acc_pitch = np.degrees(np.arctan(F / U)) + self.up      # plain angle, no lever correction
+        if self.theta2 is None:
+            self.theta2 = acc_pitch
+        self.dq2 = 0.6 * self.dq2 + 0.4 * g
+        wgt = 1.0 / (abs(g) + 200.0)
+        if abs(acc_pitch) < 100 and abs(g) < 1000:
+            self.theta2 = wgt * acc_pitch + (1 - wgt) * (self.theta2 + g * dts)
+
     def drive_today(self, dt, stick):
         """The LQR's drive handling as main.cpp has it (both LQR and LQR2): the stick speed ramps (driveRamp,
         POS_AMAX up / POS_DMAX braking), the target advances at it; on release the home is where the brake ramp
@@ -140,9 +168,13 @@ class Firmware:
         """One cycle of the balance law; stick = the drive command (m/s, the firmware's gDriveVel)."""
         k = self.k
         v = self.raw_v
-        pitch = self.theta - SET_DEG
+        pitch = (self.theta2 - LQR2_UP_DEG) if self.hover_imu else (self.theta - SET_DEG)
+        self.dq_law = self.dq2 if self.hover_imu else self.dqf
         if self.corrected:                       # firmware frame: forward lean makes pitch and rate negative
-            v -= R_WHEEL * np.radians(self.rate) * SPEED_COUNTS * SCALED_PER_COUNT
+            rr = self.dq2 if self.hover_imu else self.rate   # the Hover corrects with its smoothed rate
+            v -= R_WHEEL * np.radians(rr) * SPEED_COUNTS * SCALED_PER_COUNT
+        if self.tau_v:
+            self.a_v = float(np.exp(-dt / self.tau_v))
         self.vel_s = self.a_v * self.vel_s + (1 - self.a_v) * v
         if self.plan is not None:
             return self._control_plan(dt, stick, pitch)
@@ -154,7 +186,7 @@ class Firmware:
         if self.corrected:
             x -= R_WHEEL * np.radians(pitch)
         u = -(k["x"] * x + k["xi"] * self.ix + k["vx"] * (self.vel_s - VREF * vdes) + k["q"] * pitch
-              + k["dq"] * self.dqf) + CMD_FF * vdes
+              + k["dq"] * self.dq_law) + CMD_FF * vdes
         return self._output(u, dt)
 
     def _control_plan(self, dt, stick, pitch):
@@ -164,9 +196,10 @@ class Firmware:
         smoothed speed and lean, the plan's command is fed forward, and the plan's own integral always runs."""
         R, k = self.plan, self.k
         x = self.wheel_x - R_WHEEL * np.radians(pitch)                 # the axle (firmware frame)
-        if self.plan_x is None:
-            self.plan_x, self.v_r, self.a_r = x, self.vel_s / VREF, 0.0
+        if self.plan_x is None:                                        # plan_start: here, at the measured speed
+            self.plan_x, self.v_r, self.a_r = x, self.vel_s / L2_SPEED, 0.0
             self.v_r_f, self.plan_i = self.v_r, 0.0
+        xerr = x - self.plan_x                                         # before the plan's step, as the Hover
         a_des = np.clip(R["gain"] * (float(np.clip(stick, -VMAX, VMAX)) - self.v_r), -R["a_max"], R["a_max"])
         jerk = R["a_max"] / R["t_jerk"]
         self.a_r += np.clip(a_des - self.a_r, -jerk * dt, jerk * dt)
@@ -175,10 +208,9 @@ class Firmware:
         self.v_r_f = self.a_v * self.v_r_f + (1 - self.a_v) * self.v_r
         lean_fw = -np.degrees(R["th_v"] * self.v_r + R["th_a"] * self.a_r)   # forward lean is negative pitch
         u_ff = R["u_v"] * self.v_r + R["u_a"] * self.a_r
-        xerr = x - self.plan_x
         self.plan_i = float(np.clip(self.plan_i + PLAN_KI * xerr * dt, -PLAN_IMAX, PLAN_IMAX))
-        u = -(k["x"] * xerr + k["vx"] * (self.vel_s - VREF * self.v_r_f) + k["q"] * (pitch - lean_fw)
-              + k["dq"] * self.dqf) + self.plan_i + u_ff
+        u = -(k["x"] * xerr + k["vx"] * (self.vel_s - L2_SPEED * self.v_r_f) + k["q"] * (pitch - lean_fw)
+              + k["dq"] * self.dq_law) + self.plan_i + u_ff
         return self._output(u, dt)
 
     def _output(self, u, dt):
@@ -225,24 +257,31 @@ def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5, kick=None
     s = m.initial(np.radians(th0_deg))
     u = 0.0
     rows = []
-    n_sub = int(round(CYCLE_S / SUB_S))
-    i_read, i_cmd = int(round(READ_S / SUB_S)), int(round(COMMAND_S / SUB_S))
-    for c in range(int(T / CYCLE_S)):
-        t = c * CYCLE_S
+    hov = getattr(fw, "hover_imu", False)
+    cyc, rd, cm = CYCLE_S, READ_S, COMMAND_S
+    n_sub = int(round(cyc / SUB_S))
+    i_read, i_cmd = int(round(rd / SUB_S)), int(round(cm / SUB_S))
+    i_wheels = 0
+    next_hover = 0.0
+    for c in range(int(T / cyc)):
+        t = c * cyc
         inj = chirp(t + READ_S - sweep_at, *sweep) if sweep else 0.0
         stick = 0.0
         if drive is not None:
             j = np.searchsorted(drive[0], t, side="right") - 1
             stick = float(drive[1][j]) if j >= 0 else 0.0
-        if kick and abs(t - kick[0]) < CYCLE_S / 2:
+        if kick and abs(t - kick[0]) < cyc / 2:
             s[B + 1] += np.radians(kick[1])
         for k in range(n_sub):
-            if k == 0:
+            if hov and t + k * SUB_S >= next_hover:   # the IMU task's sample, on its own clock
+                fw.hover_sample(s[B], s[B + 1], m.accel_body(p, s, u), HOVER_IMU_PERIOD_S)
+                next_hover += HOVER_IMU_PERIOD_S
+            if k == i_wheels:
                 fw.read_wheels(p, s)
             if k == i_read:
-                fw.read_imu(s[B], s[B + 1], m.accel_body(p, s, u), CYCLE_S)
+                fw.read_imu(s[B], s[B + 1], m.accel_body(p, s, u), cyc)
             if k == i_cmd:
-                u_fw = fw.control(CYCLE_S, stick)
+                u_fw = fw.control(cyc, stick)
                 u = u_fw + inj
             s = m.step(p, s, u, SUB_S)
         if abs(s[B]) > np.radians(45):

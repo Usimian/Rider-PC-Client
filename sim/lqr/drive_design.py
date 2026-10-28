@@ -21,12 +21,12 @@ from dataclasses import replace
 
 import numpy as np
 
+import closed_loop as CL
 import linear_model as L
-from closed_loop import CYCLE_S, K_TODAY, U_MAX, Firmware, run
+from closed_loop import CYCLE_S, U_MAX, Firmware, run
 from model import Params
 
-LQR2 = dict(x=-1694.0, xi=-30.0, vx=-6.78, q=53.3, dq=1.32)     # the flashed defaults (the Hover way)
-A_V = float(np.exp(-CYCLE_S / 0.100))
+LQR2 = dict(x=-1916.0, xi=0.0, vx=-7.46, q=59.4, dq=1.39)      # main.cpp gL2* (its own plan integral, not xi)
 UP = 2.8
 
 
@@ -47,7 +47,7 @@ def case(p, mk, drive, T):
 
 def describe(log, t_go, v_cmd, window=1.5):
     t, u, v, lean = log[:, 0], log[:, 2], log[:, 3], log[:, 4]
-    a = np.exp(-CYCLE_S / 0.05)
+    a = np.exp(-np.median(np.diff(t)) / 0.05)
     vf = v.copy()
     for i in range(1, len(vf)):
         vf[i] = a * vf[i - 1] + (1 - a) * vf[i]
@@ -59,7 +59,8 @@ def describe(log, t_go, v_cmd, window=1.5):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--speeds", type=float, nargs="+", default=[0.30, 0.45, 0.60])
+    ap.add_argument("--speeds", type=float, nargs="+", default=[0.30, 0.45])
+    ap.add_argument("--vmax", type=float, default=None, help="raise the firmware's speed cap (closed_loop.VMAX, 0.45)")
     ap.add_argument("--a-max", type=float, nargs="+", default=[1.0])
     ap.add_argument("--t-jerk", type=float, default=0.12)
     ap.add_argument("--gain", type=float, default=8.0)
@@ -67,16 +68,18 @@ def main():
                     help="motor drive scale; the 10-28 floor drives at a 34 %% battery needed ~460 units per m/s "
                          "to cruise (the model: 333, 10-19 floor: 360) -> ~0.78")
     a = ap.parse_args()
+    if a.vmax:
+        CL.VMAX = a.vmax
     p0 = Params()
     ff = feedforward(p0)
     print(f"plan per m/s^2: lean {np.degrees(ff['th_a']):.2f} deg, command {ff['u_a']:.0f}; per m/s: lean "
           f"{np.degrees(ff['th_v']):.2f} deg, command {ff['u_v']:.0f}  (Hover: 14 deg per m/s^2, 333 per m/s)")
-    ctrls = [("LQR, today's drive", lambda: Firmware(up_deg=UP)),
-             ("LQR2, today's drive", lambda: Firmware(k=LQR2, up_deg=UP, corrected=True, a_v=A_V, fric_comp=True))]
-    for am in a.a_max:
+    ctrls = [("LQR, today's drive", lambda: Firmware(up_deg=UP))]
+    for am in a.a_max:                                  # LQR2 as main.cpp has it: the Hover's IMU path, law and plan
         plan = dict(ff, a_max=am, t_jerk=a.t_jerk, gain=a.gain)
         ctrls.append((f"LQR2, Hover plan {am:g} m/s^2",
-                      lambda plan=plan: Firmware(k=LQR2, up_deg=UP, a_v=A_V, fric_comp=True, plan=plan)))
+                      lambda plan=plan: Firmware(k=LQR2, up_deg=UP, fric_comp=True, plan=plan, hover_imu=True,
+                                                 tau_v=0.100)))
     for motor in a.motors:
         p = replace(p0, ku_over_b=p0.ku_over_b * motor)
         print(f"\nmotors x{motor:g}" + ("  (a weaker battery)" if motor < 1 else ""))
@@ -91,7 +94,7 @@ def main():
                 t90, l0, l1, lim = describe(log, 2.0, V)
                 t = log[:, 0]
                 st = (t >= 5.0) & (t < 8.0)
-                x = np.cumsum(log[:, 3]) * CYCLE_S
+                x = np.cumsum(log[:, 3] * np.gradient(t))
                 roll = (x[st][-1] - x[st][0]) * 1000
                 rl, fr = case(p, mk, (np.array([0.0, 2.0, 5.0, 7.5]), np.array([0.0, V, -V, 0.0])), 9.0)
                 if fr:
