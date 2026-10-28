@@ -4,7 +4,21 @@ Read at session start. Facts live in the repo (commit messages carry the numbers
 provenance, `docs/HARDWARE.md` -> Power / Audio the hardware facts); this is only the running story, the open
 list, and what not to trust.
 
-## Where it stands (2026-10-27)
+## Where it stands (2026-10-28): LQR2, the Hover's LQR on the Rider
+
+- **Flashed + committed (`510957a`): LQR2 (`ctrl 2`)**, beside LQR and the policy: the Hover's method and its
+  choices on the Rider's measured model (`sim/lqr/`, system Python): encoder corrected (it reads the wheel
+  against the body), speed smoothed 0.1 s, gains -1694 / -6.78 / 53.3 / 1.32, friction compensation 32.5.
+  Floor: standing much quieter than LQR, no fast mode; pushes and drives to 0.28 m/s clean. The robot boots on
+  LQR2 (saved choice). Top speed as the Hover: full stick 0.30, web slider to 0.60, firmware caps 0.60.
+- **Measured today** (`docs/HARDWARE.md`): IMU 96-100 mm above the axle (firmware lever correction uses 60);
+  whole-robot CoM 40.5 mm; body inertia 17.5 kg cm^2 (drops); motor = the Hover's, friction 33 units (1.4x).
+- **The model is blind above ~10 Hz:** a 1-30 Hz sweep shows a resonance at ~20-25 Hz it lacks (robot up to 4x).
+  That is why the first LQR2 (8 ms smoothing, model-rated best) shook at 14 Hz. Flexible-joint model parked.
+- Recording: `tools/capture/balance_watch.py` (full-rate windows, a line per window as it lands). Always run it
+  before a floor test.
+
+## Where it stood (2026-10-27)
 
 - **Flashed + committed: `ppo_lb25_s4`** -- the spin shimmy fixed on the floor (spin pitch-rate RMS 3.1 / 5.3 /
   3.4 °/s by drivecap, ld8_s6 13-23). Backup `ppo_lb25_s1`. Training lever: `--lead_lambda` + a firm
@@ -45,6 +59,11 @@ list, and what not to trust.
 
 ## Open list, in order
 
+0. **LQR2 vs LQR verdict, then remove the loser** (no dead code). Marc: LQR2 balances "so much better", driving
+   "pretty good"; a side-by-side drive recording is not done. Then the Hover's driving plan (its step 2:
+   `~/hover/sim/drive_design.py`, robot.cc `plan_step`) for LQR2, and its 1.0 m/s^2 (Rider ramps 0.4 / brakes
+   0.8). Unverified: R1 = button 5 (`rider_controller.py --test`). Not changed: setpoint 3.55 vs the real balance
+   point ~2.8; the 60 mm IMU correction (shared with the policy).
 1. **First balance-on after a power-up** (the left leg used to lag): two clean power-ups since ModemManager was
    masked (no stray lines, both legs "ok" on the arrival check). Keep watching `legstkL/R`.
 2. Wheel read failures at power-up (469 / 496, then 0): read `rfL/rfR`, `rft0/rft1` after the next boot that has
@@ -71,6 +90,12 @@ list, and what not to trust.
 8. The controller low-battery cutoff (<= 15 %, unplugged) is untested.
 
 ## Do not trust
+
+- `balance_watch.py` files saved before 2026-10-28 ~11:10 (`*_watch.csv`, `tap_test.csv`): t_us rounded to 1-10 ms;
+  use `sample_times()`. The LQR2 8 ms gains (-1844 / -6.89 / 46.0 / 3.67): shook on the floor.
+- The sim/lqr model above ~10 Hz (see above), and anything it rates for light smoothing or high lean-rate gain.
+- Commit `59cad1e`'s IMU entry ("assumes 120 mm", "ride height"): corrected in `3e07460` (60 mm; legs were limp).
+  Telemetry `legR/legL` show ride-height defaults for a limp leg: read `legst`.
 
 - `drive_gain_sweep.py` / `deep_check --k` for the policy's position loop: the sim liked K 40 / KD 20 (stop 28 ->
   19 cm, 0/90 falls); on the floor (10-22 15:24) it drove with a ~2 Hz pitch oscillation (+-7 deg, std 3-5 deg vs
