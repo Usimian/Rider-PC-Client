@@ -221,6 +221,10 @@ if __name__ == "__main__":
         if args.seed is not None:
             model.set_random_seed(args.seed)
         print(f"fine-tuning {args.init} (lr {args.lr}, caps_lambda {model.caps_lambda}): {args.steps} steps")
+        # a saved policy carries the anchor / lead weights it was trained with but not their states (caps_ppo
+        # excludes the data): set both from the arguments, so an inherited weight never runs without its states
+        # (2026-10-28: --anchor_lambda 0 on ppo_lb25_s4 kept its 25 and crashed)
+        model.anchor_lambda, model.lead_lambda = 0.0, 0.0
         if args.anchor_lambda > 0.0:
             model.anchor_obs, model.anchor_mu = anchor_set(model, venv, args)
             model.anchor_lambda = args.anchor_lambda
