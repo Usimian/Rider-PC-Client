@@ -38,15 +38,26 @@ SET_DEG = 3.55           # gSetpoint
 K_TODAY = dict(x=-500.0, xi=-30.0, vx=-6.0, q=32.0, dq=3.0)
 IX_MAX = 3.0
 FF, FF_BAND, U_MAX = 10.0, 20.0, 400.0
+# Friction compensation (the Hover's Phase 3 step 3, robot.cc kFric*): the measured friction in the direction
+# the law pushes, blended through zero by tanh(u / FRIC_WIDTH), the direction from the command smoothed over
+# FRIC_TAU; replaces the factory boost in the new law. Rider friction: model.Params fric / ku = 32.5 units.
+FRIC_UNITS, FRIC_WIDTH, FRIC_TAU = 32.5, 20.0, 0.030
 LP_VEL = 0.85
 SPEED_COUNTS = 327.6     # speed register counts per m/s
 SCALED_PER_COUNT = 0.828 # 4.5 x K_V
 POS_STEP = np.pi * 0.06 / 1024
+R_WHEEL = 0.030
 
 
 class Firmware:
-    def __init__(self, k=None, up_deg=2.8, rng=None, gyro_noise=0.06, acc_noise=0.02):
+    def __init__(self, k=None, up_deg=2.8, rng=None, gyro_noise=0.06, acc_noise=0.02, corrected=False, a_v=LP_VEL,
+                 fric_comp=False):
+        """corrected: the encoders' body part taken off (the new law, lqr_design.py): position wheel_x + r*pitch,
+        speed register + r*rate before its smoothing a_v (per cycle; today LP_VEL 0.85)."""
         self.k = dict(K_TODAY if k is None else k)
+        self.corrected, self.a_v = corrected, a_v
+        self.fric_comp, self.u_lp = fric_comp, 0.0
+        self.rate = 0.0
         self.up = up_deg
         self.rng = rng or np.random.default_rng(0)
         self.gn, self.an = gyro_noise, acc_noise
@@ -62,8 +73,7 @@ class Firmware:
     def read_wheels(self, p, s):
         x_enc, v_enc = encoder(p, s)
         self.wheel_x = np.round(x_enc / POS_STEP) * POS_STEP
-        raw = np.round(v_enc * SPEED_COUNTS)
-        self.vel_s = LP_VEL * self.vel_s + (1 - LP_VEL) * SCALED_PER_COUNT * raw
+        self.raw_v = SCALED_PER_COUNT * np.round(v_enc * SPEED_COUNTS)   # filtered in control(), after the IMU
 
     def read_imu(self, s, acc, dt):
         x, v, th, w = s
@@ -86,16 +96,26 @@ class Firmware:
         if abs(pit_acc) < 100 and abs(rate) < 1000:
             self.theta = wgt * pit_acc + (1 - wgt) * (self.theta + rate * dt)
         self.dqf = 0.6 * self.dqf + 0.4 * rate
+        self.rate = rate
 
     def control(self, dt):
         if self.home is None:
             self.home = self.wheel_x
         k = self.k
-        x = self.wheel_x - self.home
-        self.ix = float(np.clip(self.ix + x * dt, -IX_MAX, IX_MAX))
+        v = self.raw_v
         pitch = self.theta - SET_DEG
+        x = self.wheel_x - self.home
+        if self.corrected:                       # firmware frame: forward lean makes pitch and rate negative
+            x -= R_WHEEL * np.radians(pitch)
+            v -= R_WHEEL * np.radians(self.rate) * SPEED_COUNTS * SCALED_PER_COUNT
+        self.vel_s = self.a_v * self.vel_s + (1 - self.a_v) * v
+        self.ix = float(np.clip(self.ix + x * dt, -IX_MAX, IX_MAX))
         u = -(k["x"] * x + k["xi"] * self.ix + k["vx"] * self.vel_s + k["q"] * pitch + k["dq"] * self.dqf)
-        if u > FF_BAND:
+        if self.fric_comp:
+            a = np.exp(-dt / FRIC_TAU)
+            self.u_lp = a * self.u_lp + (1 - a) * u
+            u += FRIC_UNITS * np.tanh(self.u_lp / FRIC_WIDTH)
+        elif u > FF_BAND:
             u += FF
         elif u < -FF_BAND:
             u -= FF
@@ -112,9 +132,10 @@ def chirp(t, a, f0, f1, dur):
     return a * env * np.sin(ph)
 
 
-def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5):
+def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5, kick=None):
     """Simulate T s standing; sweep = (a, f0, f1, dur) starts at sweep_at. Returns the recorded rows (every 2nd
-    cycle, as the robot's capture) and whether it fell."""
+    cycle, as the robot's capture) and whether it fell. kick = (t, deg/s): a shove, the body's pitch rate
+    changed at once (+ forward)."""
     p = p or Params()
     fw = fw or Firmware()
     s = np.array([0.0, 0.0, np.radians(th0_deg), 0.0])
@@ -125,6 +146,8 @@ def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5):
     for c in range(int(T / CYCLE_S)):
         t = c * CYCLE_S
         inj = chirp(t + READ_S - sweep_at, *sweep) if sweep else 0.0
+        if kick and abs(t - kick[0]) < CYCLE_S / 2:
+            s[3] += np.radians(kick[1])
         for k in range(n_sub):
             if k == 0:
                 fw.read_wheels(p, s)
