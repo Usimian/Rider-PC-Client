@@ -1,0 +1,10 @@
+# sim/.venv (Python 3.13), rebuilt with:
+#   uv venv sim/.venv --python 3.13 && uv pip install --python sim/.venv/bin/python -r sim/requirements.txt
+# Versions are the ones in use 2026-10-28. torch must be a build for the workstation's GPU (Blackwell).
+mujoco==3.9.0
+gymnasium==1.2.3
+numpy==2.4.6
+stable-baselines3==2.8.0
+torch==2.12.0
+tensorboard==2.20.0
+matplotlib==3.11.0

@@ -25,6 +25,13 @@ services), `factory_roll_balance.md` (decompiled stock leveling).
   hand-rocked with balance off, `tools/capture/tilt_capture.py` + `tools/balance/imu_position_fit.py`;
   Marc's ruler: 100). The firmware's lever-arm correction is effectively **60 mm** (`KIMU` 120 mm ×
   `imucomp` −0.5) — not yet changed.
+- ✅ **Whole robot's centre of mass 40.5 mm above the wheel axle** at ride height, legs powered
+  (2026-10-28: on its back balanced across a round pencil parallel to the axle, the pencil 40 mm level from
+  the wheel centre (Marc), IMU 84.3° there vs 3.55° balancing upright: 40 / sin 80.75°; ±1–2 mm).
+  Supersedes the 45 mm of 2026-06-13. Lying flat on its back the IMU reads 94.0°: it sits ~4° rotated
+  against the back surface.
+- ✅ **Wheels with balance off (torque off) turn by hand but feel braked** (Marc, 2026-10-28), like the
+  Hover's shorted windings at zero drive.
 - ✅ **Wheel encoders read the wheel's turn against the body** (the wheel servos sit on the legs), not
   the axle's travel: axle = `wheel_x` − 0.52 mm per degree of `th` (forward lean makes `th` decrease).
   Hand-rocked about a held axle, encoder speed = −0.92 × r × lean rate (−1 = a perfectly still axle),
