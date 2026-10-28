@@ -28,69 +28,80 @@ import numpy as np
 from scipy.linalg import expm
 
 from closed_loop import COMMAND_S, CYCLE_S, K_TODAY, READ_S
-from model import Params, accel
+from model import Params, plant_module
 
 T, TI, TAU = CYCLE_S, READ_S, COMMAND_S
 SPEED_UNITS = 327.6 * 0.828        # firmware 'scaled' speed units per m/s (271)
 A_V_TODAY = 0.85
 A_Q = 0.6
 DEG = 180 / np.pi
-N = 7                              # z size
-
-
 def continuous(p=None):
-    """A, B for s = (x, v, th, w) and the model's u, friction and cogging off."""
+    """A, B for the plant's state s (model.py: (x, v, th, w); model_flex.py: (x, v, thl, wl, thb, wb)) and the
+    model's u, friction and cogging off."""
     p = replace(p or Params(), fric=0.0, cog20_rate=0.0, cog24_rate=0.0)
-    s0, eps = np.zeros(4), 1e-6
-    A = np.zeros((4, 4))
-    A[0, 1] = A[2, 3] = 1.0
-    for j in range(4):
-        d = np.zeros(4)
+    m = plant_module(p)
+    n = len(m.initial(0.0))
+    s0, eps = np.zeros(n), 1e-6
+    A = np.zeros((n, n))
+    for j in range(n):
+        d = np.zeros(n)
         d[j] = eps
-        A[[1, 3], j] = (np.array(accel(p, s0 + d, 0.0)) - np.array(accel(p, s0 - d, 0.0))) / (2 * eps)
-    B = np.zeros((4, 1))
-    B[[1, 3], 0] = (np.array(accel(p, s0, 1.0)) - np.array(accel(p, s0, -1.0))) / 2
+        A[:, j] = (m.deriv(p, s0 + d, 0.0) - m.deriv(p, s0 - d, 0.0)) / (2 * eps)
+    B = ((m.deriv(p, s0, 1.0) - m.deriv(p, s0, -1.0)) / 2)[:, None]
     return A, B
 
 
 def flow(A, B, t):
     """Phi(t), Gamma(t): s(t) = Phi s(0) + Gamma u for u held over [0, t]."""
-    M = np.zeros((5, 5))
-    M[:4, :4], M[:4, 4:] = A, B
+    n = A.shape[0]
+    M = np.zeros((n + 1, n + 1))
+    M[:n, :n], M[:n, n:] = A, B
     E = expm(M * t)
-    return E[:4, :4], E[:4, 4:]
+    return E[:n, :n], E[:n, n:]
+
+
+def weighted(p=None):
+    """Indices in z of (x, v, th, w) for the cost: the axle, and the body the IMU is on."""
+    B = plant_module(p or Params()).BODY
+    return [0, 1, B, B + 1]
 
 
 def plant(p=None, a_v=A_V_TODAY, corrected=True, motor=1.0):
-    """Az, Bz (z_{k+1} = Az z_k + Bz u_k) and C (y_k = C z_k)."""
+    """Az, Bz (z_{k+1} = Az z_k + Bz u_k) and C (y_k = C z_k); z = (s, u_prev, vf_prev, dqf_prev)."""
     p = p or Params()
+    m = plant_module(p)
     A, B = continuous(p)
+    n = A.shape[0]
+    N = n + 3
     B = B * motor
     PhT, _ = flow(A, B, T)
     Ph1, G1 = flow(A, B, TAU)               # old command over [0, TAU]
     Ph2, G2 = flow(A, B, T - TAU)           # new command over [TAU, T]
     PhI, GI = flow(A, B, TI)                # the IMU's moment
     # readings as rows on z
-    I4 = np.eye(4)
-    s_rows = np.hstack([I4, np.zeros((4, 3))])                       # x, v, th, w at the start
-    imu = np.hstack([PhI, GI, np.zeros((4, 2))])                     # the state at TI
-    x_enc = s_rows[0] - p.r * s_rows[2]
-    v_enc = s_rows[1] - p.r * s_rows[3]
-    th_i, w_i = imu[2], imu[3]
+    s_rows = np.hstack([np.eye(n), np.zeros((n, 3))])               # the state at the start
+    imu = np.hstack([PhI, GI, np.zeros((n, 2))])                     # the state at TI
+    J = np.zeros((2, n))                                             # the encoder (linear in s)
+    for j in range(n):
+        d = np.zeros(n)
+        d[j] = 1.0
+        J[:, j] = m.encoder(p, d)
+    x_enc, v_enc = J[0] @ s_rows, J[1] @ s_rows
+    th_i, w_i = imu[m.BODY], imu[m.BODY + 1]                          # the IMU's body
     e = np.eye(N)
     v_meas = v_enc + (p.r * w_i if corrected else 0.0)
-    vf = a_v * e[5] + (1 - a_v) * v_meas
-    dqf = A_Q * e[6] + (1 - A_Q) * w_i
+    vf = a_v * e[n + 1] + (1 - a_v) * v_meas
+    dqf = A_Q * e[n + 2] + (1 - A_Q) * w_i
     xpos = x_enc + (p.r * th_i if corrected else 0.0)
     C = np.vstack([xpos, vf, th_i, dqf])
     Az = np.zeros((N, N))
     Bz = np.zeros((N, 1))
-    Az[:4, :4] = PhT
-    Az[:4, 4] = (Ph2 @ G1)[:, 0]
-    Bz[:4] = G2
-    Bz[4, 0] = 1.0                          # u_k becomes the next cycle's u_prev
-    Az[5] = vf
-    Az[6] = dqf
+    Az[:n, :n] = PhT
+    Az[:n, n] = (Ph2 @ G1)[:, 0]
+    Bz[:n] = G2
+    Bz[n, 0] = 1.0                          # u_k becomes the next cycle's u_prev
+    Az[n + 1] = vf
+    Az[n + 2] = dqf
     return Az, Bz, C
 
 

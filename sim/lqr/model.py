@@ -121,6 +121,33 @@ def accel(p: Params, s, u):
     return xdd, thdd
 
 
+# The interface closed_loop.py and linear_model.py use, shared with model_flex.py (the body sprung on its legs):
+BODY = 2                                   # index of the IMU body's angle in s (its rate at BODY + 1)
+
+
+def initial(th0):
+    return np.array([0.0, 0.0, th0, 0.0])
+
+
+def accel_body(p: Params, s, u):
+    """(x'', the IMU body's angular acceleration)."""
+    return accel(p, s, u)
+
+
+def deriv(p: Params, s, u):
+    xdd, thdd = accel(p, s, u)
+    return np.array([s[1], xdd, s[3], thdd])
+
+
+def plant_module(p):
+    """model or model_flex, for these parameters."""
+    if hasattr(p, "flex_k"):
+        import model_flex
+        return model_flex
+    import model
+    return model
+
+
 def step(p: Params, s, u, dt):
     """One RK4 step of length dt with the command held."""
     def f(s):

@@ -58,7 +58,7 @@ def main():
     p2 = replace(p, ku_over_b=2 * p.ku_over_b)
     ctrls = [("today (as flashed)", lambda: Firmware(up_deg=UP))]
     found = []
-    for tv in (0.031, 0.015, 0.008):
+    for tv in (0.100, 0.008):                                # the Hover's (flashed) and the one that shook
         a_v = float(np.exp(-CYCLE_S / tv))
         (K, J), _ = design(p, a_v, a.x, a.v, np.radians(a.th), np.radians(a.w), a.u, starts=found)
         found.append(K)

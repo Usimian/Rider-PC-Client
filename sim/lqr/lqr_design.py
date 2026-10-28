@@ -21,6 +21,7 @@ and without one more cycle of delay; gains that destabilise any of them are reje
 """
 import argparse
 import warnings
+from dataclasses import fields
 
 import numpy as np
 from scipy.linalg import solve_discrete_are, solve_discrete_lyapunov
@@ -51,17 +52,19 @@ def closed(K, Az, Bz, C, delay):
     return A, G
 
 
-def cost(K, plants, Q, R, S0):
+def cost(K, plants, Q, R, S0, idx=(0, 1, 2, 3)):
+    """idx: where (x, v, th, w) sit in the plant's state (linear_model.weighted)."""
     total = 0.0
+    ix = np.ix_(list(idx), list(idx))
     for Az, Bz, C, delay in plants:
         Acl, G = closed(K, Az, Bz, C, delay)
         if max(abs(np.linalg.eigvals(Acl))) >= 0.9999:
             return np.inf
         n = Acl.shape[0]
         Qa = np.zeros((n, n))
-        Qa[:4, :4] = Q
+        Qa[ix] = Q
         Sa = np.zeros((n, n))
-        Sa[:4, :4] = S0
+        Sa[ix] = S0
         P = solve_discrete_lyapunov(Acl.T, Qa + G.T * R @ G)
         total += float(np.trace(P @ Sa))
     return total / len(plants)
@@ -80,16 +83,17 @@ def design(p, a_v, X, V, TH, W, U, starts=()):
     Q = np.diag([1 / X ** 2, 1 / V ** 2, 1 / TH ** 2, 1 / W ** 2])
     R = 1 / U ** 2
     S0 = np.diag([X ** 2, V ** 2, TH ** 2, W ** 2])
-    # start from full-state LQR on the bare plant (perfect readings, no delay), applied to the readings
-    A, B = L.continuous(p)
+    idx = L.weighted(p)
+    # start from full-state LQR on the bare rigid plant (perfect readings, no delay), applied to the readings
+    A, B = L.continuous(Params(**{f.name: getattr(p, f.name) for f in fields(Params)}))
     Ad, Bd = L.flow(A, B, L.T)
     P = solve_discrete_are(Ad, Bd, Q, np.array([[R]]))
     Kf = -np.linalg.solve(Bd.T @ P @ Bd + R, Bd.T @ P @ Ad)[0]
     best = None
     for K0 in [Kf * f for f in (1.0, 0.5, 0.3, 0.2)] + [L.from_fw(K_TODAY)] + list(starts):
-        if not np.isfinite(cost(K0, pl, Q, R, S0)):
+        if not np.isfinite(cost(K0, pl, Q, R, S0, idx)):
             continue
-        r = minimize(cost, K0, args=(pl, Q, R, S0), method="Nelder-Mead",
+        r = minimize(cost, K0, args=(pl, Q, R, S0, idx), method="Nelder-Mead",
                      options=dict(xatol=1e-3, fatol=1e-6, maxiter=6000))
         if best is None or r.fun < best.fun:
             best = r
@@ -122,7 +126,9 @@ def main():
     ap.add_argument("--th", type=float, default=1.0, help="lean, deg")
     ap.add_argument("--w", type=float, default=20.0, help="pitch rate, deg/s")
     ap.add_argument("--u", type=float, default=100.0, help="command, units")
-    ap.add_argument("--tau-v", type=float, nargs="+", default=[0.031, 0.015, 0.008])
+    ap.add_argument("--tau-v", type=float, nargs="+", default=[0.100],
+                    help="speed smoothing, s. 0.100 = the Hover's (its Tightest); the flashed LQR2 uses it. 8 ms "
+                         "rated best on this model but shook at 14 Hz on the floor (2026-10-28)")
     a = ap.parse_args()
     p = Params()
     X, V, TH, W, U = a.x, a.v, np.radians(a.th), np.radians(a.w), a.u
@@ -139,10 +145,10 @@ def main():
             found.append(K)
             report("LQR on the readings", K, p, a_v, J)
         Kt = L.from_fw(K_TODAY)
-        report("today's gains, corrected readings", Kt, p, a_v, cost(Kt, pl, Q, R, S0))
+        report("today's gains, corrected readings", Kt, p, a_v, cost(Kt, pl, Q, R, S0, L.weighted(p)))
     Kt = L.from_fw(K_TODAY)
     print("today, as flashed (raw encoder, 0.85):")
-    report("today's gains", Kt, p, L.A_V_TODAY, cost(Kt, plants_for(p, L.A_V_TODAY, False), Q, R, S0), corrected=False)
+    report("today's gains", Kt, p, L.A_V_TODAY, cost(Kt, plants_for(p, L.A_V_TODAY, False), Q, R, S0, L.weighted(p)), corrected=False)
 
 
 if __name__ == "__main__":

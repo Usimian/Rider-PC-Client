@@ -2,6 +2,7 @@
 
     python3 sim/lqr/freq_response.py                          # both standing LQR sweeps (10-19, 10-28)
     python3 sim/lqr/freq_response.py 2026-10-28_chirp_lqr.csv:2.82
+    python3 sim/lqr/freq_response.py 2026-10-28_chirp_lqr_30hz.csv:2.8:30:1:30:20   # file:up:amp:f0:f1:secs
 
 The robot recording: tools/capture/chirp_capture.py (the firmware's 'chirp' added to the balance output,
 before the stiction boost... no: after it, at the wheel command; main.cpp adds it to uout). The model
@@ -27,7 +28,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "..", "..", "data", "captures")
 DEFAULT = ["2026-10-19_chirp_lqr.csv", "2026-10-28_chirp_lqr.csv"]
 SWEEP = (60.0, 1.0, 10.0, 20.0)
-BANDS = [1.0 * 2 ** (k / 3) for k in range(0, 11)]   # 1 .. ~10 Hz
+def bands_for(f0, f1):
+    """1/3-octave band edges from f0 to f1."""
+    n = int(np.floor(3 * np.log2(f1 / f0)))
+    return [f0 * 2 ** (k / 3) for k in range(0, n + 1)]
 
 
 def load(path):
@@ -41,7 +45,7 @@ def from_rows(rows):
                 x=rows[:, 4] / 10.0)
 
 
-def bands(r):
+def bands(r, edges=None):
     nz = np.nonzero(r["inj"])[0]
     sl = slice(nz[0], nz[-1])
     t = r["t"][sl]
@@ -52,7 +56,7 @@ def bands(r):
     for name, y in (("pitch", r["th"]), ("wheel", r["x"]), ("reply", r["u"] - r["inj"])):
         Y = np.fft.rfft(y[sl] - y[sl].mean())
         res = []
-        for lo in BANDS[:-1]:
+        for lo in (edges or bands_for(1.0, 10.0))[:-1]:
             hi = lo * 2 ** (1 / 3)
             m = (fr >= lo) & (fr < hi)
             suy, suu, syy = np.sum(np.conj(U[m]) * Y[m]), np.sum(np.abs(U[m]) ** 2), np.sum(np.abs(Y[m]) ** 2)
@@ -64,12 +68,14 @@ def bands(r):
 def main():
     args = sys.argv[1:] or DEFAULT
     for a in args:
-        name, _, up = a.partition(":")
+        name, *rest = a.split(":")
         robot = load(os.path.join(DATA, name))
-        up = float(up) if up else float(robot["th"].mean())
-        rows, fell = run(fw=Firmware(up_deg=up), T=24.0, sweep=SWEEP, sweep_at=3.0)
-        print(f"\n{name} (balance point {up:.2f} deg){'  -- MODEL FELL' if fell else ''}")
-        rb, mb = bands(robot), bands(from_rows(rows))
+        up = float(rest[0]) if rest and rest[0] else float(robot["th"].mean())
+        sweep = tuple(float(v) for v in rest[1:5]) if len(rest) >= 5 else SWEEP
+        edges = bands_for(sweep[1], sweep[2])
+        rows, fell = run(fw=Firmware(up_deg=up), T=sweep[3] + 4.0, sweep=sweep, sweep_at=3.0)
+        print(f"\n{name} (balance point {up:.2f} deg, sweep {sweep}){'  -- MODEL FELL' if fell else ''}")
+        rb, mb = bands(robot, edges), bands(from_rows(rows), edges)
         for q in ("pitch", "wheel", "reply"):
             print(f"  {q}/inj    band     robot             model             ratio  coh robot/model")
             for (f, hr, cr), (_, hm, cm) in zip(rb[q], mb[q]):

@@ -21,12 +21,14 @@ What is copied, per control cycle (CYCLE_S, the loop at ~200 Hz while balancing)
 Sensor noise MEASURED 2026-10-28 lying still (drop_tests.csv): gyro ~0.06 deg/s (its resolution),
 accelerometer angle 0.10-0.15 deg.
 
+The plant is model.py's rigid robot, or model_flex.py's (the body sprung on its legs) when run() is given
+model_flex.FlexParams: the encoder reads the wheel against whatever carries the motors, the IMU the body.
 The model's u is the firmware's (+ forward, model.py). Recorded like the robot's chirp capture (every 2nd
 cycle: inj, cmdL, cmdR, wx_01mm, th_x100, rate_x10), so freq_response.py treats both the same.
 """
 import numpy as np
 
-from model import G, Params, accel, encoder, step
+from model import G, Params, plant_module
 
 CYCLE_S = 0.005          # 200 Hz (telemetry lhz 201 balancing, 10-28)
 READ_S = 0.0025          # wheel reads before the IMU (both wheels; rdms worst 2.9 ms)
@@ -71,12 +73,12 @@ class Firmware:
         self.ix = 0.0
 
     def read_wheels(self, p, s):
-        x_enc, v_enc = encoder(p, s)
+        x_enc, v_enc = plant_module(p).encoder(p, s)
         self.wheel_x = np.round(x_enc / POS_STEP) * POS_STEP
         self.raw_v = SCALED_PER_COUNT * np.round(v_enc * SPEED_COUNTS)   # filtered in control(), after the IMU
 
-    def read_imu(self, s, acc, dt):
-        x, v, th, w = s
+    def read_imu(self, th, w, acc, dt):
+        """The IMU on the body: its angle th and rate w (+ forward lean), acc = (x'', its angular acceleration)."""
         xdd, thdd = acc
         # specific force in body axes (forward, up) at the IMU, IMU_H up the body's axis, forward lean th
         F = -G * np.sin(th) + thdd * IMU_H + xdd * np.cos(th) + self.rng.normal(0, self.an)
@@ -138,7 +140,9 @@ def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5, kick=None
     changed at once (+ forward)."""
     p = p or Params()
     fw = fw or Firmware()
-    s = np.array([0.0, 0.0, np.radians(th0_deg), 0.0])
+    m = plant_module(p)
+    B = m.BODY
+    s = m.initial(np.radians(th0_deg))
     u = 0.0
     rows = []
     n_sub = int(round(CYCLE_S / SUB_S))
@@ -147,17 +151,17 @@ def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5, kick=None
         t = c * CYCLE_S
         inj = chirp(t + READ_S - sweep_at, *sweep) if sweep else 0.0
         if kick and abs(t - kick[0]) < CYCLE_S / 2:
-            s[3] += np.radians(kick[1])
+            s[B + 1] += np.radians(kick[1])
         for k in range(n_sub):
             if k == 0:
                 fw.read_wheels(p, s)
             if k == i_read:
-                fw.read_imu(s, accel(p, s, u), CYCLE_S)
+                fw.read_imu(s[B], s[B + 1], m.accel_body(p, s, u), CYCLE_S)
             if k == i_cmd:
                 u_fw = fw.control(CYCLE_S)
                 u = u_fw + inj
-            s = step(p, s, u, SUB_S)
-        if abs(s[2]) > np.radians(45):
+            s = m.step(p, s, u, SUB_S)
+        if abs(s[B]) > np.radians(45):
             return np.array(rows), True
         if c % 2 == 0:
             rows.append((t * 1e6, inj, u, -u, fw.wheel_x * 1e4, fw.theta * 100, np.degrees(fw.om_prev) * 10))
