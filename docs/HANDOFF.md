@@ -13,9 +13,26 @@ list, and what not to trust.
 - **Later that evening:** the June LQR removed, LQR2 renamed LQR (`954109a`); the home held where the stick is released
   and Circle restarting the plan in place (`1c8761e`, the one deliberate change from the Hover, Marc's choice; the
   twitching of a first version is gone).
+- **The start twitch (Marc: lean forward, lean back a little, then go; full stick from standing)** is the Hover's
+  plan doing what it is built to do: full stick asks for the 1 m/s^2 cap (8/s x 0.3 m/s = 2.4, capped), built over
+  0.12 s, so a 10.7 deg lean target appears in an eighth of a second; the LQR throws the body ~14 deg at 137-142 deg/s
+  and catches it ~3.5 deg back. The model predicts it (135 deg/s) and the Hover's own drives do it harder (145-209
+  deg/s, 14 deg/m/s^2). **Live `lqramax 0.6` (not flashed, RAM only -- a power cycle restores 1.0):** 82-90 deg/s,
+  ~8.5 deg, a ~1 deg catch, gyro above 8 Hz halved; Marc: "it felt pretty good". Recordings `*_lqr_twitch_03`
+  (1.0) and `*_lqr_amax06_05` (0.6); `*_lqr_amax06_04` is ALSO 1.0 (the command was sent as bare text and dropped
+  -- the bridge takes only `{"line": ...}`). Not decided: 0.6 as the default (a flash, the first change from the
+  Hover's plan), or the 0.25 s build-up instead (keeps 1 m/s^2 for stops). **Built, NOT flashed or committed**
+  (waiting for Marc's go): the drive capture gains `stick_mms plan_acc_x1000 plan_lean_x100` (the three capture
+  readers expect them; `drive_starts.py` then finds starts from the stick) and the telemetry `amax=` (the plan's
+  cap, so a live `lqramax` is visible in riderlog).
 - **Next, in order:** (1) the RL policy: first a floor baseline of `ppo_lb25_s4` on this firmware (the single IMU loop
   changed its timing: ~240 Hz, samples 0-2.4 ms old), then retraining with the measured body (CoM 40.5 mm, inertia
-  17.5 kg cm^2, IMU 98 mm) by the same recipe -- Marc wants it revisited; (2) the ~10 Hz ringing after a stop or
+  17.5 kg cm^2, IMU 98 mm) by the same recipe -- Marc wants it revisited. **The RL sim vs the measured model**
+  (`sim/rider_params.py`, `rider_model.py` vs `sim/lqr/model.py`, read 10-28): the motor is a stiff velocity
+  servo (kv 5, 1 N m cap; lags fitted on top) where the measured one is a DC motor whose speed sags with load
+  (b 1.63e-3 per motor, ~0.076 N m stall at the policy's full command) -- the big one; CoM 45 vs 40.5 mm; body
+  inertia ~14.7 (box) vs 17.5 kg cm^2; wheel armature 3e-3 vs 3e-5 kg m^2; wheels 80 vs 110 g; 230 vs ~240 Hz.
+  Same already: the encoder reads the wheel against the body; friction ~35 vs 33 units. Not changed yet; (2) the ~10 Hz ringing after a stop or
   drive, three times now (`*_hover_exact_watch` w18, `*_renamed_check` w15, `*_smooth_home` w12); (3) the balance
   point moved: 3.9-4.3 deg on the IMU in the last run against the 2.8 reference (2.9-3.0 earlier that evening, legs
   at ride height both times, cause unknown) -- it parks 1-3 cm off home until the slow integral catches up;
@@ -77,11 +94,6 @@ list, and what not to trust.
 
 ## Open list, in order
 
-0. **LQR2 vs LQR verdict, then remove the loser** (no dead code). Marc: LQR2 balances "so much better", driving
-   "pretty good"; a side-by-side drive recording is not done. Then the Hover's driving plan (its step 2:
-   `~/hover/sim/drive_design.py`, robot.cc `plan_step`) for LQR2, and its 1.0 m/s^2 (Rider ramps 0.4 / brakes
-   0.8). Unverified: R1 = button 5 (`rider_controller.py --test`). Not changed: setpoint 3.55 vs the real balance
-   point ~2.8; the 60 mm IMU correction (shared with the policy).
 1. **First balance-on after a power-up** (the left leg used to lag): two clean power-ups since ModemManager was
    masked (no stray lines, both legs "ok" on the arrival check). Keep watching `legstkL/R`.
 2. Wheel read failures at power-up (469 / 496, then 0): read `rfL/rfR`, `rft0/rft1` after the next boot that has
