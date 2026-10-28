@@ -74,8 +74,9 @@ TURN_DEADZONE = 0.40  # right stick (turn) resting offset has DRIFTED to ~0.32 (
                       # deadzone -> it kept commanding turnrate 0.03 and, with no heartbeat to refresh it, that
                       # value LATCHED in the firmware (robot turned on a centered stick). Widened to 0.40 to
                       # reject the worn-stick rest; the turn heartbeat below now clears/refreshes like drive.
-MAX_SPEED = 0.60     # m/s, the web slider's ceiling (as the Hover's, 2026-10-28; was 0.30). Must not exceed the
-                     # firmware's gPosVmax/gPosVmaxBack ('posvmax'/'posvmaxb', 0.60), which clip the stick.
+MAX_SPEED = 0.45     # m/s, the web slider's ceiling (2026-10-28: 0.60 as the Hover's, then 0.45 after starts fell at
+                     # 0.60 on a low battery; was 0.30). Must not exceed the firmware's gPosVmax/gPosVmaxBack
+                     # ('posvmax'/'posvmaxb', 0.45), which clip the stick.
 DEFAULT_SPEED = 0.30 # m/s at full stick until the slider says otherwise (the Hover boots at 0.30 too)
 MAX_YAW_RATE = 1.0   # rad/s commanded at full right-stick (firmware closes the loop on the gyro)
 TURN_SIGN = 1        # flip if right-stick-right turns the wrong way

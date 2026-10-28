@@ -144,7 +144,9 @@ $("zero").addEventListener("click", () => { if (live()) line("poszero"); });
 // retained value; while dragging, the local position wins until release, then it's published.
 let speedDragging = false;
 function showSpeed(v) {
-  const val = (v === null || isNaN(v)) ? DEFAULT_SPEED : v;
+  // a retained value set under an older, higher ceiling is clipped by the joystick service: show what it gives
+  const lo = Number($("speed").min), hi = Number($("speed").max);
+  const val = Math.min(hi, Math.max(lo, (v === null || isNaN(v)) ? DEFAULT_SPEED : v));
   $("speed").value = val;
   set("speedval", `${val.toFixed(2)} m/s` + (v === null ? " (default)" : ""));
 }
