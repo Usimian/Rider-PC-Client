@@ -20,11 +20,11 @@ list, and what not to trust.
   deg/s, 14 deg/m/s^2). **Live `lqramax 0.6` (not flashed, RAM only -- a power cycle restores 1.0):** 82-90 deg/s,
   ~8.5 deg, a ~1 deg catch, gyro above 8 Hz halved; Marc: "it felt pretty good". Recordings `*_lqr_twitch_03`
   (1.0) and `*_lqr_amax06_05` (0.6); `*_lqr_amax06_04` is ALSO 1.0 (the command was sent as bare text and dropped
-  -- the bridge takes only `{"line": ...}`). Not decided: 0.6 as the default (a flash, the first change from the
-  Hover's plan), or the 0.25 s build-up instead (keeps 1 m/s^2 for stops). **Built, NOT flashed or committed**
-  (waiting for Marc's go): the drive capture gains `stick_mms plan_acc_x1000 plan_lean_x100` (the three capture
-  readers expect them; `drive_starts.py` then finds starts from the stick) and the telemetry `amax=` (the plan's
-  cap, so a live `lqramax` is visible in riderlog).
+  -- the bridge takes only `{"line": ...}`). **Flashed (Marc's go): 0.6 is the default** -- the first change
+  from the Hover's plan (the other option, a 0.25 s build-up keeping 1 m/s^2 for stops, untried) -- with the
+  drive capture's `stick_mms plan_acc_x1000 plan_lean_x100` (the capture readers expect them; `drive_starts.py`
+  finds starts from the stick) and the telemetry `amax=`. Floor check `*_lqr_amax06_flashed_06`: amax=0.60 on
+  boot, full stick in ~25 ms, planned lean to 6.4 deg, body 86-92 deg/s, ~1.3 deg past the target.
 - **Next, in order:** (1) the RL policy: first a floor baseline of `ppo_lb25_s4` on this firmware (the single IMU loop
   changed its timing: ~240 Hz, samples 0-2.4 ms old), then retraining with the measured body (CoM 40.5 mm, inertia
   17.5 kg cm^2, IMU 98 mm) by the same recipe -- Marc wants it revisited. **The RL sim vs the measured model**

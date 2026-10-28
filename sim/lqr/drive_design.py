@@ -10,7 +10,7 @@ with 360 units per m/s fed straight to the wheels: the robot is asked for a spee
 Hover's plan hands the law a path it can follow: the planned speed closes on the stick's at up to a_max, its
 acceleration building over t_jerk; the plan's lean and command are the model's steady values for that speed and
 acceleration (feedforward(), the linear model, friction off); the plan never runs more than 15 cm from the
-robot; its own integral always runs. The Hover's numbers: a_max 1.0, t_jerk 0.12 s, gain 8 /s.
+robot; its own integral always runs. The Hover's numbers: a_max 1.0, t_jerk 0.12 s, gain 8 /s (the Rider: a_max 0.6, 10-28).
 
 Per case, on the full model (friction, sensor noise, the firmware cycle): FELL, or start (time to 90 % of the
 speed, lean range in the first 1.5 s, the share of it at the +/-400 limit), stop after release (how far it rolls,
@@ -62,7 +62,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--speeds", type=float, nargs="+", default=[0.30, 0.45])
     ap.add_argument("--vmax", type=float, default=None, help="raise the firmware's speed cap (closed_loop.VMAX, 0.45)")
-    ap.add_argument("--a-max", type=float, nargs="+", default=[1.0])
+    ap.add_argument("--a-max", type=float, nargs="+", default=[0.6])
     ap.add_argument("--t-jerk", type=float, default=0.12)
     ap.add_argument("--gain", type=float, default=8.0)
     ap.add_argument("--motors", type=float, nargs="+", default=[1.0, 0.85],

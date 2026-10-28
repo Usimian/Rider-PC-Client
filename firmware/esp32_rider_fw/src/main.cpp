@@ -91,7 +91,8 @@ static const float LQR_SPEED_PER_MPS = 327.6f * 4.5f * (60.0f * 3.14159265f / 10
 // near the robot; it no longer moves the home (the Hover's plan, at rest, sat wherever a push of > 15 cm left it).
 static const float LQR_HOME_K    = 2.0f;      // 1/s: target speed per m from home (8 x 2 = 16 = (2 x 4)^2: critical)
 static const float LQR_HOME_VMAX = 0.15f;     // m/s: the most the plan heads home at
-volatile float gLqrAMax = 1.0f;               // plan acceleration limit, m/s^2 ('lqramax'; the Hover's 1.0)
+volatile float gLqrAMax = 0.6f;               // plan acceleration limit, m/s^2 ('lqramax'). The Hover's 1.0 threw the
+                                               // body ~14 deg at ~140 deg/s on a full-stick start (2026-10-28); 0.6: ~8.5 deg
 static const float LQR_PLAN_TJERK = 0.12f;    // s for the acceleration to build up (Hover kPlanTJerk)
 static const float LQR_PLAN_GAIN  = 8.0f;     // 1/s, how the plan's speed closes on the stick's (Hover kPlanGain)
 static const float LQR_PLAN_LEAD  = 0.15f;    // m (Hover kPlanMaxLeadM)
@@ -228,6 +229,7 @@ volatile float tPacc=0, tPraw=0;    // accel-pitch: comp-corrected vs raw (lever
 // drivecap extras (2026-10-19, turning-shimmy hunt): what the POLICY is fed this cycle (0 under LQR), both
 // wheels' FINAL commands (after the turn differential), and the right wheel's reported speed.
 static float tPolPP=0, tPolPR=0, tPolXV=0, tPolPI=0, tPolBias=0, tCmdL=0, tCmdR=0; static int tVR=0;
+static float tPlanA=0, tPlanLean=0;  // (2026-10-28) the LQR plan's acceleration (m/s^2) and lean (deg) -- 0 under the policy
 volatile float tVest=0;             // velocity-observer estimate (vs raw wv) -- observer verify
 volatile float tLqrInQ=0;           // pitch as the LQR sees it after the factory input filter ('lqrin')
 volatile float tRoll=0;                  // lateral tilt (deg), GYRO-FUSED (low-lag) -- feeds leg leveling
@@ -331,6 +333,9 @@ static uint8_t  dcWid[DCAP_N]; static int16_t dcP[DCAP_N]; static int16_t dcR[DC
 static int16_t dcL[DCAP_N], dcRc[DCAP_N], dcVR[DCAP_N], dcPP[DCAP_N], dcPR[DCAP_N], dcXV[DCAP_N], dcPI[DCAP_N], dcB[DCAP_N];
 // (2026-10-20) the accelerometer pitch and the yaw rate: the fused pitch's turn drift vs its accel reference
 static int16_t dcPA[DCAP_N], dcYR[DCAP_N], dcYC[DCAP_N];   // + the turnrate command (the turn input), x1000
+// (2026-10-28) the stick's speed command (mm/s) and the LQR plan's acceleration (x1000) and lean (deg x100):
+// what a drive start was asked for (the start twitch: a full-stick start vs a gentle one looked alike without it)
+static int16_t dcSt[DCAP_N], dcPlA[DCAP_N], dcPlL[DCAP_N];
 
 // ---- wheel FREQUENCY SWEEP (2026-10-19): identify the loaded wheel's true response on the floor ----
 // While balancing (either controller), 'chirp 1' adds a known log-swept sine to the balance output (the forward
@@ -1167,6 +1172,7 @@ static void balanceTask(void*){
       float uPlan = LQR_PLAN_U_PER_SPEED * planV + LQR_PLAN_U_PER_ACC * planA;
       gPosTarget = gPosTargetEff = planX; vdesS = planV;            // the home, for the runaway cutout
       tTgtEff = planX; tVdes = planV; tVest = lqrV; tLqrInQ = q;    // telemetry
+      tPlanA = planA; tPlanLean = lean;                             // drivecap
       float uraw = -(gLqrX*lqr_x + gLqrVx*(lqrV - planVF*LQR_SPEED_PER_MPS) + gLqrQ*(q - lean) + gLqrDq*dq) + planI + uPlan;
       float af = expf(-odt / LQR_FRIC_TAU);                         // friction, its direction from the smoothed command
       lqrULp = af*lqrULp + (1.0f-af)*uraw;
@@ -1174,6 +1180,7 @@ static void balanceTask(void*){
       u = clampf(uraw, -(float)gUMax, (float)gUMax);
     } else {
       lqrInit = false; lqrVInit = false;                            // restart from where the robot is on the next enable
+      tPlanA = tPlanLean = 0.0f;
       if(!gEnabled && gTestTor!=0) u = (float)gTestTor;          // stand-only debug
     }
     }  // end controller select (gCtrl)
@@ -1410,6 +1417,9 @@ static void balanceTask(void*){
       dcPA[dcIdx]=(int16_t)(pit_acc*100.0f);                     // accel pitch (lever-arm corrected), deg x100
       dcYR[dcIdx]=(int16_t)(yaw_rate*10.0f);                     // yaw rate, deg/s x10
       dcYC[dcIdx]=(int16_t)(gYawRateCmd*1000.0f);                // turnrate command (stick), x1000
+      dcSt[dcIdx]=(int16_t)(gDriveVel*1000.0f);                  // stick speed command, mm/s
+      dcPlA[dcIdx]=pol ? 0 : (int16_t)(tPlanA*1000.0f);          // LQR plan acceleration, x1000
+      dcPlL[dcIdx]=pol ? 0 : (int16_t)(tPlanLean*100.0f);        // LQR plan lean, deg x100 (firmware frame)
       dcIdx++;
       if(dcIdx>=DCAP_N){ gDcArm=false; gDcReady=true; }
     }
@@ -1657,8 +1667,8 @@ void loop(){
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
     char b[704];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u legstkL=%u legstkR=%u legst=%u rfL=%u rfR=%u rft0=%u rft1=%u ms=%u\n",
-      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gLevelOn, tRollAcc, gTurn, gHdgTarget, gYawRateCmd,
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f amax=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u legstkL=%u legstkR=%u legst=%u rfL=%u rfR=%u rft0=%u rft1=%u ms=%u\n",
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gLqrAMax, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gLevelOn, tRollAcc, gTurn, gHdgTarget, gYawRateCmd,
       (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID), (unsigned)gDriveWdTrips, (unsigned)tLegRetryL, (unsigned)tLegRetryR, (unsigned)tLegFailL, (unsigned)tLegFailR, (unsigned)tLegStuckL, (unsigned)tLegStuckR, (unsigned)((gLegLimped?1:0)|(gLegHoming?2:0)|(gLegEnerR?4:0)|(gLegEnerL?8:0)), (unsigned)tRfL, (unsigned)tRfR, (unsigned)tRfFirstMs, (unsigned)tRfLastMs, (unsigned)millis());
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     emit(b,k);
@@ -1667,14 +1677,15 @@ void loop(){
   // control task keeps balancing while we stream ~256 lines. Yield periodically (WDT + control).
   if(gLogDump){
     int n = (dcIdx>DCAP_N)?DCAP_N:dcIdx;                 // captured sample count, held since 'en 1'
-    { char h[192]; int hk=snprintf(h,sizeof(h),"# dcap n=%d cols: i t_us u wid v th_x100 rate_x10 cmdL cmdR vR "
-                                   "pol_pitch_x100 pol_rate_x10 pol_xvel_mm pol_int_m pol_bias_x100 pacc_x100 yaw_x10 yrc_x1000\n",n);
+    { char h[240]; int hk=snprintf(h,sizeof(h),"# dcap n=%d cols: i t_us u wid v th_x100 rate_x10 cmdL cmdR vR "
+                                   "pol_pitch_x100 pol_rate_x10 pol_xvel_mm pol_int_m pol_bias_x100 pacc_x100 yaw_x10 yrc_x1000 "
+                                   "stick_mms plan_acc_x1000 plan_lean_x100\n",n);
       emit(h,hk); }
     for(int i=0;i<n;i++){
-      char b[168]; int k=snprintf(b,sizeof(b),"# dcap %d %lu %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+      char b[200]; int k=snprintf(b,sizeof(b),"# dcap %d %lu %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
                                  i,(unsigned long)dcT[i],(int)dcCmd[i],(int)dcWid[i],(int)dcV[i],(int)dcP[i],(int)dcR[i],
                                  (int)dcL[i],(int)dcRc[i],(int)dcVR[i],(int)dcPP[i],(int)dcPR[i],(int)dcXV[i],(int)dcPI[i],
-                                 (int)dcB[i],(int)dcPA[i],(int)dcYR[i],(int)dcYC[i]);
+                                 (int)dcB[i],(int)dcPA[i],(int)dcYR[i],(int)dcYC[i],(int)dcSt[i],(int)dcPlA[i],(int)dcPlL[i]);
       emit(b,k);
       if((i & 15)==0){
         delay(1);
