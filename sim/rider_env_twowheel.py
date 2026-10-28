@@ -89,6 +89,9 @@ class RiderTwoWheelEnv(RiderBalanceEnv):
         self.spin_prob = spin_prob
         self._yaw_plan = None                                       # (cmd, start step, end step) or None
         super().__init__(*args, **kwargs)
+        if self.measured:                                           # turning has not been measured (2026-10-28)
+            raise NotImplementedError("the two-wheel env has only the servo plant; the measured plant "
+                                      "(measured_plant.py) has no spin model yet")
         # swap in the two-wheel plant (the parent built the 1-wheel one; everything else is reused)
         self.model = mujoco.MjModel.from_xml_string(build_mjcf_twowheel(self.p))
         self.data = mujoco.MjData(self.model)

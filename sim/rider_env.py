@@ -15,6 +15,7 @@ from dataclasses import replace
 
 from rider_params import DEFAULT, RiderParams
 from rider_model import build_mjcf
+import measured_plant
 
 # Domain-randomization ranges. Now that the actuator is MEASURED, these are tight
 # around the measured values (the residual uncertainty), not wide guesses -- which
@@ -37,6 +38,14 @@ DR_RANGES = {
     "wheel_friction": (0.6, 1.5),      # real-floor traction unknown -> wide
     "accel_couple":   (-1.1, -0.6),    # accelerometer-reads-acceleration gain (sim frame) about the MEASURED -0.85
                                        # (2026-10-19 recorder fits +0.66..+0.97 robot frame); see rider_params
+}
+
+# The same for the measured plant (RiderParams.plant = "measured"), whose motor has no lag or dead zone of its own
+# to randomize: ASSUMED ranges (2026-10-28), not measured -- the battery (motor strength), the friction, a cycle late.
+DR_MEASURED = {
+    "motor_gain":  (0.85, 1.15),       # ku: a full pack drives harder than a low one
+    "motor_fric":  (0.7, 1.3),         # the Coulomb friction (33 units)
+    "delay_steps": (0, 1),             # whole control steps between the policy's output and the motor
 }
 
 CONTROL_RATE_HZ = (180.0, 260.0)   # per-episode control-rate DR. MEASURED 2026-09-16 after the wheel-read
@@ -292,14 +301,21 @@ class RiderBalanceEnv(gym.Env):
         # policies (ppo_v_pure et al.) drift onto the action rail asymmetrically.
         self.mirror_aug = mirror_aug
         self.mirror = 1.0
-        self.model = mujoco.MjModel.from_xml_string(build_mjcf(self.p))
+        # the plant: measured_plant.py's body + DC motor (torque each physics step), or the servo (velocity setpoint)
+        self.measured = self.p.plant == "measured"
+        if self.measured:
+            self._meas = measured_plant.measured()
+            self.model = mujoco.MjModel.from_xml_string(measured_plant.build_mjcf(self._meas, self.p))
+        else:
+            self.model = mujoco.MjModel.from_xml_string(build_mjcf(self.p))
         self.data = mujoco.MjData(self.model)
         self.render_mode = render_mode
         self._viewer = None
 
         self.decim = self.p.control_decimation()
         self.ctrl_dt = self.decim * self.model.opt.timestep
-        self.act = ActuatorModel(self.p, self.ctrl_dt)
+        self.act = None if self.measured else ActuatorModel(self.p, self.ctrl_dt)
+        self.motor = measured_plant.DcMotor(self._meas) if self.measured else None
         self.sense = FirmwareSensing(self.p)
         self.last_sensed = (0.0, 0.0, 0.0)   # (pitch_rate_obs, x_vel_obs, wheel_vel_obs) of the latest frame
         self.max_seconds = max_seconds
@@ -343,7 +359,10 @@ class RiderBalanceEnv(gym.Env):
     # hooks the two-wheel env (rider_env_twowheel.py) overrides: how the command reaches the wheel(s), and
     # the encoder angle the firmware differences
     def _apply_action(self, a):
-        self.data.ctrl[0] = self.act(a)
+        if self.measured:
+            self.motor.command(a)                       # the torque follows in step(), each physics step
+        else:
+            self.data.ctrl[0] = self.act(a)
 
     def _wheel_angle(self):
         return self.data.qpos[self.q_wheel]
@@ -468,6 +487,13 @@ class RiderBalanceEnv(gym.Env):
         self.model.body_inertia[self._chassis] = self._nom_inertia * k     # consistent scale
         self.model.geom_friction[self._wheel_geom] = self._nom_friction
         self.model.geom_friction[self._wheel_geom, 0] = u(*DR_RANGES["wheel_friction"])
+        if self.measured:
+            lo, hi = DR_MEASURED["delay_steps"]
+            self.motor = measured_plant.DcMotor(self._meas, gain=u(*DR_MEASURED["motor_gain"]),
+                                                fric_scale=u(*DR_MEASURED["motor_fric"]),
+                                                delay_steps=int(self.np_random.integers(lo, hi + 1)))
+            self.sense.couple = u(*DR_RANGES["accel_couple"])
+            return
         ep = replace(self.p,
                      vel_max_rad_s=self.p.vel_max_rad_s * u(*DR_RANGES["vel_gain"]),
                      actuator_tau_s=u(*DR_RANGES["actuator_tau_s"]),
@@ -492,7 +518,7 @@ class RiderBalanceEnv(gym.Env):
         self.data.qpos[self.q_pitch] = self.np_random.uniform(-0.06, 0.06)
         self.data.qvel[self.d_pitch] = self.np_random.uniform(-0.20, 0.20)
         mujoco.mj_forward(self.model, self.data)
-        self.act.reset()
+        (self.motor if self.measured else self.act).reset()
         self.sense.reset(float(self._wheel_angle()), float(self.data.qpos[self.q_pitch]),
                          float(self.data.qvel[self.d_x]))
         self._steps = 0
@@ -533,6 +559,8 @@ class RiderBalanceEnv(gym.Env):
                 # FREE PLAY in the legs: no spring force within +/-play, the spring only beyond it (backlash)
                 q = self.data.qpos[self.q_flex]; b = np.radians(self.p.leg_play_deg)
                 self.data.qfrc_applied[self.d_flex] = -self.p.leg_play_stiffness_Nm_rad * (q - np.clip(q, -b, b))
+            if self.measured:                          # the measured motor: its torque from the wheel's turn vs the body
+                self.data.ctrl[0] = self.motor.torque(self.data.qvel[self.d_wheel], self.data.qpos[self.q_wheel])
             mujoco.mj_step(self.model, self.data)
         self._steps += 1
         pitch, pitch_rate, x, x_vel, wheel_vel = self._raw_state()

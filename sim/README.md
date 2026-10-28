@@ -19,6 +19,8 @@ a hand-tuned PD balances the full 10 s. Plant is controllable, traction works.
 | `rider_params.py` | all physical + actuator params, tagged by provenance (single source of truth) |
 | `rider_model.py`  | generates the MJCF model from params (planar wheeled inverted pendulum) |
 | `rider_env.py`    | Gymnasium env + isolated `ActuatorModel` (deadband/sat/lag/latency live here) |
+| `measured_plant.py` | the other plant (`RiderParams.plant = "measured"`, 2026-10-28): the body and DC motor of `sim/lqr/model.py` (the LQR's checked model, its numbers used directly); straight-line only, no spin model yet |
+| `plant_check.py`  | the measured plant in MuJoCo against `sim/lqr/model.py` on the same commands |
 | `sanity_check.py` | headless: builds, falls on zero action, PD balances |
 | `train.py`        | SB3 PPO training + eval (net_arch [64,64] → fits on the ESP32) |
 

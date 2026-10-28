@@ -8,12 +8,16 @@ only follows -- see drive_gain_sweep.py. Full flips swung the pitch 2.6-3.4 deg 
 Per controller, both directions, several seeds (drive_sim, the floor's 'lead' stick drive):
   RELEASE  full stick 1.5 -> 4.5 s, then released: travel in the next 3 s (cm), pitch swing in the next 1.5 s
   FLIP     full stick, at 4.5 s 0.15 s in the dead zone, then full the other way: pitch swing in the next 1.5 s
-Run:  ./.venv/bin/python stop_check.py ppo_lb25_s4 [more policies] [--seeds 5]
+Run:  ./.venv/bin/python stop_check.py ppo_lb25_s4 [more policies] [--seeds 5] [--plant measured]
+(--plant: the RL sim's plant, rider_params.RiderParams.plant -- "servo" (default) or "measured".)
 (The June LQR, the floor reference above, was removed from the firmware 2026-10-28; it is no longer run here.)
 """
 import argparse
+from dataclasses import replace
+
 import numpy as np
 import drive_sim as ds
+from rider_params import DEFAULT
 
 T_EVENT = 4.5
 
@@ -33,10 +37,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("policies", nargs="+")
     ap.add_argument("--seeds", type=int, default=5)
+    ap.add_argument("--plant", default="servo", choices=("servo", "measured"))
     a = ap.parse_args()
     print(f"{'controller':14s} {'release travel cm':>18s} {'release swing':>14s} {'flip swing':>11s} {'falls':>6s}")
     for name in a.policies:
-        infer, kw0 = ds.load_policy(name), dict(drive="lead")
+        infer, kw0 = ds.load_policy(name), dict(drive="lead", params=replace(DEFAULT, plant=a.plant))
         rel, fl, falls = [], [], 0
         for d in (+1, -1):
             for s in range(a.seeds):

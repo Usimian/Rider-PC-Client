@@ -145,6 +145,8 @@ def simulate(infer, direction, vmax, T=7.0, seed=0, accel_couple=None, latency_s
         env.right_kw = dict(right_wheel)                    # the right wheel differs (see RiderTwoWheelEnv)
     env.reset(seed=seed)
     if turn_cmd:
+        if env.measured:                                    # SpinActuator is the servo's; turning is not measured
+            raise NotImplementedError("turn_cmd needs the servo plant: the measured plant has no spin model yet")
         env.act = SpinActuator(p, env.ctrl_dt, turn_cmd / POL_FULL_CMD, spin_gain, spin_lat, spin_tau)
         if spin_enc:
             spin_encoders(env)

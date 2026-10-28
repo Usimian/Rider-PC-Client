@@ -16,6 +16,11 @@ from typing import Optional
 
 @dataclass
 class RiderParams:
+    # ---------- the plant ----------
+    plant: str = "servo"                   # "servo": this file's body + rider_env.ActuatorModel (a stiff velocity
+                                           # servo with fitted lags); "measured" (2026-10-28): measured_plant.py -- the
+                                           # body and DC motor of sim/lqr/model.py, the LQR's checked model. With
+                                           # "measured" the body, wheel and actuator fields below are not used.
     # ---------- geometry (KNOWN: firmware) ----------
     wheel_radius_m: float = 0.03           # KNOWN   6 cm dia wheels (WHEEL_CIRC_M = pi*0.06)
     encoder_counts_per_rev: int = 1024     # KNOWN   odometry scaling
