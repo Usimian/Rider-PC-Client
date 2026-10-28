@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Back-to-back high-rate captures while the robot is rocked BY HAND, balance OFF (2026-10-28).
+"""Back-to-back high-rate captures: the robot rocked or dropped BY HAND with balance OFF (2026-10-28), or,
+with --balancing, a balancing run (the first floor tests of a new law: standing, pushes).
 
 For the IMU position fit and the encoder-against-the-body check (tools/balance/imu_position_fit.py): the
 firmware's drive capture ('drivecap', 600 samples at loop rate, ~2.9 s) also records with balance off. This
-arms it, waits for it to fill, fetches it with 'logdump', and repeats, so a continuous rocking session comes
-back as a series of ~2.9 s windows (a short gap during each dump). Sends only 'drivecap' / 'logdump'; refuses
-to start while balancing (wheels must be limp: nothing here drives them).
+arms it, waits for it to fill, fetches it with 'logdump', and repeats, so a continuous session comes back as a
+series of ~2.9 s windows (a short gap during each dump). Sends only 'drivecap' / 'logdump'. Without --balancing
+it refuses to start while balancing (the hand tests need limp wheels); with it, it records either way.
 
-Run (workstation):  /usr/bin/python3 tools/capture/tilt_capture.py out.csv [windows]   (default 10)
+Run (workstation):  /usr/bin/python3 tools/capture/tilt_capture.py out.csv [windows] [--balancing]   (default 10)
 The broker comes from gui/rider_config.ini, as for tools/diag/mqtt_monitor.py.
 """
 import sys, os, time, json, configparser
@@ -16,8 +17,10 @@ import paho.mqtt.client as mqtt
 _ini = configparser.ConfigParser()
 _ini.read(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "gui", "rider_config.ini"))
 BROKER = _ini.get("mqtt", "broker_host", fallback="localhost")
-OUT = sys.argv[1] if len(sys.argv) > 1 else "tilt.csv"
-WINDOWS = int(sys.argv[2]) if len(sys.argv) > 2 else 10
+_args = [a for a in sys.argv[1:] if not a.startswith("--")]
+OUT = _args[0] if _args else "tilt.csv"
+WINDOWS = int(_args[1]) if len(_args) > 1 else 10
+BALANCING = "--balancing" in sys.argv
 # the firmware's '# dcap' fields, in order (main.cpp logdump), as in drivecap_capture.py
 COLS = ["i", "t_us", "cmd", "wid", "v", "pitch_cdeg", "rate_x10", "cmdL", "cmdR", "vR",
         "pol_pitch_x100", "pol_rate_x10", "pol_xvel_mm", "pol_int_m", "pol_bias_x100", "pacc_x100", "yaw_x10",
@@ -55,8 +58,8 @@ def main():
         time.sleep(0.1)
     if st["en"] is None:
         sys.exit("no telemetry from the robot")
-    if st["en"] != "0":
-        sys.exit("balance is ON -- this test needs balance off (en 0)")
+    if st["en"] != "0" and not BALANCING:
+        sys.exit("balance is ON -- this test needs balance off (en 0); --balancing records a balancing run")
     with open(OUT, "w") as f:
         f.write("window," + ",".join(COLS) + "\n")
         for w in range(WINDOWS):
