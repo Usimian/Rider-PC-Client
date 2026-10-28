@@ -10,9 +10,17 @@ list, and what not to trust.
   IMU reader), the Hover's IMU step, law order and drive plan (1 m/s^2); gains -1916 / -7.46 / 59.4 / 1.39 (Tightest
   1936 / 8.26 / 53.8 / 1.25); top speed 0.45. Rule (Marc): copy the Hover exactly, change only what is physically
   different, name every difference -- so a remaining problem is the robot's, not the implementation's.
-- **Next:** redesign at the measured ~240 Hz (the gains assume 200; the loop no longer waits on the IMU); a 10.5 Hz
-  ringing at one stop (`2026-10-28_lqr2_hover_exact_watch.csv` window 18); the gyro bias (the Hover measures it each
-  boot, the Rider uses a stored -1.19); the +/-400 command limit (the Hover's is +/-1000; 1000 browned out ID21 once).
+- **Later that evening:** the June LQR removed, LQR2 renamed LQR (`954109a`); the home held where the stick is released
+  and Circle restarting the plan in place (`1c8761e`, the one deliberate change from the Hover, Marc's choice; the
+  twitching of a first version is gone).
+- **Next, in order:** (1) the RL policy: first a floor baseline of `ppo_lb25_s4` on this firmware (the single IMU loop
+  changed its timing: ~240 Hz, samples 0-2.4 ms old), then retraining with the measured body (CoM 40.5 mm, inertia
+  17.5 kg cm^2, IMU 98 mm) by the same recipe -- Marc wants it revisited; (2) the ~10 Hz ringing after a stop or
+  drive, three times now (`*_hover_exact_watch` w18, `*_renamed_check` w15, `*_smooth_home` w12); (3) the balance
+  point moved: 3.9-4.3 deg on the IMU in the last run against the 2.8 reference (2.9-3.0 earlier that evening, legs
+  at ride height both times, cause unknown) -- it parks 1-3 cm off home until the slow integral catches up;
+  (4) redesign at the measured ~240 Hz (the gains assume 200); (5) the gyro bias (the Hover measures it each boot);
+  (6) the +/-400 command limit (the Hover's +/-1000; 1000 browned out ID21 once).
 
 ## Earlier on 2026-10-28
 
