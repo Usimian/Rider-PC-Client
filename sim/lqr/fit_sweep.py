@@ -33,7 +33,7 @@ from model import Params, encoder, step
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "..", "..", "data", "captures")
 FIT = ["2026-10-19_chirp_lqr.csv"]
-CHECK = ["2026-10-19_chirp_drive.csv", "2026-10-19_chirp_full.csv",
+CHECK = ["2026-10-28_chirp_lqr.csv", "2026-10-19_chirp_drive.csv", "2026-10-19_chirp_full.csv",
          "2026-10-20_chirp_fast_fwd.csv", "2026-10-20_chirp_fast_rev.csv"]
 HORIZON = 6    # samples, ~60 ms
 EVERY = 2      # a window starts every 2nd sample
