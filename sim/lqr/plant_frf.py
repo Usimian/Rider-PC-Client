@@ -19,11 +19,13 @@ import freq_response as FR
 
 
 def plant(b):
-    """P_x and P_th per band from freq_response.bands output: (f, P_x, P_th, coherence of r -> u)."""
+    """P_x and P_th per band from freq_response.bands output: (f, P_x, P_th, coherence for P_x, for P_th) -- each
+    the poorer of its output's and the command's coherence with the sweep (the wheel channel's is low while
+    driving: the drive's own wheel motion swamps the sweep's)."""
     out = []
-    for (f, hx, _), (_, hth, cth), (_, hr, cr) in zip(b["wheel"], b["pitch"], b["reply"]):
+    for (f, hx, cx), (_, hth, cth), (_, hr, cr) in zip(b["wheel"], b["pitch"], b["reply"]):
         hu = 1.0 + hr                                   # u = r + reply
-        out.append((f, hx / hu, hth / hu, min(cth, cr)))
+        out.append((f, hx / hu, hth / hu, min(cx, cr), min(cth, cr)))
     return out
 
 
@@ -39,10 +41,10 @@ def main():
             continue
         mod = plant(FR.bands(FR.from_rows(rows), edges))
         print(f"\n{name} (stick {v:+.2f} m/s): the plant, robot / model -- size ratio and the robot's phase lead (deg)")
-        print("     band    wheel per command     lean per command     coherence")
-        for (f, rx, rth, c), (_, mx, mth, _) in zip(rob, mod):
-            print(f"   {f:5.1f} Hz   x{abs(rx) / abs(mx):5.2f} {np.degrees(np.angle(rx / mx)):+5.0f}"
-                  f"        x{abs(rth) / abs(mth):5.2f} {np.degrees(np.angle(rth / mth)):+5.0f}        {c:.2f}")
+        print("     band    wheel per command (coh)     lean per command (coh)")
+        for (f, rx, rth, cx, cth), (_, mx, mth, _, _) in zip(rob, mod):
+            print(f"   {f:5.1f} Hz   x{abs(rx) / abs(mx):5.2f} {np.degrees(np.angle(rx / mx)):+5.0f} ({cx:.2f})"
+                  f"        x{abs(rth) / abs(mth):5.2f} {np.degrees(np.angle(rth / mth)):+5.0f} ({cth:.2f})")
 
 
 if __name__ == "__main__":
