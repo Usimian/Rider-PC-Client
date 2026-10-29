@@ -6,7 +6,7 @@ Prints, per approach, frame by frame from 0.6 m in: the distance ahead (min_mm),
 (factor), the commanded speed (vdes, m/s) and the measured wheel speed (wv), then the closest the wall got.
 The governor's taper: full speed beyond SLOW_FWD, zero at STOP_FWD (pi/rider_tof_safety.py).
 
-Run:  /usr/bin/python3 tools/tof/wall_stop_report.py data/captures/2026-10-27_wall_stop.csv
+Run:  /usr/bin/python3 tools/tof/wall_stop_report.py data/captures/<wall approach recording>.csv
 """
 import csv
 import sys

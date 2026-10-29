@@ -13,7 +13,7 @@ one after (5, variant B), is not floor and not an obstacle (d / b / .). Edge = >
 consecutive frames. Reported per drive: when each rule would first have called the edge, relative to the drop
 (first frame with |pitch - upright| > 8 deg while driving), and the old rule's first 'would = 0'.
 
-Run:  /usr/bin/python3 tools/tof/tof_edge_replay.py data/captures/2026-10-26_tof_off_drive.csv [more.csv]
+Run:  /usr/bin/python3 tools/tof/tof_edge_replay.py data/captures/<tof_raw_capture recording>.csv [more.csv]
 """
 import csv
 import sys

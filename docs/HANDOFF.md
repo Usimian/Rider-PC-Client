@@ -19,8 +19,8 @@ list, and what not to trust.
   and catches it ~3.5 deg back. The model predicts it (135 deg/s) and the Hover's own drives do it harder (145-209
   deg/s, 14 deg/m/s^2). **Live `lqramax 0.6` (not flashed, RAM only -- a power cycle restores 1.0):** 82-90 deg/s,
   ~8.5 deg, a ~1 deg catch, gyro above 8 Hz halved; Marc: "it felt pretty good". Recordings `*_lqr_twitch_03`
-  (1.0) and `*_lqr_amax06_05` (0.6); `*_lqr_amax06_04` is ALSO 1.0 (the command was sent as bare text and dropped
-  -- the bridge takes only `{"line": ...}`). **Flashed (Marc's go): 0.6 is the default** -- the first change
+  (1.0) and `*_lqr_amax06_05` (0.6); `*_lqr_amax10_04` is also 1.0 (renamed 10-29 from `amax06_04`: the command
+  was sent as bare text and dropped -- the bridge takes only `{"line": ...}`). **Flashed (Marc's go): 0.6 is the default** -- the first change
   from the Hover's plan (the other option, a 0.25 s build-up keeping 1 m/s^2 for stops, untried) -- with the
   drive capture's `stick_mms plan_acc_x1000 plan_lean_x100` (the capture readers expect them; `drive_starts.py`
   finds starts from the stick) and the telemetry `amax=`. Floor check `*_lqr_amax06_flashed_06`: amax=0.60 on
@@ -77,8 +77,7 @@ list, and what not to trust.
   moves the CoM (Marc: 80 mm above the floor at max = 50 mm above the axle vs 45 at ride). Fixed in firmware
   (`releaseStop`: keep speed, brake on the ramp) and in `drive_sim` (`release_s`). **Floor 10-22, lb25_s4:**
   full flips swing 2.6-3.4 deg at ride height (was ~13), 3.8-7.0 at full height (fell before), 5.0 at the
-  lowest; releases 1.5-6.8 deg, no roll-back; LQR at full height flip 5.0. No falls. Capture
-  `data/captures/2026-10-22_release_floor.csv`. **Height kept after a pick-up** (10-26): raised to full height,
+  lowest; releases 1.5-6.8 deg, no roll-back; LQR at full height flip 5.0. No falls. **Height kept after a pick-up** (10-26): raised to full height,
   tipped past 25° back and forward -- balancing cut out and came back, the leg target stayed 535 both times.
 - **First command after a real power-up was lost**: ModemManager probed the ESP32 UART ~3 s after the bridge
   started. Masked (deploy does it); the firmware drops a partial line on line noise.
@@ -120,7 +119,7 @@ list, and what not to trust.
 4. **Pi 5 V contact** (see above): reseat it (robot off), then read the alarm count after a boot and a drive.
    For good: solder one side of the connector (Marc's idea -- still separable).
 5. **ToF: striped blank verdicts while driving (OPEN, cause unknown).** On 2 of 3 stick-driven policy wall
-   approaches (10-27 morning, local `data/captures/2026-10-27_wall_stop.csv`) whole columns of zones came back
+   approaches (10-27 morning; that recording was trashed 10-29 with the other old-firmware data -- record afresh) whole columns of zones came back
    invalid, in stripes, even 1.4 m out, and near the wall the governor saw nothing and lifted the cap (commanded
    speed crept to 0.19 m/s against the wall). Ruled out: a range limit (stepping to the wall read all 64 zones
    to 1.9 cm), wall contact and bad sensor data (Marc watched), the governor's code (raw vs verdict match frame
@@ -138,8 +137,10 @@ list, and what not to trust.
 - The web page / LCD status **while a recorder runs**: each capture dump (~600 lines, ~57 kB at the 115200-baud
   Pi link) silences telemetry 3.7-6.2 s, so an arm shows up late (the robot balances at once). Gone without a
   recorder -- only the capture tools send `logdump`.
-- `balance_watch.py` files saved before 2026-10-28 ~11:10 (`*_watch.csv`, `tap_test.csv`): t_us rounded to 1-10 ms;
-  use `sample_times()`. The LQR2 8 ms gains (-1844 / -6.89 / 46.0 / 3.67): shook on the floor.
+- **Recordings (10-29):** everything made before the single IMU loop (10-28 12:44) was trashed as stale, except
+  the physical measurements the model rests on (drops, pencil CoM, IMU tilt, the frequency sweeps of 10-19/20/28
+  -- replayed with the firmware timing they ran under). The LQR2 8 ms gains (-1844 / -6.89 / 46.0 / 3.67): shook
+  on the floor.
 - The sim/lqr model above ~10 Hz (see above), and anything it rates for light smoothing or high lean-rate gain.
 - Commit `59cad1e`'s IMU entry ("assumes 120 mm", "ride height"): corrected in `3e07460` (60 mm; legs were limp).
   Telemetry `legR/legL` show ride-height defaults for a limp leg: read `legst`.

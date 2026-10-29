@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The tap test: does the body ring on its legs? (2026-10-28)
 
-    python3 tools/balance/tap_ring.py data/captures/2026-10-28_tap_test.csv
+    python3 tools/balance/tap_ring.py data/captures/<tap test>.csv
 
 The capture: tools/capture/balance_watch.py windows (every control cycle, ~250 Hz with balance off), the robot
 upright with balance off and the legs powered at ride height, the wheels held against the floor by hand, the
