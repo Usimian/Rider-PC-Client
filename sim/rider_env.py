@@ -236,9 +236,12 @@ class RiderBalanceEnv(gym.Env):
                  pos_anchor: float = 0.0, rate_pen: float = 0.30,
                  drive_train: bool = False, fw_obs: bool = True, drive_lead: bool = False,
                  pitch_dis: bool = False, turn_obs: bool = False, stick_events: float = 0.0,
-                 drive_gains: Gains = None):
+                 drive_gains: Gains = None, stop_pen: float = 0.0):
         super().__init__()
         self.stick_events = stick_events            # share of drive episodes with a release or reversal partway
+        # stop_pen (2026-10-28): after a stick release, this x (distance from the home the firmware brakes the target
+        # to)^2 per step -- rolling on past the stop costs reward (the anchor-free retrain learned to resist the brake)
+        self.stop_pen = stop_pen
         self.drive_gains = drive_gains or Gains()   # the firmware's position-loop settings (fw_drive.Gains)
         # turn_obs (2026-10-20): an 8th obs per frame, |turnrate command| (full stick 1.0) -- the policy can tell a
         # spin from holding still. Mirror-invariant (it is a size). Always 0 in the 2-D env (no turns).
@@ -546,7 +549,11 @@ class RiderBalanceEnv(gym.Env):
         act_pen = 0.02 * a ** 2                        # bumped 0.01->0.02: discourage riding the action rail
         rate_pen = self.rate_pen * (a - self._prev_a) ** 2   # temporal smoothness pressure (tunable; 0.30 = deployed)
         vel_pen = self.vel_pen * x_vel ** 2            # pin optimum at STATIONARY (kills the trained creep)
-        reward = upright - pos_pen - act_pen - rate_pen - vel_pen
+        stop_pen = 0.0
+        if self.stop_pen > 0.0 and self.drive_train and self._vdes_cmd == 0.0 and self._steps > self._drive_start_step \
+                and self._drive_cmd != 0.0:            # released after driving: follow the firmware's brake home
+            stop_pen = self.stop_pen * (x - self._drive.hold_tgt) ** 2
+        reward = upright - pos_pen - act_pen - rate_pen - vel_pen - stop_pen
         if fell:
             reward -= 10.0
         self._prev_a = a

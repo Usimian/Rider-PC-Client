@@ -20,7 +20,7 @@ from caps_ppo import CAPS_PPO       # PPO + spatial action-smoothness (used when
 def make_env(domain_rand=False, frame_stack=1, vel_pen=0.0, mirror_aug=True, rate_dr=True,
              pos_anchor=0.0, rate_pen=0.30, drive_train=False,
              fw_obs=True, drive_lead=False, pitch_dis=False, spin_prob=0.0, turn_obs=False, plant="servo",
-             stick_events=0.0):
+             stick_events=0.0, stop_pen=0.0):
     # spin_prob > 0: the TWO-WHEEL env (rider_env_twowheel) -- real turns/spins through the firmware turn controller
     # (servo plant only: the measured plant has no spin model yet, and the two-wheel env refuses it)
     cls, extra = (RiderTwoWheelEnv, dict(spin_prob=spin_prob)) if spin_prob > 0.0 else (RiderBalanceEnv, {})
@@ -29,7 +29,7 @@ def make_env(domain_rand=False, frame_stack=1, vel_pen=0.0, mirror_aug=True, rat
                        mirror_aug=mirror_aug, vel_pen=vel_pen, rate_dr=rate_dr, rate_pen=rate_pen,
                        pos_anchor=pos_anchor,
                        drive_train=drive_train, fw_obs=fw_obs, drive_lead=drive_lead, pitch_dis=pitch_dis,
-                       turn_obs=turn_obs, stick_events=stick_events, **extra)
+                       turn_obs=turn_obs, stick_events=stick_events, stop_pen=stop_pen, **extra)
 
 
 def evaluate(model, vecnorm, frame_stack=1, n=20, fw_obs=True, turn_obs=False, plant="servo"):
@@ -92,9 +92,15 @@ def anchor_set(model, vecnorm, args):
     backwards twice on the floor (full stick from standing, and full forward into reverse)."""
     import torch as th
     # the plant being trained on (the two-wheel env with no spins is the servo's straight drive; the measured plant
-    # has only the one-wheel env)
-    cls, extra = (RiderBalanceEnv, {}) if args.plant == "measured" else (RiderTwoWheelEnv, dict(spin_prob=0.0))
-    env = cls(params=replace(DEFAULT, plant=args.plant), add_noise=True, domain_rand=args.domain_rand,
+    # has only the one-wheel env). --anchor_spin_only (2026-10-28): the servo two-wheel env, every episode spinning,
+    # only the states while the turn stick is on -- the measured plant cannot turn, so this keeps the initial policy's
+    # spins while straight driving, stops and reversals stay free
+    if args.anchor_spin_only:
+        plant, cls, extra = "servo", RiderTwoWheelEnv, dict(spin_prob=1.0)
+    else:
+        plant = args.plant
+        cls, extra = (RiderBalanceEnv, {}) if plant == "measured" else (RiderTwoWheelEnv, dict(spin_prob=0.0))
+    env = cls(params=replace(DEFAULT, plant=plant), add_noise=True, domain_rand=args.domain_rand,
               frame_stack=args.frame_stack, mirror_aug=not args.no_mirror, rate_dr=not args.no_rate_dr,
               rate_pen=args.rate_pen, drive_train=args.drive_train, drive_lead=args.drive_lead,
               pitch_dis=args.pitch_dis, turn_obs=args.turn_obs, stick_events=args.stick_events, **extra)
@@ -102,7 +108,11 @@ def anchor_set(model, vecnorm, args):
     states = []
     while len(states) < args.anchor_steps:
         nobs = vecnorm.normalize_obs(obs)
-        if not args.anchor_drive_only or abs(env._vdes_cmd) > 0.0 or abs(env._vdes_s) > 0.05:
+        if args.anchor_spin_only:
+            keep = env.yaw_cmd != 0.0
+        else:
+            keep = not args.anchor_drive_only or abs(env._vdes_cmd) > 0.0 or abs(env._vdes_s) > 0.05
+        if keep:
             states.append(nobs)
         act, _ = model.predict(nobs, deterministic=False)
         obs, _, term, trunc, _ = env.step(act)
@@ -183,6 +193,10 @@ if __name__ == "__main__":
     ap.add_argument("--anchor_steps", type=int, default=60_000)  # how many such states to collect
     ap.add_argument("--anchor_drive_only", action="store_true")  # anchor only stick-pushed / moving states (not holds -- a spin
                                                                # looks like a hold, see anchor_set)
+    ap.add_argument("--anchor_spin_only", action="store_true")   # anchor only spinning states, from the servo two-wheel
+                                                               # env (2026-10-28: keeps spins on a measured-plant retrain)
+    ap.add_argument("--stop_pen", type=float, default=0.0)     # after a stick release: this x (distance from the
+                                                               # firmware's braking home, m)^2 per step (2026-10-28)
     ap.add_argument("--lead_lambda", type=float, default=0.0)  # with --init: on ld8_s6's floor spins, pull the output
                                                                # towards what it commanded --lead_s later (see lead_set)
     ap.add_argument("--lead_s", type=float, default=0.020)
@@ -205,7 +219,8 @@ if __name__ == "__main__":
                                  pos_anchor=args.pos_anchor, rate_pen=args.rate_pen,
                                  drive_train=args.drive_train, fw_obs=not args.legacy_obs,
                                  drive_lead=args.drive_lead, pitch_dis=args.pitch_dis, spin_prob=args.spin_prob,
-                                 turn_obs=args.turn_obs, plant=args.plant, stick_events=args.stick_events),
+                                 turn_obs=args.turn_obs, plant=args.plant, stick_events=args.stick_events,
+                                 stop_pen=args.stop_pen),
                         n_envs=args.nenv, seed=args.seed)
     common = dict(verbose=1, device="cpu", n_steps=1024, batch_size=2048, gamma=0.997,
                   gae_lambda=0.95, learning_rate=args.lr, policy_kwargs=dict(net_arch=[64, 64]),
@@ -228,7 +243,8 @@ if __name__ == "__main__":
         if args.anchor_lambda > 0.0:
             model.anchor_obs, model.anchor_mu = anchor_set(model, venv, args)
             model.anchor_lambda = args.anchor_lambda
-            print(f"anchor: {len(model.anchor_obs)} {'driving' if args.anchor_drive_only else 'drive/hold'} states, "
+            kind = "spinning" if args.anchor_spin_only else ("driving" if args.anchor_drive_only else "drive/hold")
+            print(f"anchor: {len(model.anchor_obs)} {kind} states, "
                   f"lambda {args.anchor_lambda}")
         if args.lead_lambda > 0.0:
             model.lead_obs, model.lead_target = lead_set(venv, args)
