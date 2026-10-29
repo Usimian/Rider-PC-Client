@@ -140,7 +140,10 @@ def lead_set(vecnorm, args):
         g = lambda k, s=1.0: np.array([float(r[k]) for r in rs]) * s
         pp, pr = np.radians(g("pol_pitch_x100", 0.01)), np.radians(g("pol_rate_x10", 0.1))
         xv, ip, u = g("pol_xvel_mm", 1e-3), g("pol_int_m", 1e-3), g("cmd") / full
-        fr = np.stack([pp, pr, 0 * pp, xv, xv / 0.03, ip, 0 * pp], 1)
+        cols = [pp, pr, 0 * pp, xv, xv / 0.03, ip, 0 * pp]
+        if args.turn_obs:                                   # the 8th input: |turnrate command|, as main.cpp feeds it
+            cols.append(np.minimum(2.0, np.abs(g("yrc_x1000", 1e-3))))
+        fr = np.stack(cols, 1)
         n = int(round(args.lead_s / np.median(np.diff(g("t_us", 1e-6)))))   # samples ahead
         for i in range(1, len(fr) - n):
             obs.append(vecnorm.normalize_obs(np.concatenate([fr[i - 1], fr[i]]).astype(np.float32)))
