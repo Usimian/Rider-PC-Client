@@ -53,8 +53,12 @@ list, and what not to trust.
   10.5 Hz but misses the peak in closed loop. **MEASURED 10-29 (legs clamped, legs powered, balancing off,
   `*_leg_ringdown_clamped`, tools/balance/ring_down.py):** the body rings on its legs at ~5.3 Hz (4.7-6.1),
   damping ratio ~0.1 -> flex_k ~2.1-2.4 N m/rad, flex_c ~0.011 (with model_flex's assumed legs split). In
-  closed loop it halves the gap at 11-14 Hz (robot / model 4.7 -> 2.8, phase -76 -> -41 deg). **Next: refit
-  motor, friction and inertia with that spring held** (fit_joint --flex, k/c fixed; check in closed loop),
+  closed loop it halves the gap at 11-14 Hz (robot / model 4.7 -> 2.8, phase -76 -> -41 deg). Re-measured
+  gapless (fe72d6d, `ringcap`/ring_capture.py, 8 clean taps): ~5.9 Hz (4.2-7.7), damping ~12 %, k ~2.4-3.2;
+  small swings ring lower. **Every refit failed for one reason (eaac7b0): standing, the robot is
+  amplitude-dependent** -- per unit of command it answers the +/-60 sweep ~2x the +/-30 one at 1-3 Hz; no linear
+  model does that (stiction / gear play near standstill). Driving sweeps don't show it. **Next: standing sweeps at
+  +/-15, 30, 60, 120 to map it**, model the near-standstill friction, then refit (fit_frf.py / fit_joint.py),
   then the cleanup (June LQR, FW_2026_10_19, margin_check, "LQR2" names, the servo plant), then the RL sim's
   timing (paused). (2) the
   ~10 Hz ringing after a stop or
