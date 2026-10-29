@@ -37,7 +37,16 @@ list, and what not to trust.
   rate rms 1.8-2.1 deg/s (floor 1.6-2.8, servo 3.2-3.4); release from 0.30 rolls 22.4 cm, the servo 22.1, the floor
   ~20 (`*_policy_baseline_07`: 197 mm, 1.46 s) -- the roll-on is the firmware's policy position loop, not the
   motor; retraining alone will not stop it. Floor baseline 10-28: standing 0.14-0.29 deg sd (LQR 0.03-0.08),
-  206-225 Hz, start/release swings 3.6-6.3 deg, no reversal caught; (2) the ~10 Hz ringing after a stop or
+  206-225 Hz, start/release swings 3.6-6.3 deg, no reversal caught. **Position loop 40 / 1.2 (`poshold`,
+  `posdmax`) LIVE ONLY** (firmware defaults still 20 / 0.8; the sim's `fw_drive.Gains` already 40 / 1.2): stops in
+  10-12.5 cm on the floor (was ~20); fell once on a full forward-to-backward reversal at 69 % battery (overshoot
+  to 0.47 m/s backward, output pinned). **Three retrain rounds (10-28/29, `retrain_check.py`, commits
+  `db14e0a`..`5209cb7`):** anchored fine-tunes keep the soft backward start and the fall; anchor-free ones fix
+  it on 5/5 seeds (decisive start, no overshoot, no falls at 85/80 % motor) but stop at 17-25 cm and spin
+  2x worse. **Marc's call 10-29: use the LQR instead** -- step 1 done (`db72937`, `sim/lqr_in_rl_sim.py`: the
+  flashed LQR on the RL sim's plant agrees with sim/lqr everywhere, and with the floor's overshoot and its
+  0.6 m/s low-battery fall); step 2 proposed: a residual policy (LQR + a small learned correction). (2) the
+  ~10 Hz ringing after a stop or
   drive, three times now (`*_hover_exact_watch` w18, `*_renamed_check` w15, `*_smooth_home` w12); (3) the balance
   point moved: 3.9-4.3 deg on the IMU in the last run against the 2.8 reference (2.9-3.0 earlier that evening, legs
   at ride height both times, cause unknown) -- it parks 1-3 cm off home until the slow integral catches up;
