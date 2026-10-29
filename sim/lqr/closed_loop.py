@@ -29,9 +29,11 @@ model_flex.FlexParams: the encoder reads the wheel against whatever carries the 
 The model's u is the firmware's (+ forward, model.py). Recorded like the robot's chirp capture (every 2nd
 cycle: inj, cmdL, cmdR, wx_01mm, th_x100, rate_x10), so freq_response.py treats both the same.
 """
+from collections import deque
+
 import numpy as np
 
-from fw_timing import FW_NOW_LQR, IMU_LOOP_PERIOD_S
+from fw_timing import ACTUATOR_DELAY_S, FW_NOW_LQR, IMU_LOOP_PERIOD_S
 from model import G, Params, plant_module
 
 SUB_S = 0.00025          # physics step (fw_timing's periods and moments are whole steps of it)
@@ -291,19 +293,21 @@ class ModelPlant:
 
 
 def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5, kick=None, drive=None, log_all=False,
-        plant=None, timing=FW_NOW_LQR, seed=0):
+        plant=None, timing=FW_NOW_LQR, seed=0, actuator_delay=ACTUATOR_DELAY_S):
     """Simulate T s standing; sweep = (a, f0, f1, dur) starts at sweep_at. Returns the recorded rows (every 2nd
     cycle, as the robot's capture) and whether it fell. kick = (t, deg/s): a shove, the body's pitch rate
     changed at once (+ forward). drive = (times s, m/s): the stick's speed command, held between the times.
     log_all: return every cycle (t, stick, u, axle speed m/s, body lean deg + forward) instead of the capture rows.
     plant: the plant (ModelPlant(p) by default, see there). timing: the firmware's (fw_timing.py; the robot as it is
-    now by default -- a replay of an old recording names its own); seed: the draw of each cycle's period."""
+    now by default -- a replay of an old recording names its own); seed: the draw of each cycle's period;
+    actuator_delay: the wheels act this long after the command goes out (fw_timing.ACTUATOR_DELAY_S)."""
     p = p or Params()
     fw = fw or Firmware()
     plant = plant or ModelPlant(p, np.radians(th0_deg))
     rng = np.random.default_rng(seed)
     B = plant.B
     u = 0.0
+    pipe = deque([0.0] * max(1, int(round(actuator_delay / SUB_S)) + 1), maxlen=max(1, int(round(actuator_delay / SUB_S)) + 1))
     rows = []
     hov = getattr(fw, "hover_imu", False)
     imu_clock = hov or timing.imu_loop                  # samples on the IMU loop's own clock
@@ -347,7 +351,8 @@ def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5, kick=None
             if k == i_cmd:
                 u_fw = fw.control(prev, stick)
                 u = u_fw + inj
-            plant.step(u, SUB_S)
+            pipe.append(u)                              # the command reaches the wheels actuator_delay later
+            plant.step(pipe[0], SUB_S)
         s = plant.s
         if abs(s[B]) > np.radians(45):
             return np.array(rows), True

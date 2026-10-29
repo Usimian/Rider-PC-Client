@@ -64,10 +64,10 @@ class Params:
     # wheel motion in the driving sweeps, with no speed-dependent lag; these ~94 % / 94 % standing. The friction is
     # ~1.4x the Hover's, as the weight on the wheels is (560 vs 415 g): ASSUMED the cause.
     b: float = 1.63e-3         # N m s/rad, one motor's damping (back-EMF through the driver)
-    u0: float = 10.0           # dead zone in the drive, units. ESTIMATED 2026-10-29 (amplitude_check.py): the standing
-                               # robot answers the +/-60 sweep 1.6-2.1x the +/-30 per unit of command; 10 units gives
-                               # the model 1.3-1.7x (0: 1.1-1.2x; 20-30: stick-slip). The RL sim measured ~19 on
-                               # 10-19 under its velocity-servo model. Was 0 ("as on the Hover")
+    u0: float = 0.0            # dead zone in the drive, units: none. 2026-10-29: 10 units reproduced the standing
+                               # robot's amplitude dependence best (amplitude_check.py: +/-60 / +/-30 1.3-1.7x vs the
+                               # robot's 1.6-2.1x) but makes the LQR chatter standing (lean sd 0.18 deg against the
+                               # robot's 0.03-0.08): the robot's near-standstill quirk is not a dead zone. Open.
     fric: float = 5.29e-3      # N m, Coulomb friction per wheel (33 units)
     fric_w: float = 0.844      # rad/s, the friction rounded off (tanh) below this
     # Torque off (balancing off: main.cpp writes the wheels' register 0x18 = 0): the wheels turn by hand but feel

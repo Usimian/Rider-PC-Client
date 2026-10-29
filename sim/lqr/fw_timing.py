@@ -19,6 +19,12 @@ import numpy as np
 IMU_READ_S = 0.00036                              # 12 bytes at 400 kHz I2C
 IMU_LOOP_PERIOD_S = 0.002 + IMU_READ_S
 
+# The wheels act ACTUATOR_DELAY_S after the command goes out (the servo bus and the motor driver; not in the cycle's
+# timing). DERIVED 2026-10-29 (fit_tf.py): the plant's transfer function back-calculated from the two driving
+# sweeps carries 7.7 ms of delay on the robot against 3.6 ms on the simulated sweeps (the cycle, the IMU sample's
+# age, the filters), the poles alike (tipping +11.5 vs +11.6 /s, -36.5 vs -36.6 /s): 4.1 ms the model lacked.
+ACTUATOR_DELAY_S = 0.0041
+
 
 @dataclass(frozen=True)
 class Timing:
