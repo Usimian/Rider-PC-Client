@@ -336,6 +336,12 @@ static int16_t dcPA[DCAP_N], dcYR[DCAP_N], dcYC[DCAP_N];   // + the turnrate com
 // (2026-10-28) the stick's speed command (mm/s) and the LQR plan's acceleration (x1000) and lean (deg x100):
 // what a drive start was asked for (the start twitch: a full-stick start vs a gentle one looked alike without it)
 static int16_t dcSt[DCAP_N], dcPlA[DCAP_N], dcPlL[DCAP_N];
+// --- ring-down capture (2026-10-29, 'ringcap' / 'ringdump'): every cycle for RCAP_N cycles (~16 s), balancing or
+// not -- a whole tap session without the drive capture's ~5 s download gaps. The lean, the gyro and both wheels'
+// speed registers (the wheels against the legs): tools/capture/ring_capture.py, tools/balance/ring_down.py. 48 KB.
+#define RCAP_N 4000
+volatile bool gRcArm=false, gRcDump=false;
+static uint32_t rcT[RCAP_N]; static int16_t rcP[RCAP_N], rcR[RCAP_N], rcV[RCAP_N], rcVR[RCAP_N]; static int rcIdx=0;
 
 // ---- wheel FREQUENCY SWEEP (2026-10-19): identify the loaded wheel's true response on the floor ----
 // While balancing (either controller), 'chirp 1' adds a known log-swept sine to the balance output (the forward
@@ -1423,6 +1429,11 @@ static void balanceTask(void*){
       dcIdx++;
       if(dcIdx>=DCAP_N){ gDcArm=false; gDcReady=true; }
     }
+    if(gRcArm && rcIdx<RCAP_N){                                    // ring-down capture, every cycle
+      rcT[rcIdx]=micros(); rcP[rcIdx]=(int16_t)(theta*100.0f); rcR[rcIdx]=(int16_t)(rate*10.0f);
+      rcV[rcIdx]=(int16_t)v; rcVR[rcIdx]=(int16_t)tVR;
+      if(++rcIdx>=RCAP_N) gRcArm=false;
+    }
     // frequency-sweep capture: every 2nd cycle while the sweep runs
     if(gChirpOn && !(gEnabled && !fallen)) gChirpOn = false;             // balance off / fall -> stop the sweep
     if(gChirpOn && ci && (n & 1) == 0 && ciIdx < CHIRP_N){
@@ -1553,6 +1564,8 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"chirpf1"))  gChirpF1 = clampf(v, 0.2f, 20.0f);     // sweep end frequency, Hz
   else if (!strcmp(s,"chirpt"))   gChirpDur = clampf(v, 2.0f, 25.0f);    // sweep duration, s
   else if (!strcmp(s,"chirpdump")) gChirpDump = true;                    // stream the sweep capture ('# dcapc' lines)
+  else if (!strcmp(s,"ringcap")){ rcIdx=0; gRcArm=true; return; }                         // ring-down capture: arm
+  else if (!strcmp(s,"ringdump")){ gRcArm=false; gRcDump=true; return; }                   // ...stop and stream it
   else if (!strcmp(s,"logdump")){ gLogDump=true; return; }                                // dump the held enable->fall balance log over USB
   // ('polrun' removed: controller is selected at BUILD time now -- see gPolMode at top. No runtime toggle.)
   else if (!strcmp(s,"polsign")) gPolSign=(v<0.0f?-1.0f:1.0f);  // flip action->wheel sign (verify on robot)
@@ -1696,6 +1709,19 @@ void loop(){
     }
     { char d[16]; int dk=snprintf(d,sizeof(d),"# dcap done\n"); emit(d,dk); }
     gLogDump=false;
+  }
+  // ring-down dump: '# dcapr' lines (the bridge forwards '# dcap...' to rider/debug/dcap), commands keep flowing
+  if(gRcDump){
+    int n = rcIdx;
+    { char h[96]; int hk=snprintf(h,sizeof(h),"# dcapr n=%d cols: i t_us pitch_cdeg rate_x10 v vR\n",n); emit(h,hk); }
+    for(int i=0;i<n;i++){
+      char b[64]; int k=snprintf(b,sizeof(b),"# dcapr %d %lu %d %d %d %d\n", i,(unsigned long)rcT[i],
+                                 (int)rcP[i],(int)rcR[i],(int)rcV[i],(int)rcVR[i]);
+      emit(b,k);
+      if((i & 15)==0){ delay(1); pump(Serial, b0, n0); pump(Serial1, b1, n1); }
+    }
+    { char d[20]; int dk=snprintf(d,sizeof(d),"# dcapr done\n"); emit(d,dk); }
+    gRcDump=false;
   }
   // frequency-sweep dump (refused while the sweep still runs): same pattern as above, commands keep flowing
   if(gChirpDump){

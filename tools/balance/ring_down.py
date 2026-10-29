@@ -3,7 +3,7 @@
 off, the legs powered at ride height, the top of the body tapped. Per tap: the flex -- the body's angle against
 the legs' -- and its frequency, damping, and the spring they give.
 
-    python3 tools/balance/ring_down.py data/captures/<tilt_capture recording>.csv
+    python3 tools/balance/ring_down.py data/captures/<ring_capture recording>.csv [--tap 40]
 
 The flex = body angle - legs angle, both from the moment of the tap:
   body  the gyro (pitch rate), integrated
@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from balance_watch import sample_times                                  # noqa: E402
 
 V_COUNTS, R = 327.6, 0.030
-TAP_DPS = 40.0
+TAP_DPS = float(sys.argv[sys.argv.index("--tap") + 1]) if "--tap" in sys.argv else 40.0   # deg/s
 RING_S = 0.5
 GAP_S = 0.8                     # a new tap at least this long after the last
 
