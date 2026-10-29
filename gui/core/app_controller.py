@@ -167,18 +167,17 @@ class ApplicationController:
             print(f"[APP] Body tilt changed to: {value}°")
 
     def _toggle_roll_balance(self):
-        """"Roll Balance" = the firmware's ROLL LEVELING (legs tilt to keep the body level side to side),
-        the same function as the DS4 Square button: 'level 1' / 'level 0'. Direction comes from the
-        robot's real state (telemetry 'lev' -> status 'roll_leveling_enabled'). It used to send 'en 0/1',
-        i.e. it switched BALANCING off -- balancing on/off stays on Share and the LCD button."""
+        """"Body Roll" = the firmware's body roll mode, the same as the DS4 Square button: the next of lean into
+        turns -> stay flat -> off ('level 2/1/0'), from the robot's real state (telemetry 'lev' -> status
+        'roll_mode'). Balancing on/off stays on Share and the LCD button."""
         if not self.mqtt_client.is_connected():
             messagebox.showwarning("Not Connected", "Not connected to robot")
             return
 
-        currently_on = bool(self.robot_state.data.get('roll_leveling_enabled', False))
-        self.mqtt_client.send_line("level 0" if currently_on else "level 1")
+        nxt = {'lean': 'flat', 'flat': 'off', 'off': 'lean'}[self.robot_state.data['roll_mode']]
+        self.mqtt_client.send_line("level %d" % {'off': 0, 'flat': 1, 'lean': 2}[nxt])
         if self.debug_mode:
-            print(f"[APP] Roll leveling toggle -> {'OFF' if currently_on else 'ON'}")
+            print(f"[APP] Body roll -> {nxt}")
 
     def _toggle_camera(self):
         """Toggle camera"""

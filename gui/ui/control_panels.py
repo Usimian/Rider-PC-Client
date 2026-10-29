@@ -80,7 +80,7 @@ class FeaturesPanel:
         # Feature status indicators. (Performance Mode + Camera toggle removed.)
         # (name, attr, callback_key, enabled)
         features = [
-            ("Roll Balance", "roll_balance", "toggle_roll_balance", True),
+            ("Body Roll", "roll_balance", "toggle_roll_balance", True),
         ]
 
         self.status_labels = {}
@@ -134,11 +134,14 @@ class FeaturesPanel:
             150, lambda: self.callbacks.get('set_volume', lambda v: None)(val)
         )
 
-    def update_feature_status(self, feature: str, enabled: bool):
-        """Update individual feature status"""
+    def update_feature_status(self, feature: str, enabled):
+        """Update individual feature status (a bool: ON / OFF; a mode name: shown as it is)"""
         if feature in self.status_labels:
             try:
-                if enabled:
+                if isinstance(enabled, str):
+                    self.status_labels[feature].config(text=enabled.upper(),
+                                                       fg='red' if enabled == 'off' else 'green')
+                elif enabled:
                     self.status_labels[feature].config(text="ON", fg='green')
                 else:
                     self.status_labels[feature].config(text="OFF", fg='red')
@@ -148,7 +151,7 @@ class FeaturesPanel:
     def update_all_features(self, data: Dict[str, Any]):
         """Update all feature statuses"""
         feature_map = {
-            'roll_leveling_enabled': 'roll_balance',   # the "Roll Balance" row shows roll LEVELING, not balancing
+            'roll_mode': 'roll_balance',   # the "Body Roll" row: the firmware's body roll mode (lean / flat / off)
         }
         
         for data_key, feature_key in feature_map.items():

@@ -19,7 +19,7 @@ const client = new MqttLite("ws://" + location.host + "/", {
   onConnect: () => set("linktext", "connected"),
   onClose:   () => set("linktext", "reconnecting…"),
   onMessage: (topic, payload) => {
-    if (topic === "rider/debug/telem") { height(payload); return; }   // raw "k=v k=v" line, not JSON
+    if (topic === "rider/debug/telem") { height(payload); pullView(payload); return; }   // raw "k=v k=v" line, not JSON
     let p; try { p = JSON.parse(payload); } catch { return; }
     if (topic === "rider/status") status(p);
     else if (topic === "rider/status/imu") { set("pitch", deg(p.pitch)); set("roll", deg(p.roll)); }
@@ -105,15 +105,16 @@ setInterval(() => {
 // ---- balance card ----
 function controls() {
   const ok = live();
-  const bal = ok && S.roll_balance_enabled, lev = ok && S.roll_leveling_enabled;
+  const bal = ok && S.roll_balance_enabled, rm = ok ? S.roll_mode : null;
   const bb = $("balbtn");
   bb.disabled = !ok;
   bb.textContent = !ok ? "–" : bal ? "Stop balancing" : "Start balancing";
   bb.className = "btn" + (bal ? " stop" : "");
-  const lb = $("levbtn");
-  lb.disabled = !ok;
-  lb.textContent = "Roll Balance: " + (!ok ? "–" : lev ? "ON" : "off");
-  lb.className = "btn" + (lev ? " active" : "");
+  // body roll (firmware 'level' 2/1/0): lean into turns (along gravity + the turn's pull), stay flat, off (legs equal)
+  for (const [id, m] of [["rolllean", "lean"], ["rollflat", "flat"], ["rolloff", "off"]]) {
+    $(id).className = "btn roll" + (rm === m ? " active" : "");
+    $(id).disabled = !ok;
+  }
   // controller: switchable only while NOT balancing (the firmware refuses it anyway)
   const pol = ok && S.mode === "POL", lqr = ok && S.mode === "LQR";
   $("ctrlpol").className = "btn pol" + (pol ? " active" : "");
@@ -130,10 +131,9 @@ $("balbtn").addEventListener("click", () => {
   if (!live()) return;
   if (S.roll_balance_enabled) { line("en 0"); line("leglimp"); } else line("en 1");
 });
-$("levbtn").addEventListener("click", () => {
-  if (!live()) return;
-  line(S.roll_leveling_enabled ? "level 0" : "level 1");
-});
+$("rolllean").addEventListener("click", () => { if (live()) line("level 2"); });
+$("rollflat").addEventListener("click", () => { if (live()) line("level 1"); });
+$("rolloff").addEventListener("click", () => { if (live()) line("level 0"); });
 $("ctrlpol").addEventListener("click", () => { if (live() && !S.roll_balance_enabled) line("ctrl 0"); });
 $("ctrllqr").addEventListener("click", () => { if (live() && !S.roll_balance_enabled) line("ctrl 1"); });
 $("zero").addEventListener("click", () => { if (live()) line("poszero"); });
@@ -187,6 +187,23 @@ let legH = null;                     // current height from telemetry (right-leg
 let heightTarget = null;             // where the slider wants the legs (right-leg counts); null = idle
 const H_GAIN = 3.0, H_MAX = 60, H_MIN = 8;   // counts/s per count of gap; cap (~DS4 full stick 50); floor
 
+// Bubble level (POSE card), top view, front up; the bubble floats to the high side. Sideways: the pull against the
+// body, roll + pull (the firmware's true roll and the tilt of gravity plus the turn's centrifugal pull, both deg in
+// roll's sign; the body lines up with the pull at roll = -pull) -- + = the left side low (from the leg geometry:
+// ASSUMED until checked by hand), so the bubble goes right. Fore-aft: pitch (th) against the balanced upright (set),
+// + = leaning forward, so the bubble goes back (down). Full scale (the outer ring) 10 deg.
+const BUB_R = 60, BUB_FULL = 10;
+function pullView(t) {
+  const r = / roll=(-?[\d.]+)/.exec(t), p = / pull=(-?[\d.]+)/.exec(t),
+        th = /^th=(-?[\d.]+)| th=(-?[\d.]+)/.exec(t), up = / set=(-?[\d.]+)/.exec(t);
+  if (!r || !p || !th || !up) return;
+  const sx = Number(r[1]) + Number(p[1]), sy = Number(th[1] ?? th[2]) - Number(up[1]);
+  let x = sx / BUB_FULL * BUB_R, y = sy / BUB_FULL * BUB_R;
+  const m = Math.hypot(x, y), lim = BUB_R - 9;
+  if (m > lim) { x *= lim / m; y *= lim / m; }
+  $("bub").setAttribute("cx", 65 + x); $("bub").setAttribute("cy", 65 + y);
+  set("bubx", deg(sx)); set("buby", deg(sy));
+}
 function height(t) {
   const r = / legR=(\d+)/.exec(t), l = / legL=(\d+)/.exec(t);
   if (!r || !l) return;

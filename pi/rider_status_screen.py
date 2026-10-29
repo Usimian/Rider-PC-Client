@@ -32,6 +32,7 @@ FONT = "/home/pi/model/msyh.ttc"
 BG = (15, 21, 46)
 BROKER = "localhost"
 BROKER_PORT = 1883
+ROLL_MODES = {0: "off", 1: "flat", 2: "lean"}   # firmware body roll, telemetry lev (level 0/1/2)
 
 f_s = ImageFont.truetype(FONT, 15)
 f_m = ImageFont.truetype(FONT, 20)
@@ -299,7 +300,7 @@ def publish():
         "controller_charging": cchg,
         "connection_status": "connected",
         "roll_balance_enabled": bool(en),   # = BALANCING on (legacy XGO name; the DS4 script reads it as such)
-        "roll_leveling_enabled": bool(int(tel.get("lev", 0))),   # firmware roll leveling (legs keep the body level)
+        "roll_mode": ROLL_MODES.get(int(tel.get("lev", 2)), "lean"),   # firmware body roll (telemetry lev 0/1/2)
         "battery_level": batt,
         "battery_voltage": vbat,
         "cpu_percent": psutil.cpu_percent(),
@@ -428,14 +429,14 @@ def render():
     d.text((188, 14), state, fill=col, font=f_m)
 
     th = tel.get("th", 0.0); roll = tel.get("roll", 0.0); yaw = tel.get("yaw", 0.0)
-    lev_on = int(tel.get("lev", 0))
+    lev = int(tel.get("lev", 2))
     for x, lbl, val in ((10, "tilt", th), (112, "roll", roll), (214, "yaw", yaw)):
         d.text((x, 52), lbl, fill=(150, 165, 205), font=f_s)
-        # roll-leveling active: highlight the roll value green + a LVL tag by its header
-        rcol = (0, 255, 140) if (lbl == "roll" and lev_on) else (255, 255, 255)
+        # the legs working the roll (FLAT or LEAN): the roll value green + the mode's tag by its header
+        rcol = (0, 255, 140) if (lbl == "roll" and lev) else (255, 255, 255)
         d.text((x, 70), "%+.1f°" % val, fill=rcol, font=f_m)
-    if lev_on:
-        d.text((112 + _text_w(d, "roll", f_s) + 6, 52), "LVL", fill=(0, 255, 140), font=f_s)
+    if lev:
+        d.text((112 + _text_w(d, "roll", f_s) + 6, 52), "FLAT" if lev == 1 else "LEAN", fill=(0, 255, 140), font=f_s)
 
     # forward path (ToF governor): OBSTACLE distance ahead, or CLEAR. Red = stopped
     # (factor 0, <=~10cm), amber = slowing, green = clear, grey = governor offline (stale).

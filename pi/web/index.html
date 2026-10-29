@@ -48,19 +48,43 @@
   </section>
   <section class="card">
     <h2>POSE</h2>
-    <div class="grid2">
-      <span class="k">pitch</span>   <span class="big" id="pitch">–</span>
-      <span class="k">roll</span>    <span class="big" id="roll">–</span>
-      <span class="k">heading</span> <span class="big" id="heading">–</span>
-      <span class="k">position</span><span class="num" id="pos">–</span>
-      <span class="k">pose x, y</span><span class="num" id="xy">–</span>
+    <div class="poserow">
+      <div class="grid2">
+        <span class="k">pitch</span>   <span class="big" id="pitch">–</span>
+        <span class="k">roll</span>    <span class="big" id="roll">–</span>
+        <span class="k">heading</span> <span class="big" id="heading">–</span>
+        <span class="k">position</span><span class="num" id="pos">–</span>
+        <span class="k">pose x, y</span><span class="num" id="xy">–</span>
+      </div>
+      <div class="pullview">
+        <svg id="bubble" viewBox="0 0 130 130" width="130" height="130" aria-label="bubble level, top view">
+          <circle class="ring outer" cx="65" cy="65" r="60"/>
+          <circle class="ring" cx="65" cy="65" r="30"/><circle class="ring" cx="65" cy="65" r="12"/>
+          <line class="cross" x1="5" y1="65" x2="125" y2="65"/><line class="cross" x1="65" y1="5" x2="65" y2="125"/>
+          <text class="fwd" x="65" y="15">front</text>
+          <circle id="bub" class="bub" cx="65" cy="65" r="9"/>
+        </svg>
+        <div class="grid2">
+          <span class="k">sideways</span><span class="num" id="bubx">–</span>
+          <span class="k">fore-aft</span><span class="num" id="buby">–</span>
+        </div>
+      </div>
     </div>
+    <p class="hint">Bubble level, seen from above (front up): the bubble floats to the high side, centred when the pull
+      -- gravity plus the turn's centrifugal pull -- runs straight down the body. Rings at 2, 5 and 10&deg;. Sideways:
+      the pull against the body (roll level off, the legs line the body up with it, leaning into turns; on, they hold
+      the body flat). Fore-aft: the body's pitch against its balanced upright.</p>
   </section>
   <section class="card">
     <h2>BALANCE</h2>
     <div class="row">
       <button class="btn" id="balbtn" disabled>–</button>
-      <button class="btn" id="levbtn" disabled>Roll Balance: –</button>
+    </div>
+    <div class="row">
+      <span class="k">body roll</span>
+      <span class="seg">
+        <button class="btn roll" id="rolllean" disabled title="The body lines up with gravity plus the turn's centrifugal pull: it leans into turns">LEAN INTO TURNS</button><button class="btn roll" id="rollflat" disabled title="The body is held level, turning or with one wheel higher than the other">STAY FLAT</button><button class="btn roll" id="rolloff" disabled title="The legs stay at equal length, fixed (height still adjustable)">OFF</button>
+      </span>
     </div>
     <div class="row">
       <span class="k">controller</span>

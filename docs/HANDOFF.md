@@ -4,7 +4,24 @@ Read at session start. Facts live in the repo (commit messages carry the numbers
 provenance, `docs/HARDWARE.md` -> Power / Audio the hardware facts); this is only the running story, the open
 list, and what not to trust.
 
-## Where it stands (2026-10-28 evening): LQR2 = the Hover's LQR exactly, physical numbers apart
+## Where it stands (2026-10-29 evening): attitude fixed for turns; body roll lean / flat / off
+
+- **Model (sim/lqr):** a 4.1 ms actuator delay back-calculated from the driving sweeps (`fit_tf.py`, `7f07bb7`) --
+  driving now within 0.92-1.20 of the robot at 1-7 Hz. The 10-unit dead zone is out again: it made the LQR chatter
+  standing. The standing amplitude dependence is still unexplained (not stiction, not a dead zone).
+- **Attitude (`79c5cf0`):** turning, each tilt estimate integrated one gyro and read the turn as tilt (roll walked
+  3.5 deg/s per rad/s; pitch sat at 10-13 deg in driving turns, 17 deg in the one fall). `tiltRates()` uses all
+  three gyros for both the LQR's IMU-loop pitch and the balance task's pitch/roll; the turn's centripetal pull is
+  taken out of the accelerometer roll. Floor: roll within +/-1.2 deg spinning, pitch 2-3.4 deg in full circles.
+- **Body roll (`19ae8a6` + today's last commit):** `level 2` LEAN INTO TURNS (default) = the body along gravity +
+  the turn's pull, `level 1` STAY FLAT, `level 0` OFF (legs equal, fixed). Closed loop on the true roll (the legs'
+  slack makes any feed-forward count wrong: `tools/balance/lean_cpd.py`). Floor: 4 deg lean held to +/-0.15 deg.
+  Persisted in NVS (saved only while balancing is off). Web page: three-way selector + a bubble level (POSE);
+  DS4 Square cycles; LCD tag LEAN / FLAT.
+- **Roll fall cutoff 40 deg** (`fallroll`): a tilted-plate test slid off at +31 / -32 deg and the wheels then ran
+  at full command for up to 7 s with nothing to stop them.
+
+## Where it stood (2026-10-28 evening): LQR2 = the Hover's LQR exactly, physical numbers apart
 
 - **Flashed + committed (`e387674`), Marc: "it drove great".** One IMU loop (the Hover's imu_task, core 0, the only
   IMU reader), the Hover's IMU step, law order and drive plan (1 m/s^2); gains -1916 / -7.46 / 59.4 / 1.39 (Tightest
@@ -122,35 +139,38 @@ list, and what not to trust.
 
 ## Open list, in order
 
-0. **Turning (Marc, 10-29):** (a) a distinct vibration while turning on the LQR (spinning round to line up; turning
-   is otherwise smooth) -- record a spin in place and a turn while driving (the firmware's turn controller and the
-   counter-rotating wheels are in no model yet); (b) with roll balancing on, lean into a turn by its radial
-   acceleration: roll target atan(v * yaw rate / g) into the turn (0.30 m/s at 1 rad/s: ~1.8 deg; none spinning
-   in place), the legs setting it instead of level.
-1. **First balance-on after a power-up** (the left leg used to lag): two clean power-ups since ModemManager was
+0. **Body roll, to check (10-29):** (a) persistence: power-cycle, pick STAY FLAT with balancing off, power-cycle
+   -- it should come back FLAT (flashed, not yet tried); (b) the bubble level's left/right is ASSUMED from the leg
+   naming: lower the robot's left side (seen from behind), the bubble should go right; (c) the lean cap is 4 deg,
+   the full lean at 0.45 m/s full turn is ~5 deg (the stick's 1 rad/s turns ~1.9 driving) -- raise to 8? Marc's
+   call; (d) spinning in place the roll still wanders ~2 deg, the same way both directions (four turns only).
+1. **Turning vibration (Marc, 10-29):** a distinct vibration turning on the LQR. The accelerometer roll swings
+   +/-5-10 deg several times a second in turns. The pitch estimate was wrong in turns until `79c5cf0` -- ask Marc
+   whether it is gone; if not, record a spin in place and a turn while driving.
+2. **First balance-on after a power-up** (the left leg used to lag): two clean power-ups since ModemManager was
    masked (no stray lines, both legs "ok" on the arrival check). Keep watching `legstkL/R`.
-2. Wheel read failures at power-up (469 / 496, then 0): read `rfL/rfR`, `rft0/rft1` after the next boot that has
+3. Wheel read failures at power-up (469 / 496, then 0): read `rfL/rfR`, `rft0/rft1` after the next boot that has
    them. Possibly ModemManager too.
-3. Voice (parked 10-26): rebuild fresh in `pi/` (facts in HARDWARE.md -> Audio). Options weighed: A spoken commands
+4. Voice (parked 10-26): rebuild fresh in `pi/` (facts in HARDWARE.md -> Audio). Options weighed: A spoken commands
    on the Pi (offline), B conversation via an LLM, C both. The Pi can't run a useful LLM; **Groq is the chosen
    cloud option** (Marc, 10-26): free tier, Whisper speech-to-text + open LLMs, sub-second, already the
    news-reader fallback, and it works in the field over the phone hotspot. It sends voice/text off-site --
    Marc's explicit OK under the local-only rule. The workstation's local model is the at-home alternative.
-4. **Pi 5 V contact** (see above): reseat it (robot off), then read the alarm count after a boot and a drive.
+5. **Pi 5 V contact** (see above): reseat it (robot off), then read the alarm count after a boot and a drive.
    For good: solder one side of the connector (Marc's idea -- still separable).
-5. **ToF: striped blank verdicts while driving (OPEN, cause unknown).** On 2 of 3 stick-driven policy wall
+6. **ToF: striped blank verdicts while driving (OPEN, cause unknown).** On 2 of 3 stick-driven policy wall
    approaches (10-27 morning; that recording was trashed 10-29 with the other old-firmware data -- record afresh) whole columns of zones came back
    invalid, in stripes, even 1.4 m out, and near the wall the governor saw nothing and lifted the cap (commanded
    speed crept to 0.19 m/s against the wall). Ruled out: a range limit (stepping to the wall read all 64 zones
    to 1.9 cm), wall contact and bad sensor data (Marc watched), the governor's code (raw vs verdict match frame
    for frame). Not reproduced by a ptgt-driven 0.30 m/s drive. That run was at 5 Hz / 100 kHz I2C -- possibly
    related, unproven. Next: a stick-driven policy approach with `tof_raw_capture.py` + `tof_safety_capture.py`.
-6. **ToF follow-ups:** the policy does not stop for walls (wheels still ~0.25-0.29 m/s 12 cm out with the
+7. **ToF follow-ups:** the policy does not stop for walls (wheels still ~0.25-0.29 m/s 12 cm out with the
    commanded speed ~0.1; 11.2 / 9.6 / 0 cm = hit) -- not decided. Blind-hold (designed, not built): while the
    corridor returns almost nothing and the last obstacle was inside the slowdown zone, hold the last cap and
    show "blind".
-7. `/home/pi/riderlog.txt` is never rotated (321 MB on 10-21). Filter on the Pi; never copy it whole over WiFi.
-8. The controller low-battery cutoff (<= 15 %, unplugged) is untested.
+8. `/home/pi/riderlog.txt` is never rotated (321 MB on 10-21). Filter on the Pi; never copy it whole over WiFi.
+9. The controller low-battery cutoff (<= 15 %, unplugged) is untested.
 
 ## Do not trust
 

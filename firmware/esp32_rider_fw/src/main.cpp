@@ -15,7 +15,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
-#include <Preferences.h>       // NVS key/value store -- persists the controller choice (gCtrl)
+#include <Preferences.h>       // NVS key/value store -- persists the controller choice (gCtrl) and body roll (gRollMode)
 #include "rider_policy.h"   // auto-generated PPO policy weights (sim/export_policy.py)
 #ifndef POL_FRAME
 #define POL_FRAME 7                 // inputs per frame: 7, or 8 with the turn input (headers from 2026-10-20 define it)
@@ -303,7 +303,13 @@ static uint8_t gLegTurn=0;                           // alternate which leg gets
 // proportional, which stalls at a steady-state offset (the "doesn't reach level" we saw). So: integrate
 // the roll error into the leg differential, rate-limit the per-cycle step (keeps the leg loop below the
 // body's ~2Hz lateral resonance so it can't self-excite), and hard-clamp the accumulator to the authority.
-volatile bool  gLevelOn  = false;            // 'level 1/0' -- IMU-roll body leveling via differential legs
+#define ROLL_OFF  0                          // body roll ('level', telemetry lev): legs equal and fixed (height adjustable)
+#define ROLL_FLAT 1                          // the body held flat, turning or with one wheel higher (the accumulator)
+#define ROLL_LEAN 2                          // the body along gravity + the turn's pull: leans into turns (TURN LEAN)
+volatile int   gRollMode = ROLL_LEAN;        // 'level 0/1/2'. PERSISTED like the controller choice (NVS "rider", key
+                                             // "roll"; blank -> LEAN), but saved only while balancing is off: an NVS
+                                             // write stalls both cores, and the mode can change mid-balance (loop())
+static int     gRollSaved = -1;              // the mode as stored in NVS
 #define LEV_REF_HZ 165.0f                    // loop rate levki/levslew were tuned at; the step scales by dt*this
 volatile float gLevelKi  = 0.14f;            // integral gain: leg-counts accumulated per (deg of roll error) per cycle ('levki'). 0.14 bench-tuned 2026-06-25 (gyro-fused roll): holds level, reaches zero, no ring; 0.18/slew0.4 showed slight oscillation
 volatile float gLevelSet  = 0.0f;            // target body roll (deg); 0 = level ('levset')
@@ -312,11 +318,12 @@ volatile int   gLevelMax = 50;               // max |differential| authority (co
 volatile int   gLevelSign= -1;               // correction sign ('levsign'); -1 per geometry, flip if it tilts the wrong way
 static float   gLevCmd   = 0.0f;             // ACCUMULATOR: leg differential command (counts); integrates roll error to reach level
 static int     gLevAnchR=LEG_NONE, gLevAnchL=LEG_NONE; // leg height anchor, captured when the roll split starts
-// ---- TURN LEAN (2026-10-29). Roll level ON: the body stays FLAT -- turning, or one wheel higher than the other.
-// Roll level OFF: the body lines up with the PULL, gravity plus the turn's centripetal pull: straight or on a slope
+// ---- TURN LEAN (2026-10-29). Body roll FLAT: the body stays flat -- turning, or one wheel higher than the other.
+// LEAN: the body lines up with the PULL, gravity plus the turn's centripetal pull: straight or on a slope
 // that is upright; driving round a curve the pull tilts by atan(v w / g) (tPull, from the measured wheel speed and
 // gyro turn rate, IMU section) and the body's target roll is minus that -- leaning in. Both are the accumulator below
-// (closed loop on the true roll), which runs whenever balancing; only its target differs. Closed loop because the
+// (closed loop on the true roll), which runs whenever balancing (body roll OFF: not at all, the legs equal); only its
+// target differs. Closed loop because the
 // legs' roll per count is lopsided (tools/balance/lean_cpd.py, 10-29: +3 deg took 12 counts per leg, -3 deg about
 // 1 -- the servos' slack), so no feed-forward count works both ways. (First try, a feed-forward with an estimated
 // 5 counts/deg and an 8 deg cap: the body rolled ~2.5x the lean asked, the single-gyro pitch ran away -- tiltRates
@@ -1351,10 +1358,11 @@ static void balanceTask(void*){
         gLegHomeL = (gLegEnerL&&gLegTgtL!=LEG_NONE)?gLegTgtL:(legReadPos(LEFT_LEG,&hp)?hp:LEG_L_MID);
         gLegDestR = LEG_R_MID; gLegDestL = LEG_L_MID; gLegHoming = true;
       }
-      // balance OFF -> roll-level off, then equalize (remove differential, keep height) + hold. (Roll level
-      // off while balancing only changes the accumulator's target: flat -> along the pull.)
-      bool equalize = (!driving && drvPrev);
-      if(!driving && drvPrev) gLevelOn = false;
+      // balance OFF, or body roll switched to OFF while balancing -> equalize (remove the roll differential,
+      // keep height) + hold. (FLAT <-> LEAN only changes the accumulator's target.)
+      static int modePrev = ROLL_LEAN;
+      bool equalize = (!driving && drvPrev) || (driving && gRollMode == ROLL_OFF && modePrev != ROLL_OFF);
+      modePrev = gRollMode;
       if(equalize){
         int cr=(gLegTgtR!=LEG_NONE)?gLegTgtR:LEG_R_MID, cl=(gLegTgtL!=LEG_NONE)?gLegTgtL:LEG_L_MID;
         int diff=(cr+cl-LEG_EQUAL_SUM)/2;                         // the roll-differential component
@@ -1362,9 +1370,9 @@ static void balanceTask(void*){
       }
       drvPrev=driving;
 
-      // the roll accumulator (flat with roll level on, along the pull with it off) runs whenever balancing, once
+      // the roll accumulator (FLAT, or along the pull: LEAN) runs whenever balancing with body roll not OFF, once
       // homing is done; it starts from the legs as they stand
-      bool levRun = (!gLegHoming && driving);
+      bool levRun = (!gLegHoming && driving && gRollMode != ROLL_OFF);
       static bool levRunPrev=false;
       if(levRun && !levRunPrev){                                  // the split just started -> anchor at the (homed) pos
         if(gLegEnerR && gLegTgtR!=LEG_NONE) gLevAnchR=gLegTgtR; else if(legReadPos(RIGHT_LEG,&hp)) gLevAnchR=hp; else gLevAnchR=LEG_R_MID;
@@ -1403,9 +1411,9 @@ static void balanceTask(void*){
         // roll std ~0.06-0.5 deg). The Sept wheel-read fix raised the loop to ~234 Hz, so the same per-cycle
         // step integrated 42 % harder per second and leveling began rocking at ~1.2-1.5 Hz (std ~0.9 deg).
         // Scale the step by elapsed time so levki/levslew keep their 165 Hz meaning at ANY loop rate.
-        // The target: levset (a trim, 0) plus the TURN LEAN -- minus the pull with roll level off, rate-limited;
-        // with roll level on it slews back to 0 and the body is held flat.
-        float leanT = gLevelOn ? 0.0f : clampf(-gLeanGain * tPull, -LEAN_MAX_DEG, LEAN_MAX_DEG);
+        // The target: levset (a trim, 0) plus the TURN LEAN -- minus the pull in LEAN, rate-limited; in FLAT it
+        // slews back to 0 and the body is held flat.
+        float leanT = (gRollMode == ROLL_LEAN) ? clampf(-gLeanGain * tPull, -LEAN_MAX_DEG, LEAN_MAX_DEG) : 0.0f;
         tLean += clampf(leanT - tLean, -LEAN_SLEW_DPS * dt, LEAN_SLEW_DPS * dt);
         float levK = dt * LEV_REF_HZ;                               // = 1 at the tuned 165 Hz
         float inc = gLevelSign * gLevelKi * (tRoll - (gLevelSet + tLean)) * levK;   // integration step this cycle
@@ -1520,10 +1528,13 @@ static void balanceTask(void*){
 
 void setup(){
   Serial.begin(115200);
-  // restore the persisted controller choice before the control task starts (blank NVS -> POL)
+  // restore the persisted controller choice and body roll before the control task starts (blank NVS -> POL, LEAN)
   if(gPrefs.begin("rider", false)){
     uint8_t c = gPrefs.getUChar("ctrl", CTRL_POL);
     gCtrl = ctrlFrom(c);
+    uint8_t r = gPrefs.getUChar("roll", ROLL_LEAN);
+    gRollMode = (r <= ROLL_LEAN) ? r : ROLL_LEAN;
+    gRollSaved = r;
   }
   Serial1.begin(115200, SERIAL_8N1, 4, 5);   // UART1 -> Raspberry Pi (RX=IO4, TX=IO5)
   Serial2.begin(1000000, SERIAL_8N1, 13, 14);
@@ -1664,7 +1675,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"legstep"))  gLegStepReq += (int)v; // BOTH legs mirrored (body raise/lower); +extend / -retract; clamped, in-loop
   else if (!strcmp(s,"legR"))     gLegAbsR = (int)v;     // RIGHT leg -> absolute position (clamped); per-leg, for test + leveling
   else if (!strcmp(s,"legL"))     gLegAbsL = (int)v;     // LEFT  leg -> absolute position (clamped); per-leg, for test + leveling
-  else if (!strcmp(s,"level"))    gLevelOn = (v!=0);     // roll level: 1 = body held flat, 0 = along the pull (gravity + the turn: TURN LEAN)
+  else if (!strcmp(s,"level"))    gRollMode = (int)clampf(v, ROLL_OFF, ROLL_LEAN);  // body roll: 0 off (legs equal), 1 flat, 2 lean into turns
   else if (!strcmp(s,"levki"))    gLevelKi = v;          // leveling integral gain: leg counts accumulated per deg roll error per cycle
   else if (!strcmp(s,"levslew"))  gLevelSlew = v;        // leveling slew limit: max leg-counts change per control cycle
   else if (!strcmp(s,"levset"))   gLevelSet = v;         // leveling roll setpoint (deg); 0 = level
@@ -1729,6 +1740,7 @@ void loop(){
   static char b1[40]; static int n1=0;
   pump(Serial,  b0, n0);
   pump(Serial1, b1, n1);
+  if(!gEnabled && gRollMode != gRollSaved){ gPrefs.putUChar("roll", (uint8_t)gRollMode); gRollSaved = gRollMode; }  // persist body roll (balancing off)
   if(millis()-tp >= 50){   // telemetry @ ~20 Hz
     tp=millis();
     static float vbatF=0; static bool vbInit=false;
@@ -1740,7 +1752,7 @@ void loop(){
     char b[704];
     int k=snprintf(b,sizeof(b),
       "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f amax=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f pull=%.2f lean=%.2f gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u legstkL=%u legstkR=%u legst=%u rfL=%u rfR=%u rft0=%u rft1=%u ms=%u\n",
-      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gLqrAMax, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gLevelOn, tRollAcc, tPull, tLean, gTurn, gHdgTarget, gYawRateCmd,
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gLqrAMax, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gRollMode, tRollAcc, tPull, tLean, gTurn, gHdgTarget, gYawRateCmd,
       (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID), (unsigned)gDriveWdTrips, (unsigned)tLegRetryL, (unsigned)tLegRetryR, (unsigned)tLegFailL, (unsigned)tLegFailR, (unsigned)tLegStuckL, (unsigned)tLegStuckR, (unsigned)((gLegLimped?1:0)|(gLegHoming?2:0)|(gLegEnerR?4:0)|(gLegEnerL?8:0)), (unsigned)tRfL, (unsigned)tRfR, (unsigned)tRfFirstMs, (unsigned)tRfLastMs, (unsigned)millis());
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     emit(b,k);

@@ -67,6 +67,7 @@ pre { background: var(--panel); padding: 12px; border-radius: 6px; overflow-x: a
 .seg .btn:last-child { border-radius: 0 6px 6px 0; margin-left: -1px; }
 .seg .btn.active.pol { background: #35603a; border-color: var(--pol); color: #fff; }
 .seg .btn.active.lqr { background: #4a3f78; border-color: var(--lqr); color: #fff; }
+.seg .btn.active.roll { background: #1f4a66; border-color: var(--accent); color: #fff; }
 .hint { color: var(--dim); font-size: 12px; }
 input[type=range] { flex: 1; min-width: 140px; accent-color: var(--accent); }
 
@@ -97,3 +98,10 @@ input[type=range] { flex: 1; min-width: 140px; accent-color: var(--accent); }
 #depth3d { display: block; width: 100%; max-width: 520px; aspect-ratio: 4 / 3; background: #0d1020; border-radius: 6px;
            touch-action: none; cursor: move; }
 #depth3d.stale { opacity: .35; }
+.poserow { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px 18px; }
+.pullview { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+#bubble .ring { fill: none; stroke: var(--dim); stroke-width: 1; }
+#bubble .ring.outer { fill: var(--panel2); stroke-width: 2; }
+#bubble .cross { stroke: #5a6185; stroke-width: 1; }
+#bubble .fwd { fill: var(--dim); font-size: 9px; text-anchor: middle; }
+#bubble .bub { fill: var(--ok); fill-opacity: .75; stroke: var(--text); stroke-width: 1; }

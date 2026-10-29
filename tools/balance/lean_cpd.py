@@ -3,9 +3,9 @@
     python3 tools/balance/lean_cpd.py [--deg 3] [--hold 6]
     python3 tools/balance/lean_cpd.py --deg 15 --hold 8     # past the legs' reach: the roll at full authority
 
-The robot balancing in place on the floor (either controller), legs powered. Turns roll level on, holds the body at
-0, +deg, -deg, 0 (levset; the accumulator moves the legs until the fused roll gets there), then turns it off (the legs
-equalize). The roll split is the same count on both legs (legR + c, legL + c), so c = the change of (legR + legL) / 2;
+The robot balancing in place on the floor (either controller), legs powered. Sets body roll to stay flat ('level 1'),
+holds the body at 0, +deg, -deg, 0 (levset; the accumulator moves the legs until the fused roll gets there), then puts
+the body roll mode back as it was. The roll split is the same count on both legs (legR + c, legL + c), so c = the change of (legR + legL) / 2;
 counts per degree = the change of c over the change of roll, from the last half of each hold. Commands go through the
 Pi (rider/control/line, JSON); readings from its riderlog (rider/debug/telem, ~10 Hz).
 MEASURED 2026-10-29: +/-3 deg took +12 / -1 counts per leg from level (the servos' slack: no single feed-forward
@@ -55,14 +55,16 @@ def main():
     ap.add_argument("--deg", type=float, default=3.0)
     ap.add_argument("--hold", type=float, default=6.0)
     a = ap.parse_args()
-    if not (telem(3)[:, 3] == 1).all():
+    now = telem(3)
+    if not (now[:, 3] == 1).all():
         raise SystemExit("not balancing -- arm it first")
+    mode = int(now[-1, 4])                               # body roll before (0 off, 1 flat, 2 lean): put back after
     send("level 1")
     try:
         pts = [hold(t, a.hold) for t in (0.0, a.deg, -a.deg, 0.0)]
     finally:
         send("levset 0")
-        send("level 0")
+        send(f"level {mode}")
     roll, c = np.array(pts).T
     k, b = np.polyfit(roll, c, 1)
     print(f"\ncounts per degree of roll: {abs(k):.2f}  (c = {k:+.2f} x roll {b:+.1f}; "
