@@ -50,9 +50,13 @@ list, and what not to trust.
   pre-12:44 recordings trashed): `sim/lqr/plant_frf.py` puts the robot's plant at ~2x the model above 5 Hz with a
   resonance near 7-9 Hz (the 11 Hz closed-loop peak; probably the ~10 Hz ringing too). The rigid model cannot fit
   sweeps and drops together (each fit wants another inertia); the flexible body (`model_flex.py`) fits with
-  10.5 Hz but misses the peak in closed loop. **Next: fit the flexible model to the plant response
-  (plant_frf) + the drops**, then the cleanup (June LQR, FW_2026_10_19, margin_check, "LQR2" names, the servo
-  plant), then the RL sim's timing (paused). A clamped tap test was not recorded (my error); not needed now. (2) the
+  10.5 Hz but misses the peak in closed loop. **MEASURED 10-29 (legs clamped, legs powered, balancing off,
+  `*_leg_ringdown_clamped`, tools/balance/ring_down.py):** the body rings on its legs at ~5.3 Hz (4.7-6.1),
+  damping ratio ~0.1 -> flex_k ~2.1-2.4 N m/rad, flex_c ~0.011 (with model_flex's assumed legs split). In
+  closed loop it halves the gap at 11-14 Hz (robot / model 4.7 -> 2.8, phase -76 -> -41 deg). **Next: refit
+  motor, friction and inertia with that spring held** (fit_joint --flex, k/c fixed; check in closed loop),
+  then the cleanup (June LQR, FW_2026_10_19, margin_check, "LQR2" names, the servo plant), then the RL sim's
+  timing (paused). (2) the
   ~10 Hz ringing after a stop or
   drive, three times now (`*_hover_exact_watch` w18, `*_renamed_check` w15, `*_smooth_home` w12); (3) the balance
   point moved: 3.9-4.3 deg on the IMU in the last run against the 2.8 reference (2.9-3.0 earlier that evening, legs
