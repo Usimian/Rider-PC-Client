@@ -21,7 +21,7 @@ from dataclasses import replace
 import numpy as np
 from scipy.optimize import minimize
 
-from model import Params, encoder, step
+from model import Params, plant_module
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REC = os.path.join(HERE, "..", "..", "data", "captures", "2026-10-28_drop_tests.csv")
@@ -62,21 +62,25 @@ def falls(path):
 
 
 def simulate(p, f, dth0=0.0, dt=0.0005):
-    s = np.array([0.0, 0.0, f["th"][0] + dth0, f["w0"]])
+    """One fall: the IMU body's angle and the encoder from the release (the axle still), u = 0. model.py's rigid
+    robot, or model_flex.py's sprung body for its FlexParams."""
+    m = plant_module(p)
+    s = m.state(p, f["th"][0] + dth0, f["w0"])
     th, x = [], []
     t = 0.0
     for tk in f["t"]:
         while t < tk - 1e-9:
-            s = step(p, s, 0.0, dt)
+            s = m.step(p, s, 0.0, dt)
             t += dt
-        th.append(s[2])
-        x.append(encoder(p, s)[0])
+        th.append(s[m.BODY])
+        x.append(m.encoder(p, s)[0])
     return np.array(th), np.array(x)
 
 
-def cost(z, data, free_b, verbose=False):
-    """z: log ib_axle, [log b factor], then each fall's starting-angle correction (rad)."""
-    p = replace(Params(), ib_axle=np.exp(z[0]))
+def cost(z, data, free_b, verbose=False, base=None):
+    """z: log ib_axle, [log b factor], then each fall's starting-angle correction (rad). base: the rest of the
+    model (Params() by default; fit_joint.py passes the motor the sweeps give)."""
+    p = replace(base or Params(), ib_axle=np.exp(z[0])).off()      # balancing off: the wheels' torque off
     k = 1
     if free_b:
         p = replace(p, b=p.b * np.exp(z[1]), ku_over_b=p.ku_over_b / np.exp(z[1]))   # u = 0: only b acts

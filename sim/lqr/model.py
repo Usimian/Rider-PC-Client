@@ -30,7 +30,7 @@ rate with the axle held by hand).
 Parameters carry their provenance. Shared with the Hover = the same part, its value from the
 Hover's measurements and fits (docs/hover_params.md there), to be checked on the Rider.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -67,6 +67,11 @@ class Params:
     u0: float = 0.0            # dead zone in the drive, units (none, as on the Hover)
     fric: float = 5.29e-3      # N m, Coulomb friction per wheel (33 units)
     fric_w: float = 0.844      # rad/s, the friction rounded off (tanh) below this
+    # Torque off (balancing off: main.cpp writes the wheels' register 0x18 = 0): the wheels turn by hand but feel
+    # braked (Marc, 10-28) -- the driver's own load, not the drive at u = 0. off() gives the model in that state.
+    # ASSUMED the drive's damping and friction (what fit_drop.py took for the drops) until fitted (fit_joint.py).
+    b_off: float = 1.63e-3     # N m s/rad per wheel
+    fric_off: float = 5.29e-3  # N m per wheel
     cog20_rate: float = 0.30   # cogging per wheel at 20 and 24 per turn of the wheel against the body,
     cog24_rate: float = 0.23   # rad/s of speed ripple (torque = that x b), shared (Hover MEASURED in the air)
     cog_phase2: float = 1.3    # rad, wheel 2's offset against wheel 1, shared (ASSUMED)
@@ -86,6 +91,11 @@ class Params:
     @property
     def ku(self):  # torque per unit of command above the dead zone, one motor, N m
         return self.ku_over_b * self.b
+
+    def off(self):
+        """The robot with its wheels' torque off (balancing off): the driver's braking in place of the drive's
+        damping and friction; only meaningful at u = 0."""
+        return replace(self, b=self.b_off, fric=self.fric_off)
 
 
 def encoder(p: Params, s):
@@ -127,6 +137,12 @@ BODY = 2                                   # index of the IMU body's angle in s 
 
 def initial(th0):
     return np.array([0.0, 0.0, th0, 0.0])
+
+
+def state(p: Params, th, w, x=0.0, v=0.0):
+    """A state with the body at angle th, rate w and the axle at x, v (+ forward); works on arrays. model_flex.state
+    is the same for the sprung body, so the fits take either."""
+    return np.array([x + 0 * th, v + 0 * th, th, w])
 
 
 def accel_body(p: Params, s, u):

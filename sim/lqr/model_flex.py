@@ -62,8 +62,16 @@ def encoder(p, s):
     return s[0] - p.r * s[2], s[1] - p.r * s[3]
 
 
+def state(p, th, w, x=0.0, v=0.0):
+    """A state with the IMU body at angle th, rate w and the axle at x, v (+ forward); the legs aligned with the
+    body (the spring relaxed) -- only the body's angle is measured. Works on arrays (fit_sweep's windows)."""
+    return np.array([x + 0 * th, v + 0 * th, th, w, th, w])
+
+
 def accel3(p, s, u):
-    """(x'', thl'', thb'') for state s and command u."""
+    """(x'', thl'', thb'') for state s and command u. s may be (6, N) and u (N,): N cases at once.
+    The mass matrix [[a11, cl, cb], [cl, Il, 0], [cb, 0, Ib]] is solved by hand: the legs' and the body's rows give
+    their angular accelerations in terms of x'', which the first row then fixes."""
     x, v, thl, wl, thb, wb = s
     rel = v / p.r - wl
     phi = x / p.r - thl
@@ -73,13 +81,13 @@ def accel3(p, s, u):
     T = 2.0 * (p.ku * dead_zone(u, p.u0) - p.b * rel - p.fric * np.tanh(rel / p.fric_w)) + cog
     tau = p.flex_k * (thb - thl) + p.flex_c * (wb - wl)          # the spring's pull on the legs (minus on the body)
     ml, ll, mbd, lb = p.m_legs, p.l_legs, p.m_body, p.l_body
-    M = np.array([[p.mb + p.m_wheels + 2.0 * p.iw_one / p.r ** 2, ml * ll * np.cos(thl), mbd * lb * np.cos(thb)],
-                  [ml * ll * np.cos(thl), p.i_legs, 0.0],
-                  [mbd * lb * np.cos(thb), 0.0, p.i_body]])
-    rhs = np.array([T / p.r + ml * ll * np.sin(thl) * wl ** 2 + mbd * lb * np.sin(thb) * wb ** 2,
-                    ml * G * ll * np.sin(thl) - T + tau,
-                    mbd * G * lb * np.sin(thb) - tau])
-    return np.linalg.solve(M, rhs)
+    a11 = p.mb + p.m_wheels + 2.0 * p.iw_one / p.r ** 2
+    cl, cb = ml * ll * np.cos(thl), mbd * lb * np.cos(thb)
+    r1 = T / p.r + ml * ll * np.sin(thl) * wl ** 2 + mbd * lb * np.sin(thb) * wb ** 2
+    r2 = ml * G * ll * np.sin(thl) - T + tau
+    r3 = mbd * G * lb * np.sin(thb) - tau
+    xdd = (r1 - cl * r2 / p.i_legs - cb * r3 / p.i_body) / (a11 - cl ** 2 / p.i_legs - cb ** 2 / p.i_body)
+    return xdd, (r2 - cl * xdd) / p.i_legs, (r3 - cb * xdd) / p.i_body
 
 
 def accel_body(p, s, u):
@@ -89,8 +97,8 @@ def accel_body(p, s, u):
 
 
 def deriv(p, s, u):
-    a = accel3(p, s, u)
-    return np.array([s[1], a[0], s[3], a[1], s[5], a[2]])
+    xdd, tldd, tbdd = accel3(p, s, u)
+    return np.array([s[1], xdd, s[3], tldd, s[5], tbdd])
 
 
 def step(p, s, u, dt):

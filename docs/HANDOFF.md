@@ -107,6 +107,11 @@ list, and what not to trust.
 
 ## Open list, in order
 
+0. **Turning (Marc, 10-29):** (a) a distinct vibration while turning on the LQR (spinning round to line up; turning
+   is otherwise smooth) -- record a spin in place and a turn while driving (the firmware's turn controller and the
+   counter-rotating wheels are in no model yet); (b) with roll balancing on, lean into a turn by its radial
+   acceleration: roll target atan(v * yaw rate / g) into the turn (0.30 m/s at 1 rad/s: ~1.8 deg; none spinning
+   in place), the legs setting it instead of level.
 1. **First balance-on after a power-up** (the left leg used to lag): two clean power-ups since ModemManager was
    masked (no stray lines, both legs "ok" on the arrival check). Keep watching `legstkL/R`.
 2. Wheel read failures at power-up (469 / 496, then 0): read `rfL/rfR`, `rft0/rft1` after the next boot that has

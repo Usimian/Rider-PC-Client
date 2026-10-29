@@ -28,12 +28,13 @@ from dataclasses import replace
 import numpy as np
 from scipy.optimize import minimize
 
-from model import Params, encoder, step
+from model import Params, plant_module
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "..", "..", "data", "captures")
-FIT = ["2026-10-29_chirp_lqr_stand_10hz.csv", "2026-10-29_chirp_lqr_drive_fwd.csv"]
-CHECK = ["2026-10-29_chirp_lqr_stand_30hz.csv", "2026-10-29_chirp_lqr_drive_rev.csv"]
+FIT = ["2026-10-29_chirp_lqr_stand_10hz.csv", "2026-10-29_chirp_lqr_drive_fwd.csv",
+       "2026-10-29_chirp_lqr_drive_rev.csv"]
+CHECK = ["2026-10-29_chirp_lqr_stand_30hz.csv"]
 HORIZON = 6    # samples, ~60 ms
 EVERY = 2      # a window starts every 2nd sample
 SUB = 10       # model steps per sample
@@ -62,15 +63,18 @@ def windows(name):
 
 
 def predict(p, W, th_off):
+    """The model's change of the IMU body's angle and the encoder's travel over each window (model.py's rigid robot,
+    or model_flex.py's sprung body for its FlexParams)."""
+    m = plant_module(p)
     th = W["th"] - th_off
-    # the measured speed is the encoder's (v - r w); the axle's is v_enc + r w
-    s = np.vstack([p.r * th, W["v"] + p.r * W["w"], th, W["w"]])
-    th0 = s[2].copy()
+    # the measured speed is the encoder's (v - r w); the axle's is v_enc + r w; the encoder starts at 0 (x = r th)
+    s = m.state(p, th, W["w"], x=p.r * th, v=W["v"] + p.r * W["w"])
+    th0 = s[m.BODY].copy()
     for k in range(HORIZON):
         h = W["dt"][:, k] / SUB
         for _ in range(SUB):
-            s = step(p, s, W["u"][:, k], h)
-    return s[2] - th0, encoder(p, s)[0]
+            s = m.step(p, s, W["u"][:, k], h)
+    return s[m.BODY] - th0, m.encoder(p, s)[0]
 
 
 def score(p, th_off, sets):
