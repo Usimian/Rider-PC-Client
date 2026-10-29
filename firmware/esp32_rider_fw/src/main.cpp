@@ -234,7 +234,6 @@ volatile float tVest=0;             // velocity-observer estimate (vs raw wv) --
 volatile float tLqrInQ=0;           // pitch as the LQR sees it after the factory input filter ('lqrin')
 volatile float tRoll=0;                  // lateral tilt (deg), GYRO-FUSED (low-lag) -- feeds leg leveling
 volatile float tRollAcc=0;               // raw accel-only roll (deg), for verifying the fusion vs tRoll
-volatile float gRollGyroSign=-1.0f;      // roll gyro-fusion sign ('rollgsign'); -1 = bench-verified (fused tracks raw on a slow tilt, 2026-06-25)
 volatile float tVbat=0;                  // smoothed pack voltage (V), read from GPIO33 divider
 volatile float tYaw=0;                    // integrated heading (deg), gyro-Z only -> drifts slowly
 volatile float tTgtEff=0, tVdes=0;        // slewed pos target + profile velocity (driving diagnostics)
@@ -306,7 +305,22 @@ volatile float gLevelSlew = 0.30f;           // per-cycle rate limit on the accu
 volatile int   gLevelMax = 50;               // max |differential| authority (counts) ('levmax')
 volatile int   gLevelSign= -1;               // correction sign ('levsign'); -1 per geometry, flip if it tilts the wrong way
 static float   gLevCmd   = 0.0f;             // ACCUMULATOR: leg differential command (counts); integrates roll error to reach level
-static int     gLevAnchR=LEG_NONE, gLevAnchL=LEG_NONE; // leg height anchor captured when leveling is enabled
+static int     gLevAnchR=LEG_NONE, gLevAnchL=LEG_NONE; // leg height anchor, captured when the roll split starts
+// ---- TURN LEAN (2026-10-29). Roll level ON: the body stays FLAT -- turning, or one wheel higher than the other.
+// Roll level OFF: the body leans ALONG THE PULL, gravity plus the turn's centripetal pull: driving round a curve the
+// pull tilts by atan(v w / g) (tPull, from the measured wheel speed and gyro turn rate, IMU section) and the body's
+// roll is set to minus that -- leaning in -- as a feed-forward split on the legs (gLeanCpd counts per deg); no slope
+// correction. First try (10-29, gain 1, cpd 5, cap 8 deg): the circles turned 1.9 rad/s, not the stick's 1, so the
+// lean reached 7-8 deg, and the body rolled ~2.5x the lean asked (cpd nearer 2); with the body rolled the single-gyro
+// pitch ran away (tiltRates) and it fell. Held OFF (gain 0) until cpd is measured.
+volatile float gLeanGain = 0.0f;             // share of the full lean ('lean'; 0 = none, 1 = along the pull)
+volatile float gLeanCpd  = 5.0f;             // leg differential counts per deg of body roll ('leancpd'). ESTIMATED:
+                                             // the 10-21 incident's 10 deg of roll was ~50 counts; 10-29 says ~2
+#define LEAN_TAU_S     0.10f                 // smoothing of the pull (s)
+#define LEAN_SLEW_DPS  8.0f                  // the lean's rate limit (deg/s)
+#define LEAN_MAX_DEG   4.0f                  // the lean's limit (deg); full stick at 0.45 m/s is ~2.5-4.5
+volatile float tPull = 0.0f;                 // the pull's tilt (deg, roll's sign), telemetry 'pull'
+volatile float tLean = 0.0f;                 // the lean the legs are given (deg of roll), telemetry 'lean'
 // ---- leg state machine: balance-ON -> slew both legs to MID (slow); balance-OFF -> roll-level off +
 // equalize legs (remove the roll differential, keep height) and HOLD torqued; leveling-OFF while balancing
 // -> same equalize (return to neutral). 'Slowly' = a per-cycle slew on the leg command.
@@ -423,16 +437,36 @@ static void imuData(int16_t*ax,int16_t*ay,int16_t*az,int16_t*gx,int16_t*gy,int16
 
 // THE IMU LOOP (2026-10-28), like the Hover's imu_task (hover_board.cc: imu_read_once(); vTaskDelay(pdMS_TO_TICKS(2));
 // repeat): the only code that reads the IMU. Each sample is stored (imuLatest) and run through the LQR's IMU path, the
-// Hover's boards/common/imu.cc verbatim (lqrImuStep): the plain accelerometer angle (no lever correction), the rate
-// smoothed 0.6/0.4 per sample, the complementary filter with weight 1/(|rate|+200) per sample. Everything else
+// Hover's boards/common/imu.cc (lqrImuStep): the plain accelerometer angle (no lever correction), the rate
+// smoothed 0.6/0.4 per sample, the complementary filter with weight 1/(|rate|+200) per sample -- its one change, the
+// pitch rate from all three gyros (tiltRates, 2026-10-29: the Hover cannot roll, the Rider's legs can). Everything else
 // (the balance task's shared estimate theta/dqf, the gyro calibration) takes the latest sample. Pinned to core 0
 // (the Hover's is on its control core): on core 1 it would cut into the Rider's 2 ms-timeout servo reads.
+// THE TILT RATES (2026-10-29). Pitch and roll are the accelerometer's two tilt angles, pitch = atan(ay/az) and
+// roll = atan(ax/az) in the IMU chip's axes, so "down" in the chip's frame is g = (tan roll, tan pitch, 1). A body
+// turning at w (the three gyros, the chip's axes: right-handed, as the accelerometer's) sees a fixed "down" turn
+// as dg/dt = g x w; the angles' rates follow from that. Turning about the true vertical changes neither angle --
+// the turn's cross-talk drops out. A single gyro per angle (pitch from gx, roll from -gy: the same signs, the
+// roll's bench-found in June) is this with the body upright and not turning; turning, it was wrong by
+// tan(pitch) x turn rate in roll and ~tan(roll) x turn rate in pitch -- MEASURED 10-29: turning in place at 1 rad/s
+// the fused roll walked 3.5 deg/s; in a 1.9 rad/s circle with the body rolled ~5-9 deg (the turn lean) both pitch
+// estimates climbed 3.5 -> 17 deg in 2 s and the LQR, balancing on the wrong pitch, fell.
+static void tiltRates(float wx, float wy, float wz, float pitchDeg, float rollDeg, float* pitchRate, float* rollRate){
+  float X = tanf(fmaxf(-60.0f, fminf(60.0f, rollDeg)) * 0.0174533f);     // capped: lying down, tan would explode
+  float Y = tanf(fmaxf(-60.0f, fminf(60.0f, pitchDeg)) * 0.0174533f);
+  float dX = Y * wz - wy, dY = wx - X * wz, dZ = X * wy - Y * wx;         // dg/dt = g x w, g = (X, Y, 1)
+  *pitchRate = (dY - Y * dZ) / (1.0f + Y * Y);                            // d atan(Y)
+  *rollRate  = (dX - X * dZ) / (1.0f + X * X);                            // d atan(X)
+}
+
 static float lqrPitch = 0.0f, lqrRate = 0.0f;   // the LQR's pitch (deg) and smoothed rate (deg/s), firmware frame
 static uint32_t lqrImuUs = 0;
-static void lqrImuStep(int16_t ay, int16_t az, int16_t gx){
+static void lqrImuStep(int16_t ay, int16_t az, int16_t gx, int16_t gy, int16_t gz){
   uint32_t now = micros();
   float dts = (now - lqrImuUs) * 1e-6f;
-  float pit_gyro = (float)gx / GYRO_LSB_PER_DPS - gGyroBias;
+  float pit_gyro, roll_rate;                     // the pitch rate from all three gyros (roll: the balance task's)
+  tiltRates((float)gx / GYRO_LSB_PER_DPS - gGyroBias, (float)gy / GYRO_LSB_PER_DPS,
+            (float)gz / GYRO_LSB_PER_DPS - gYawBias, lqrPitch, tRoll, &pit_gyro, &roll_rate);
   float pit_acc = atanf((float)ay / (float)az) * 57.2958f;
   if(lqrImuUs == 0){ lqrPitch = pit_acc; lqrRate = pit_gyro; dts = 0.0f; }   // the first sample
   lqrImuUs = now;
@@ -448,7 +482,7 @@ static void imuTask(void*){
   for(;;){
     int16_t a[6]; imuData(&a[0],&a[1],&a[2],&a[3],&a[4],&a[5]);
     portENTER_CRITICAL(&gImuMux); memcpy(gImuLast, a, sizeof(a)); gImuN++; portEXIT_CRITICAL(&gImuMux);
-    lqrImuStep(a[1], a[2], a[3]);
+    lqrImuStep(a[1], a[2], a[3], a[4], a[5]);
     vTaskDelay(pdMS_TO_TICKS(2));
   }
 }
@@ -917,20 +951,32 @@ static void balanceTask(void*){
     float pit_acc  = atan2f(ayC, azC)*57.2958f;                // forward/vertical -> deg (lever-arm corrected)
     float pit_acc_raw = atan2f((float)ay,(float)az)*57.2958f;  // uncorrected, for verify-against-raw
     tPacc = pit_acc; tPraw = pit_acc_raw;                      // expose both for the lever-arm-comp test
-    // roll (side-to-side tilt): GYRO-FUSED, mirroring the pitch complementary filter above. Accel-only
+    // roll (side-to-side tilt): GYRO-FUSED, mirroring the pitch complementary filter below. Accel-only
     // + heavy LP lagged ~45ms (~30deg phase at 2Hz), which drove the leg-leveling loop into a ~2Hz
-    // limit cycle. gy = fore-aft (roll) gyro axis; its sign must match d(roll_acc)/dt or the fusion
-    // overshoots -- 'rollgsign' flips it (verify on the bench: fused tRoll should track racc, not diverge).
+    // limit cycle. Both angles' rates come from all three gyros (tiltRates: turning, a single gyro per angle
+    // reads the turn as tilt). The accelerometer's half: in a turn it feels the centripetal pull v x w on top of
+    // gravity, so racc tilts by atan(v w / g) (MEASURED sign 2026-10-29, tools/balance/turn_pull.py: + wheel speed
+    // x + turn rate -> racc +); removed before the fusion, so tRoll is the body's true roll in a turn too.
+    // racc (tRollAcc) stays the raw accelerometer roll.
+    float yaw_rate = (float)gz / GYRO_LSB_PER_DPS - gYawBias;       // deg/s, gz's sign (the heading below)
+    float turnDps = gYawFb * yaw_rate;                               // deg/s, + = a + 'turnrate' command
+    {
+      static float pullF = 0.0f;
+      float pull = atanf((wheel_vx / LQR_SPEED_PER_MPS) * turnDps * POL_DEG2RAD / 9.81f) * 57.2958f;
+      pullF += (pull - pullF) * fminf(1.0f, dt / LEAN_TAU_S);
+      tPull = pullF;
+    }
     float roll_acc  = atan2f((float)ax,(float)az)*57.2958f;          // absolute roll ref (accel, laggy/noisy)
-    float roll_gyro = ((float)gy/GYRO_LSB_PER_DPS) * gRollGyroSign;  // roll rate, deg/s
     static float rollC=0; static bool rollInit=false;
     if(!rollInit){ rollC=roll_acc; rollInit=true; }
+    float pit_gyro, roll_gyro;                                       // the tilt rates, deg/s (the previous angles)
+    tiltRates((float)gx/GYRO_LSB_PER_DPS - gGyroBias, (float)gy/GYRO_LSB_PER_DPS, yaw_rate, theta, rollC,
+              &pit_gyro, &roll_gyro);
     float roll_freq = 1.0f/(fabsf(roll_gyro) + 200.0f);             // rate-adaptive accel weight (mirror pitch)
     if(fabsf(roll_acc) < 100.0f && fabsf(roll_gyro) < 1000.0f)
-      rollC = roll_freq*roll_acc + (1.0f-roll_freq)*(rollC + roll_gyro*dt);
+      rollC = roll_freq*(roll_acc - tPull) + (1.0f-roll_freq)*(rollC + roll_gyro*dt);
     tRollAcc = roll_acc; tRoll = rollC;
     // yaw heading: integrate bias-corrected gyro-Z (drifts slowly; no magnetometer on ICM-42670)
-    float yaw_rate = (float)gz / GYRO_LSB_PER_DPS - gYawBias;
     if(fabsf(yaw_rate) > 0.5f){                                  // deadband suppresses idle bias creep
       float y = tYaw + yaw_rate*dt;
       while(y > 180.0f) y -= 360.0f; while(y < -180.0f) y += 360.0f;
@@ -959,7 +1005,6 @@ static void balanceTask(void*){
       gTurnF = gTurnLP*gTurnF + (1.0f-gTurnLP)*rawTurn;              // light low-pass smooths residual jitter
       gTurn = gTurnF;
     } else { gTurn = 0.0f; gTurnF = 0.0f; gHdgTarget = wheel1_x - wheel2_x; }  // disabled: keep target = current heading
-    float pit_gyro = (float)gx / GYRO_LSB_PER_DPS - gGyroBias;   // lateral rate, deg/s
     if(!primed){ theta=pit_acc; primed=true; }
     dqf = 0.6f*dqf + 0.4f*pit_gyro;                              // dq for control rate-damping
     float pit_freq = 1.0f/(fabsf(pit_gyro) + 200.0f);           // rate-adaptive accel weight
@@ -1311,12 +1356,14 @@ static void balanceTask(void*){
       }
       drvPrev=driving; levPrev=gLevelOn;
 
-      bool levRun = (!gLegHoming && gLevelOn);                    // leveling runs only once homing is done
+      // the roll split (the turn lean, + roll balancing's accumulator when on) runs whenever balancing, once homing
+      // is done; it starts from the legs as they stand
+      bool levRun = (!gLegHoming && driving);
       static bool levRunPrev=false;
-      if(levRun && !levRunPrev){                                  // leveling just started -> anchor at the (homed) pos
+      if(levRun && !levRunPrev){                                  // the split just started -> anchor at the (homed) pos
         if(gLegEnerR && gLegTgtR!=LEG_NONE) gLevAnchR=gLegTgtR; else if(legReadPos(RIGHT_LEG,&hp)) gLevAnchR=hp; else gLevAnchR=LEG_R_MID;
         if(gLegEnerL && gLegTgtL!=LEG_NONE) gLevAnchL=gLegTgtL; else if(legReadPos(LEFT_LEG,&hp)) gLevAnchL=hp; else gLevAnchL=LEG_L_MID;
-        gLevCmd = 0.0f;
+        gLevCmd = 0.0f; tLean = 0.0f;
       }
       levRunPrev=levRun;
       {                                                           // smooth height: integrate 'legrate' into 1-count steps
@@ -1350,16 +1397,25 @@ static void balanceTask(void*){
         // roll std ~0.06-0.5 deg). The Sept wheel-read fix raised the loop to ~234 Hz, so the same per-cycle
         // step integrated 42 % harder per second and leveling began rocking at ~1.2-1.5 Hz (std ~0.9 deg).
         // Scale the step by elapsed time so levki/levslew keep their 165 Hz meaning at ANY loop rate.
-        float levK = dt * LEV_REF_HZ;                               // = 1 at the tuned 165 Hz
-        float inc = gLevelSign * gLevelKi * (tRoll - gLevelSet) * levK;   // integration step this cycle
-        float slewC = gLevelSlew * levK;
-        if(inc >  slewC) inc =  slewC; else if(inc < -slewC) inc = -slewC;
-        gLevCmd += inc;
-        if(gLevCmd >  (float)gLevelMax) gLevCmd =  (float)gLevelMax; else if(gLevCmd < -(float)gLevelMax) gLevCmd = -(float)gLevelMax;
+        // TURN LEAN (roll level off): the body's target roll is minus the pull, rate-limited; the legs get it as
+        // feed-forward counts. The accumulator raises roll (-sign) per count, so L deg needs -sign * cpd * L counts.
+        // Roll level on: the lean slews back to 0 and the accumulator holds the body flat.
+        float leanT = gLevelOn ? 0.0f : clampf(-gLeanGain * tPull, -LEAN_MAX_DEG, LEAN_MAX_DEG);
+        tLean += clampf(leanT - tLean, -LEAN_SLEW_DPS * dt, LEAN_SLEW_DPS * dt);
+        float leanC = -(float)gLevelSign * gLeanCpd * tLean;
+        if(gLevelOn){                                               // roll level: integrate toward levset (flat)
+          float levK = dt * LEV_REF_HZ;                             // = 1 at the tuned 165 Hz
+          float inc = gLevelSign * gLevelKi * (tRoll - gLevelSet) * levK;   // integration step this cycle
+          float slewC = gLevelSlew * levK;
+          if(inc >  slewC) inc =  slewC; else if(inc < -slewC) inc = -slewC;
+          gLevCmd += inc;
+          if(gLevCmd >  (float)gLevelMax) gLevCmd =  (float)gLevelMax; else if(gLevCmd < -(float)gLevelMax) gLevCmd = -(float)gLevelMax;
+        } else gLevCmd = 0.0f;
+        float cmd = clampf(gLevCmd + leanC, -(float)gLevelMax, (float)gLevelMax);
         // RESOLUTION: split the tilt between the legs at single-leg-count granularity. The old code put
         // the same +c on BOTH legs -> roll could only step in 2s. t = total tilt (counts); even t splits
         // evenly, odd t puts the extra count on ONE leg -> a tiny roll correction moves a single leg.
-        int t = (int)lroundf(2.0f * gLevCmd);
+        int t = (int)lroundf(2.0f * cmd);
         int cR = t / 2, cL = t - cR;                             // |t|==1 -> one leg moves, the other holds
         int desR=gLevAnchR+cR, desL=gLevAnchL+cL;                // desired (pre-clamp) per-leg goals
         int tR=desR; if(tR<LEG_R_MIN) tR=LEG_R_MIN; else if(tR>LEG_R_MAX) tR=LEG_R_MAX;
@@ -1612,7 +1668,8 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"levset"))   gLevelSet = v;         // leveling roll setpoint (deg); 0 = level
   else if (!strcmp(s,"levmax"))   gLevelMax = (int)v;    // leveling max |differential| authority (counts)
   else if (!strcmp(s,"levsign"))  gLevelSign = (v<0)?-1:1; // leveling correction sign (flip if it tilts the wrong way)
-  else if (!strcmp(s,"rollgsign")) gRollGyroSign = (v<0)?-1.0f:1.0f; // roll gyro-fusion sign (flip if fused roll diverges)
+  else if (!strcmp(s,"lean"))     gLeanGain = v;         // turn lean: share of the lean along the pull (0 = none, 1 = full)
+  else if (!strcmp(s,"leancpd"))  gLeanCpd = v;          // turn lean: leg differential counts per deg of body roll
   else if (!strcmp(s,"leghomeslew")) gLegHomeSlew = v;   // leg home/equalize slew (counts/cycle) = how 'slowly' the legs move on balance on/off
   else if (!strcmp(s,"legrate"))  { gLegRate = clampf(v,-200.0f,200.0f); gLegRateMs = millis(); }  // height rate (counts/s, + up); heartbeat
   else if (!strcmp(s,"leghome"))  gLegHomeReq = true;    // legs -> ride height (MID), slow slew; ignored while limp
@@ -1680,8 +1737,8 @@ void loop(){
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
     char b[704];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f amax=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u legstkL=%u legstkR=%u legst=%u rfL=%u rfR=%u rft0=%u rft1=%u ms=%u\n",
-      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gLqrAMax, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gLevelOn, tRollAcc, gTurn, gHdgTarget, gYawRateCmd,
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f amax=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f pull=%.2f lean=%.2f gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u legstkL=%u legstkR=%u legst=%u rfL=%u rfR=%u rft0=%u rft1=%u ms=%u\n",
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gLqrAMax, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gLevelOn, tRollAcc, tPull, tLean, gTurn, gHdgTarget, gYawRateCmd,
       (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID), (unsigned)gDriveWdTrips, (unsigned)tLegRetryL, (unsigned)tLegRetryR, (unsigned)tLegFailL, (unsigned)tLegFailR, (unsigned)tLegStuckL, (unsigned)tLegStuckR, (unsigned)((gLegLimped?1:0)|(gLegHoming?2:0)|(gLegEnerR?4:0)|(gLegEnerL?8:0)), (unsigned)tRfL, (unsigned)tRfR, (unsigned)tRfFirstMs, (unsigned)tRfLastMs, (unsigned)millis());
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     emit(b,k);
