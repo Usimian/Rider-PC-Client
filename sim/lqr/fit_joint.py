@@ -2,6 +2,7 @@
 
     python3 sim/lqr/fit_joint.py           # model.py's rigid robot
     python3 sim/lqr/fit_joint.py --flex    # model_flex.py's body sprung on its legs (+ flex_k, flex_c)
+    python3 sim/lqr/fit_joint.py --flex-k 2.8 --flex-c 0.015   # the sprung body, its spring held at these
 
 The sweeps alone trade inertia against motor strength, the drop tests alone (balancing off: the wheels' torque off,
 model.Params.off()) inertia against the braking; each pins what the other cannot. One cost, both at once:
@@ -23,10 +24,16 @@ import fit_sweep as FS
 from model import Params
 from model_flex import FlexParams
 
-FLEX = "--flex" in sys.argv
-MOTOR = ["b", "fric", "fric_w", "ku_over_b", "b_off", "fric_off"] + (["flex_k", "flex_c"] if FLEX else [])  # log scale
+def _arg(name):
+    return float(sys.argv[sys.argv.index(name) + 1]) if name in sys.argv else None
+
+
+HELD = dict(flex_k=_arg("--flex-k"), flex_c=_arg("--flex-c"))     # a measured spring (tools/balance/ring_down.py)
+FLEX = "--flex" in sys.argv or HELD["flex_k"] is not None
+MOTOR = ["b", "fric", "fric_w", "ku_over_b", "b_off", "fric_off"] + \
+        ([n for n in ("flex_k", "flex_c") if HELD[n] is None] if FLEX else [])   # all on a log scale
 N = 1 + len(MOTOR)                                                  # then th_off, then each drop's start
-FLEX_START = dict(flex_k=10.0, flex_c=0.02)   # the body alone on its legs ringing ~11 Hz, as the 1-30 Hz sweep shows
+FLEX_START = {n: (HELD[n] if HELD[n] is not None else v) for n, v in dict(flex_k=10.0, flex_c=0.02).items()}
 
 
 def unpack(z, n_drops, base):
