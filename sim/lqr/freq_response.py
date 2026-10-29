@@ -1,8 +1,7 @@
 """The frequency sweep, robot against model (the Hover's sim/freq_response.py, for the Rider's chirp captures).
 
-    python3 sim/lqr/freq_response.py                          # both standing LQR sweeps (10-19, 10-28)
-    python3 sim/lqr/freq_response.py 2026-10-28_chirp_lqr.csv:2.82
-    python3 sim/lqr/freq_response.py 2026-10-28_chirp_lqr_30hz.csv:2.8:30:1:30:20   # file:up:amp:f0:f1:secs
+    python3 sim/lqr/freq_response.py                 # the four sweeps of 2026-10-29 (SWEEPS)
+    python3 sim/lqr/freq_response.py stand_30hz drive  # those whose file name contains any of these
 
 The robot recording: tools/capture/chirp_capture.py (the firmware's 'chirp' added to the balance output,
 before the stiction boost... no: after it, at the wheel command; main.cpp adds it to uout). The model
@@ -22,13 +21,18 @@ import sys
 
 import numpy as np
 
-from closed_loop import Firmware, run
-from fw_timing import FW_2026_10_19          # the sweeps (10-19, 10-20, 10-28 morning) ran on that firmware
+from closed_loop import flashed, run
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "..", "..", "data", "captures")
-DEFAULT = ["2026-10-19_chirp_lqr.csv", "2026-10-28_chirp_lqr.csv"]
-SWEEP = (60.0, 1.0, 10.0, 20.0)
+# The sweeps on the firmware the robot runs now (2026-10-29, the LQR, on the floor; tools/capture/chirp_capture.py):
+# (file, (amplitude, f0, f1, seconds), the stick's speed m/s while it ran). The standing one first: its mean pitch
+# is the balance point the model uses for all.
+SWEEPS = [("2026-10-29_chirp_lqr_stand_10hz.csv", (60.0, 1.0, 10.0, 20.0), 0.0),
+          ("2026-10-29_chirp_lqr_stand_30hz.csv", (30.0, 1.0, 30.0, 20.0), 0.0),
+          ("2026-10-29_chirp_lqr_drive_fwd.csv", (60.0, 1.0, 10.0, 10.0), 0.30),
+          ("2026-10-29_chirp_lqr_drive_rev.csv", (60.0, 1.0, 10.0, 10.0), -0.30)]
+SWEEP_AT = 4.0                                # the model's sweep starts here (driving: steady by then)
 def bands_for(f0, f1):
     """1/3-octave band edges from f0 to f1."""
     n = int(np.floor(3 * np.log2(f1 / f0)))
@@ -66,16 +70,22 @@ def bands(r, edges=None):
     return out
 
 
+def model_rows(sweep, v, up):
+    """The flashed LQR on the model at the robot's timing: standing, or driving at v m/s (the stick from 0.5 s), the
+    sweep from SWEEP_AT on."""
+    drive = (np.array([0.0, 0.5]), np.array([0.0, v])) if v else None
+    return run(fw=flashed(up_deg=up), T=SWEEP_AT + sweep[3] + 1.0, sweep=sweep, sweep_at=SWEEP_AT, drive=drive)
+
+
 def main():
-    args = sys.argv[1:] or DEFAULT
-    for a in args:
-        name, *rest = a.split(":")
+    picked = [s for s in SWEEPS if not sys.argv[1:] or any(a in s[0] for a in sys.argv[1:])]
+    up = float(load(os.path.join(DATA, SWEEPS[0][0]))["th"].mean())      # the balance point: the standing sweep's
+    for name, sweep, v in picked:
         robot = load(os.path.join(DATA, name))
-        up = float(rest[0]) if rest and rest[0] else float(robot["th"].mean())
-        sweep = tuple(float(v) for v in rest[1:5]) if len(rest) >= 5 else SWEEP
         edges = bands_for(sweep[1], sweep[2])
-        rows, fell = run(fw=Firmware(up_deg=up), T=sweep[3] + 4.0, sweep=sweep, sweep_at=3.0, timing=FW_2026_10_19)
-        print(f"\n{name} (balance point {up:.2f} deg, sweep {sweep}){'  -- MODEL FELL' if fell else ''}")
+        rows, fell = model_rows(sweep, v, up)
+        print(f"\n{name} (balance point {up:.2f} deg, sweep {sweep}, stick {v:+.2f} m/s)"
+              f"{'  -- MODEL FELL' if fell else ''}")
         rb, mb = bands(robot, edges), bands(from_rows(rows), edges)
         for q in ("pitch", "wheel", "reply"):
             print(f"  {q}/inj    band     robot             model             ratio  coh robot/model")

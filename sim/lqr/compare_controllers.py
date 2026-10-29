@@ -16,7 +16,7 @@ from dataclasses import replace
 import numpy as np
 
 from closed_loop import Firmware, run
-from drive_design import LQR2, feedforward
+from closed_loop import flashed
 from model import Params
 
 UP = 2.8
@@ -56,9 +56,7 @@ def main():
     p = Params()
     p2 = replace(p, ku_over_b=2 * p.ku_over_b)
     ctrls = [("June LQR (removed 10-28)", lambda: Firmware(up_deg=UP))]
-    plan = dict(feedforward(p), a_max=0.6, t_jerk=0.12, gain=8.0)   # as flashed (10-28; the Hover's 1.0)
-    ctrls.append(("LQR (as flashed: the Hover's, a_max 0.6)", lambda: Firmware(k=LQR2, up_deg=UP, fric_comp=True, plan=plan,
-                                                                     hover_imu=True, tau_v=0.100)))
+    ctrls.append(("LQR (as flashed)", lambda: flashed(up_deg=UP)))
     print(f"{'controller':44s} {'standing: pitch sd  wheel sd  cmd sd':38s} {'push: lean  travel  1-2 s after':31s} "
           f"{'motors x2: lean  travel  1-2 s after'}")
     for lab, mk in ctrls:

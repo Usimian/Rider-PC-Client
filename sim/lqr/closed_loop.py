@@ -31,7 +31,7 @@ cycle: inj, cmdL, cmdR, wx_01mm, th_x100, rate_x10), so freq_response.py treats 
 """
 import numpy as np
 
-from fw_timing import FW_NOW_LQR
+from fw_timing import FW_NOW_LQR, IMU_LOOP_PERIOD_S
 from model import G, Params, plant_module
 
 SUB_S = 0.00025          # physics step (fw_timing's periods and moments are whole steps of it)
@@ -51,24 +51,28 @@ FRIC_UNITS, FRIC_WIDTH, FRIC_TAU = 32.5, 20.0, 0.030
 # VREF x vdes, its command feedforward CMD_FF x vdes.
 VMAX, POS_AMAX, POS_DMAX = 0.45, 0.4, 0.8
 VREF, CMD_FF = 270.0, 360.0
-L2_SPEED = 327.6 * 0.828                         # LQR2's scaled units per m/s (271, main.cpp L2_SPEED_PER_MPS)
+L2_SPEED = 327.6 * 4.5 * 60.0 * np.pi / 1024.0   # the LQR's scaled units per m/s (271.4, main.cpp LQR_SPEED_PER_MPS)
 # The Hover's plan (robot.cc kPlan*): the lead limit and the plan's own position integral (command units)
 PLAN_MAX_LEAD_M, PLAN_KI, PLAN_IMAX = 0.15, 100.0, 100.0
 HOME_K, HOME_VMAX = 2.0, 0.15                     # main.cpp LQR_HOME_*: the held home's gentle return (Marc, 10-28)
 # The Hover's IMU path (its boards/common/imu.cc, run per ~2.5 ms sample), for LQR2 verbatim (hover_sample()).
 HOVER_DQ_TAU = -0.0025 / np.log(0.6)             # 4.9 ms, the Hover's rate smoothing in time (for reference)
-# The IMU loop (main.cpp imuTask, since 10-28 12:44, like the Hover's imu_task: read, then vTaskDelay 2 ticks): a
-# sample every HOVER_IMU_PERIOD_S on its own clock; the LQR's Hover path takes it per sample, the balance loop the
-# latest one. ASSUMED 2.36 ms: vTaskDelay(2) of 1 ms ticks waits 1-2 ticks, so the real period is likely 1.4-2.4 ms;
-# no telemetry reports it yet.
-IMU_READ_S = 0.00036                              # 12 bytes at 400 kHz I2C
-HOVER_IMU_PERIOD_S = 0.002 + IMU_READ_S           # the Hover: "read every ~2-3 ms"
-LQR2_UP_DEG = 2.8                                 # LQR2's pitch reference (gL2Up): the measured balance point
+# The IMU loop's period (fw_timing.IMU_LOOP_PERIOD_S, ASSUMED there): the LQR's Hover path takes each sample, the
+# balance loop the latest one.
+HOVER_IMU_PERIOD_S = IMU_LOOP_PERIOD_S
 LP_VEL = 0.85
 SPEED_COUNTS = 327.6     # speed register counts per m/s
-SCALED_PER_COUNT = 0.828 # 4.5 x K_V
+SCALED_PER_COUNT = 4.5 * 60.0 * np.pi / 1024.0   # main.cpp 4.5 x K_V (K_V = 60 pi / 1024): 0.82835
 POS_STEP = np.pi * 0.06 / 1024
 R_WHEEL = 0.030
+
+# The LQR as flashed (main.cpp, 250fffc, 2026-10-28), its one copy here: the gains (gLqrX / Vx / Q / Dq), the pitch
+# reference (gLqrUp), the speed smoothing (gLqrVTau), the friction compensation, the Hover IMU path, and the drive
+# plan with the constants as compiled (gLqrAMax, LQR_PLAN_TJERK / GAIN, LQR_PLAN_LEAN_PER_ACC / U_PER_SPEED /
+# U_PER_ACC -- drive_design.feedforward derived them; the firmware keeps the rounded values).
+FLASHED_K = dict(x=-1916.0, xi=0.0, vx=-7.46, q=59.4, dq=1.39)
+FLASHED_UP_DEG = 2.8      # gLqrUp: the pitch reference (the balance point measured 10-28; the robot's own varies)
+FLASHED_PLAN = dict(a_max=0.6, t_jerk=0.12, gain=8.0, th_v=0.0, th_a=np.radians(10.68), u_v=333.0, u_a=58.0)
 
 
 class Firmware:
@@ -78,7 +82,7 @@ class Firmware:
         speed register + r*rate before its smoothing a_v (per cycle; today LP_VEL 0.85). plan: drive by the
         Hover's plan (drive_design.py: a_max, t_jerk, gain, th_v, th_a, u_v, u_a) instead of the LQR's drive
         handling; it implies corrected readings and uses its own integral (k['xi'] unused). hover_imu: the law
-        reads the Hover's IMU path (theta2, dq2: hover_sample(), twice a cycle) against LQR2_UP_DEG and corrects
+        reads the Hover's IMU path (theta2, dq2: hover_sample(), per IMU-loop sample) against FLASHED_UP_DEG and corrects
         the speed with its smoothed rate, as the Hover's robot.cc does; the shared estimate (theta, dqf, against
         SET_DEG) is what the other controllers read."""
         self.k = dict(K_TODAY if k is None else k)
@@ -173,7 +177,7 @@ class Firmware:
         """One cycle of the balance law; stick = the drive command (m/s, the firmware's gDriveVel)."""
         k = self.k
         v = self.raw_v
-        pitch = (self.theta2 - LQR2_UP_DEG) if self.hover_imu else (self.theta - SET_DEG)
+        pitch = (self.theta2 - FLASHED_UP_DEG) if self.hover_imu else (self.theta - SET_DEG)
         self.dq_law = self.dq2 if self.hover_imu else self.dqf
         if self.corrected:                       # firmware frame: forward lean makes pitch and rate negative
             rr = self.dq2 if self.hover_imu else self.rate   # the Hover corrects with its smoothed rate
@@ -246,6 +250,14 @@ def drive_ramp(v, tgt, dt):
     if braking and ((v > 0 and n < 0) or (v < 0 and n > 0)):
         n = 0.0
     return n
+
+
+def flashed(up_deg=FLASHED_UP_DEG, a_max=None, **kw):
+    """The firmware's LQR as flashed (FLASHED_*). up_deg: the robot's, not the firmware's -- what its IMU reads with
+    the centre of mass over the axle (a recording's mean pitch; 2.8 on 10-28, 3.9-4.3 later); a_max: a live
+    'lqramax' in place of the compiled one; kw: Firmware's sensor options (rng, gyro_noise, acc_noise)."""
+    plan = dict(FLASHED_PLAN, **({} if a_max is None else dict(a_max=a_max)))
+    return Firmware(k=FLASHED_K, up_deg=up_deg, fric_comp=True, plan=plan, hover_imu=True, tau_v=0.100, **kw)
 
 
 def chirp(t, a, f0, f1, dur):

@@ -23,11 +23,9 @@ import numpy as np
 
 import closed_loop as CL
 import linear_model as L
-from closed_loop import U_MAX, Firmware, run
+from closed_loop import FLASHED_K, U_MAX, Firmware, run
 from model import Params
 
-LQR2 = dict(x=-1916.0, xi=0.0, vx=-7.46, q=59.4, dq=1.39)      # main.cpp gLqr* (named LQR2 until 2026-10-28; its own
-                                                                # plan integral, not xi)
 UP = 2.8
 
 
@@ -79,7 +77,7 @@ def main():
     for am in a.a_max:                                  # LQR2 as main.cpp has it: the Hover's IMU path, law and plan
         plan = dict(ff, a_max=am, t_jerk=a.t_jerk, gain=a.gain)
         ctrls.append((f"LQR, Hover plan {am:g} m/s^2",
-                      lambda plan=plan: Firmware(k=LQR2, up_deg=UP, fric_comp=True, plan=plan, hover_imu=True,
+                      lambda plan=plan: Firmware(k=FLASHED_K, up_deg=UP, fric_comp=True, plan=plan, hover_imu=True,
                                                  tau_v=0.100)))
     for motor in a.motors:
         p = replace(p0, ku_over_b=p0.ku_over_b * motor)

@@ -19,10 +19,8 @@ from rider_params import DEFAULT
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lqr"))
 import closed_loop as CL                                             # noqa: E402  (sim/lqr, numpy only)
-from drive_design import LQR2, feedforward                           # noqa: E402
 
-A_MAX = 0.6                                  # main.cpp gLqrAMax (2026-10-28)
-# the loop's timing: closed_loop.run's default, fw_timing.FW_NOW_LQR (each cycle's period drawn from the robot's)
+# the controller: closed_loop.flashed(); the loop's timing: closed_loop.run's default, fw_timing.FW_NOW_LQR
 
 
 class MujocoPlant:
@@ -65,19 +63,14 @@ class MujocoPlant:
         self.d.qvel[self.dw] -= dw                                   # ground unchanged (model.py's kick)
 
 
-def firmware():
-    p = CL.Params()
-    plan = dict(feedforward(p), a_max=A_MAX, t_jerk=0.12, gain=8.0)
-    return CL.Firmware(k=LQR2, up_deg=2.8, fric_comp=True, plan=plan, hover_imu=True, tau_v=0.100)
-
-
-def scenario(plant_name, kind, gain=1.0):
-    """One run: returns the per-cycle log (t, stick, u, axle speed, lean deg + forward) and whether it fell."""
+def scenario(plant_name, kind, gain=1.0, a_max=None):
+    """One run: returns the per-cycle log (t, stick, u, axle speed, lean deg + forward) and whether it fell.
+    a_max: a live 'lqramax' in place of the flashed one."""
     th0 = 0.0
     plant = MujocoPlant(th0, gain) if plant_name == "mujoco" else None
     if plant is None and gain != 1.0:
         plant = CL.ModelPlant(replace(CL.Params(), ku_over_b=CL.Params().ku_over_b * gain), th0)
-    kw = dict(fw=firmware(), th0_deg=0.0, log_all=True, plant=plant)
+    kw = dict(fw=CL.flashed(a_max=a_max), th0_deg=0.0, log_all=True, plant=plant)
     if kind == "stand":
         return CL.run(T=8.0, **kw)
     if kind == "push":
@@ -113,7 +106,6 @@ def measures(kind, L):
 
 
 def main():
-    global A_MAX
     kinds = ["stand", "push", "start 0.30", "start 0.45", "reversal 0.30", "reversal 0.45"]
     for gain in (1.0, 0.85):
         print(f"\n== motor {gain:.2f}x, timing: {CL.FW_NOW_LQR.name}")
@@ -123,15 +115,15 @@ def main():
                 print(f"  {kind:14s} {plant:6s}: " + ("FELL" if fell else measures(kind, np.array(L))))
     # the floor's LQR fall (2026-10-28 evening): top speed 0.6, a_max 1.0, a low battery -- "at maximum speed, it
     # just falls". A faithful plant falls there too, out of motor (the command at +/-400)
-    A_MAX, vmax = 1.0, CL.VMAX
-    CL.VMAX = 0.6
+    vmax = CL.VMAX
+    CL.VMAX = 0.6                                                    # the firmware's speed cap then
     print("\n== the floor's fall case: top speed 0.6 m/s, a_max 1.0, full stick from standing (MuJoCo plant)")
     for gain in (1.0, 0.85, 0.75):
-        L, fell = scenario("mujoco", "start 0.60", gain)
+        L, fell = scenario("mujoco", "start 0.60", gain, a_max=1.0)
         L = np.array(L)
         print(f"  motor {gain:.2f}x: " + (f"FELL at {L[-1, 0] - 1.0:.2f} s after the stick" if fell
                                          else measures("start 0.60", L)) + f", command up to {np.abs(L[:, 2]).max():.0f}")
-    A_MAX, CL.VMAX = 0.6, vmax
+    CL.VMAX = vmax
 
 
 if __name__ == "__main__":

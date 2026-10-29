@@ -13,6 +13,13 @@ from dataclasses import dataclass
 import numpy as np
 
 
+# The IMU loop (main.cpp imuTask, since 10-28 12:44, like the Hover's imu_task: read, then vTaskDelay 2 ticks): a
+# sample every IMU_LOOP_PERIOD_S on its own clock. ASSUMED 2.36 ms (the 0.36 ms read + 2 ms): vTaskDelay(2) of 1 ms
+# ticks waits 1-2 ticks, so the real period is likely 1.4-2.4 ms; no telemetry reports it yet.
+IMU_READ_S = 0.00036                              # 12 bytes at 400 kHz I2C
+IMU_LOOP_PERIOD_S = 0.002 + IMU_READ_S
+
+
 @dataclass(frozen=True)
 class Timing:
     name: str
