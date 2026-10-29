@@ -10,7 +10,9 @@ The robot must already be BALANCING (the firmware refuses otherwise). Hands off 
 --on-drive: wait until the robot drives steadily at a PARTIAL stick (0.08-0.25 m/s), then sweep -- the wheels
 then stay clear of their dead zone, separating the wheel's own response from its behaviour near standstill.
 --full (with --on-drive): wait for FULL stick (>= 0.28 m/s) instead -- easy to hold steady against the end-stop.
-Run (workstation):  /usr/bin/python3 tools/capture/chirp_capture.py out.csv [amp f0 f1 secs] [--on-drive [--full]]
+Run (workstation):  /usr/bin/python3 tools/capture/chirp_capture.py out.csv [amp f0 f1 secs] [--on-drive --dir fwd|rev
+                    [--full]]
+After saving, it prints the robot's speed through the sweep and says DRIVE NOT HELD if a driving sweep lost its drive.
 The broker comes from gui/rider_config.ini, as for tools/diag/mqtt_monitor.py.
 """
 import sys, os, time, json, configparser
@@ -21,7 +23,12 @@ _ini.read(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "
 BROKER = _ini.get("mqtt", "broker_host", fallback="localhost")
 ON_DRIVE = "--on-drive" in sys.argv   # wait for a steady partial-stick drive, then sweep (wheels clear of the dead zone)
 FULL = "--full" in sys.argv           # with --on-drive: wait for FULL stick instead (easier to hold steady)
-_args = [a for a in sys.argv[1:] if not a.startswith("--")]
+# --dir fwd|rev (with --on-drive, required): only a drive that way starts the sweep (2026-10-29: a direction-blind
+# trigger let a forward line-up drive start the backward sweep, which then ran mostly after the drive)
+DIR = {"fwd": 1.0, "rev": -1.0}[sys.argv[sys.argv.index("--dir") + 1]] if "--dir" in sys.argv else None
+if ON_DRIVE and DIR is None:
+    sys.exit("--on-drive needs --dir fwd or --dir rev")
+_args = [a for a in sys.argv[1:] if not a.startswith("--") and a not in ("fwd", "rev")]
 OUT = _args[0] if _args else "chirp.csv"
 AMP, F0, F1, SECS = ([float(x) for x in _args[1:5]] + [60.0, 1.0, 10.0, 20.0][len(_args[1:5]):])
 COLS = ["i", "t_us", "inj", "cmdL", "cmdR", "vL", "vR", "wx_01mm", "th_x100", "rate_x10"]
@@ -45,7 +52,8 @@ def on_message(c, u, m):
             st["vdes"] = float(d.get("vdes", 0))
         except ValueError:
             st["vdes"] = 0.0
-        steady = (abs(st["vdes"]) >= 0.28) if FULL else (0.08 <= abs(st["vdes"]) <= 0.25)   # full / partial stick
+        v = st["vdes"] * (DIR or 1.0)                     # + = the asked-for direction
+        steady = (v >= 0.28) if FULL else (0.08 <= v <= 0.25)   # full / partial stick, that way
         st["drive_since"] = (st["drive_since"] or time.time()) if steady else None
     elif pl.startswith("# dcapc done"):
         st["done"] = True
@@ -91,3 +99,18 @@ with open(OUT, "w") as f:
     for r in st["rows"]:
         f.write("%s,%s\n" % (st["ctrl"], r))
 print("%d samples -> %s%s" % (len(st["rows"]), OUT, "" if st["done"] else "  (INCOMPLETE: no 'done' line)"), flush=True)
+# the recording's own check: the robot's speed through the sweep (both wheels' registers), per 2 s. A driving sweep
+# must hold its drive the whole way, or the wheels' response mixes with a stop.
+if st["rows"]:
+    a = [[float(x) for x in r.split(",")] for r in st["rows"]]
+    t = [(r[COLS.index("t_us")] - a[0][COLS.index("t_us")]) * 1e-6 for r in a]
+    v = [(r[COLS.index("vL")] - r[COLS.index("vR")]) / 2 / 327.6 for r in a]
+    parts = []
+    for k in range(0, int(t[-1]) + 1, 2):
+        vs = [vv for tt, vv in zip(t, v) if k <= tt < k + 2]
+        if vs:
+            parts.append(sum(vs) / len(vs))
+    print("speed through the sweep, per 2 s: " + "  ".join("%+.2f" % p for p in parts) + " m/s", flush=True)
+    if ON_DRIVE and min(p * DIR for p in parts) < 0.2:
+        print("DRIVE NOT HELD: the robot slowed below 0.2 m/s during the sweep -- this recording is not a driving "
+              "sweep; record it again", flush=True)
