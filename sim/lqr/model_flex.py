@@ -2,8 +2,9 @@
 
 2026-10-29: the spring MEASURED (legs clamped, the body tapped: ~5.9 Hz, below). On the four 10-29 sweeps with the
 flashed LQR it brings the 9-14 Hz response closer to the robot's than the rigid model does (with no dead zone the
-robot answers 2.3-2.8x the model there, rigid 3.2-4.7x); with model.py's 10-unit dead zone both sit 3.7-7.8x low
-there on the small +/-30 sweep -- the near-standstill behaviour is not yet a pure dead zone. Not the default plant.
+robot answers 2.3-2.8x the model there, rigid 3.2-4.7x; both before the 4.1 ms actuator delay, fw_timing.py). A
+10-unit dead zone left both 3.7-7.8x low on the small +/-30 sweep and made the LQR chatter standing: removed from
+model.py. Not the default plant.
 
 Why: a 1-30 Hz sweep on the floor (data/captures/2026-10-28_chirp_lqr_30hz.csv, freq_response.py) shows the robot
 answering 1.3x the rigid model at 9 Hz rising to ~4x at 23 Hz with a steeply growing lag -- a lightly damped
