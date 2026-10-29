@@ -91,7 +91,11 @@ class DcMotor:
 
     def command(self, action: float):
         """The policy's action (policy units, + forward) -> the firmware's wheel command, delayed and clamped."""
-        self._queue.append(float(np.clip(action * POL_RAW_PER_ACTION, -U_MAX, U_MAX)))
+        return self.command_units(action * POL_RAW_PER_ACTION)
+
+    def command_units(self, u: float):
+        """A wheel command already in the firmware's units (the LQR's output), delayed and clamped."""
+        self._queue.append(float(np.clip(u, -U_MAX, U_MAX)))
         self.u = self._queue.pop(0)
         return self.u
 

@@ -25,7 +25,6 @@ part acts over ~1 s); the position integral is left out (slow).
 from dataclasses import replace
 
 import numpy as np
-from scipy.linalg import expm
 
 from closed_loop import COMMAND_S, CYCLE_S, K_TODAY, READ_S
 from model import Params, plant_module
@@ -53,7 +52,8 @@ def continuous(p=None):
 
 def flow(A, B, t):
     """Phi(t), Gamma(t): s(t) = Phi s(0) + Gamma u for u held over [0, t]."""
-    n = A.shape[0]
+    from scipy.linalg import expm          # here, not at the top: the RL sim's venv (no scipy) imports this module
+    n = A.shape[0]                         # for continuous() only (sim/lqr_in_rl_sim.py, 2026-10-29)
     M = np.zeros((n + 1, n + 1))
     M[:n, :n], M[:n, n:] = A, B
     E = expm(M * t)

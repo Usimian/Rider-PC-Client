@@ -255,20 +255,42 @@ def chirp(t, a, f0, f1, dur):
     return a * env * np.sin(ph)
 
 
-def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5, kick=None, drive=None, log_all=False):
+class ModelPlant:
+    """run()'s default plant: model.py (or model_flex.py) integrated by RK4 at SUB_S. Another plant (the RL sim's
+    MuJoCo one, sim/lqr_in_rl_sim.py) offers the same: p, s (axle x, v, then the IMU body's angle and rate at B, B + 1;
+    what read_wheels reads), accel_body(u), step(u, dt), kick(rad/s)."""
+
+    def __init__(self, p, th0):
+        self.p, self.m = p, plant_module(p)
+        self.B = self.m.BODY
+        self.s = self.m.initial(th0)
+
+    def accel_body(self, u):
+        return self.m.accel_body(self.p, self.s, u)
+
+    def step(self, u, dt):
+        self.s = self.m.step(self.p, self.s, u, dt)
+
+    def kick(self, dw):
+        self.s[self.B + 1] += dw
+
+
+def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5, kick=None, drive=None, log_all=False,
+        plant=None, cycle_s=CYCLE_S):
     """Simulate T s standing; sweep = (a, f0, f1, dur) starts at sweep_at. Returns the recorded rows (every 2nd
     cycle, as the robot's capture) and whether it fell. kick = (t, deg/s): a shove, the body's pitch rate
     changed at once (+ forward). drive = (times s, m/s): the stick's speed command, held between the times.
-    log_all: return every cycle (t, stick, u, axle speed m/s, body lean deg + forward) instead of the capture rows."""
+    log_all: return every cycle (t, stick, u, axle speed m/s, body lean deg + forward) instead of the capture rows.
+    plant: the plant (ModelPlant(p) by default, see there); cycle_s: the firmware's loop period (a whole number of
+    SUB_S steps; the robot runs ~242 Hz since the single IMU loop, 2026-10-28)."""
     p = p or Params()
     fw = fw or Firmware()
-    m = plant_module(p)
-    B = m.BODY
-    s = m.initial(np.radians(th0_deg))
+    plant = plant or ModelPlant(p, np.radians(th0_deg))
+    B = plant.B
     u = 0.0
     rows = []
     hov = getattr(fw, "hover_imu", False)
-    cyc, rd, cm = CYCLE_S, READ_S, COMMAND_S
+    cyc, rd, cm = cycle_s, READ_S, COMMAND_S
     n_sub = int(round(cyc / SUB_S))
     i_read, i_cmd = int(round(rd / SUB_S)), int(round(cm / SUB_S))
     i_wheels = 0
@@ -281,19 +303,21 @@ def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5, kick=None
             j = np.searchsorted(drive[0], t, side="right") - 1
             stick = float(drive[1][j]) if j >= 0 else 0.0
         if kick and abs(t - kick[0]) < cyc / 2:
-            s[B + 1] += np.radians(kick[1])
+            plant.kick(np.radians(kick[1]))
         for k in range(n_sub):
+            s = plant.s
             if hov and t + k * SUB_S >= next_hover:   # the IMU task's sample, on its own clock
-                fw.hover_sample(s[B], s[B + 1], m.accel_body(p, s, u), HOVER_IMU_PERIOD_S)
+                fw.hover_sample(s[B], s[B + 1], plant.accel_body(u), HOVER_IMU_PERIOD_S)
                 next_hover += HOVER_IMU_PERIOD_S
             if k == i_wheels:
-                fw.read_wheels(p, s)
+                fw.read_wheels(plant.p, s)
             if k == i_read:
-                fw.read_imu(s[B], s[B + 1], m.accel_body(p, s, u), cyc)
+                fw.read_imu(s[B], s[B + 1], plant.accel_body(u), cyc)
             if k == i_cmd:
                 u_fw = fw.control(cyc, stick)
                 u = u_fw + inj
-            s = m.step(p, s, u, SUB_S)
+            plant.step(u, SUB_S)
+        s = plant.s
         if abs(s[B]) > np.radians(45):
             return np.array(rows), True
         if log_all:
