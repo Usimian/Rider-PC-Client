@@ -45,7 +45,14 @@ list, and what not to trust.
   it on 5/5 seeds (decisive start, no overshoot, no falls at 85/80 % motor) but stop at 17-25 cm and spin
   2x worse. **Marc's call 10-29: use the LQR instead** -- step 1 done (`db72937`, `sim/lqr_in_rl_sim.py`: the
   flashed LQR on the RL sim's plant agrees with sim/lqr everywhere, and with the floor's overshoot and its
-  0.6 m/s low-battery fall); step 2 proposed: a residual policy (LQR + a small learned correction). (2) the
+  0.6 m/s low-battery fall); step 2 proposed: a residual policy (LQR + a small learned correction). **10-29:
+  the model is wrong above ~3 Hz** (sweeps re-recorded on today's LQR, `*_10-29_chirp_lqr_*`; old ones and all
+  pre-12:44 recordings trashed): `sim/lqr/plant_frf.py` puts the robot's plant at ~2x the model above 5 Hz with a
+  resonance near 7-9 Hz (the 11 Hz closed-loop peak; probably the ~10 Hz ringing too). The rigid model cannot fit
+  sweeps and drops together (each fit wants another inertia); the flexible body (`model_flex.py`) fits with
+  10.5 Hz but misses the peak in closed loop. **Next: fit the flexible model to the plant response
+  (plant_frf) + the drops**, then the cleanup (June LQR, FW_2026_10_19, margin_check, "LQR2" names, the servo
+  plant), then the RL sim's timing (paused). A clamped tap test was not recorded (my error); not needed now. (2) the
   ~10 Hz ringing after a stop or
   drive, three times now (`*_hover_exact_watch` w18, `*_renamed_check` w15, `*_smooth_home` w12); (3) the balance
   point moved: 3.9-4.3 deg on the IMU in the last run against the 2.8 reference (2.9-3.0 earlier that evening, legs
