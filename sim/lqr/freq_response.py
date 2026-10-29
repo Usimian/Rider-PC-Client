@@ -23,6 +23,7 @@ import sys
 import numpy as np
 
 from closed_loop import Firmware, run
+from fw_timing import FW_2026_10_19          # the sweeps (10-19, 10-20, 10-28 morning) ran on that firmware
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "..", "..", "data", "captures")
@@ -73,7 +74,7 @@ def main():
         up = float(rest[0]) if rest and rest[0] else float(robot["th"].mean())
         sweep = tuple(float(v) for v in rest[1:5]) if len(rest) >= 5 else SWEEP
         edges = bands_for(sweep[1], sweep[2])
-        rows, fell = run(fw=Firmware(up_deg=up), T=sweep[3] + 4.0, sweep=sweep, sweep_at=3.0)
+        rows, fell = run(fw=Firmware(up_deg=up), T=sweep[3] + 4.0, sweep=sweep, sweep_at=3.0, timing=FW_2026_10_19)
         print(f"\n{name} (balance point {up:.2f} deg, sweep {sweep}){'  -- MODEL FELL' if fell else ''}")
         rb, mb = bands(robot, edges), bands(from_rows(rows), edges)
         for q in ("pitch", "wheel", "reply"):

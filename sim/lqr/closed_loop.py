@@ -3,11 +3,13 @@ the Rider's firmware: firmware/esp32_rider_fw/src/main.cpp, 2026-10-28).
 
     python3 sim/lqr/closed_loop.py               # 5 s standing: the model's sway
 
-What is copied, per control cycle (CYCLE_S, the loop at ~200 Hz while balancing):
-  * wheels read first (both, ~READ_S): the encoder position (1024 counts a turn: x - r th, the wheel against
+What is copied, per control cycle (its period and the moments inside it: fw_timing.py, per firmware version --
+FW_NOW_LQR by default, the robot as it runs now; replays of old recordings name the timing they ran under):
+  * wheels read first (at timing.wheels_s): the encoder position (1024 counts a turn: x - r th, the wheel against
     the body), the servo's speed register (327.6 counts per m/s, the same wheel-against-body speed),
     each speed smoothed LP_VEL 0.85 per cycle, x 0.828 into 'scaled' units (main.cpp odomUpdate)
-  * then the IMU: the accelerometer IMU_H above the axle sees gravity plus its own acceleration; the
+  * then the IMU (at timing.imu_s; with timing.imu_loop the IMU loop's latest sample, taken on its own clock): the
+    accelerometer IMU_H above the axle sees gravity plus its own acceleration; the
     firmware takes off 60 mm of lever arm (imucomp -0.5 x KIMU's 120 mm: ay -= c*alpha_f, az += c*w^2,
     alpha_f the gyro's per-cycle derivative smoothed 0.8/0.2); pit_acc = atan2(ay, az); the pitch is
     the complementary filter, accelerometer weight 1/(|rate| + 200) per cycle; dqf = 0.6 dqf + 0.4 rate.
@@ -16,8 +18,9 @@ What is copied, per control cycle (CYCLE_S, the loop at ~200 Hz while balancing)
   * the LQR (gCtrl 1, standing): pitch = theta - 3.55 (gSetpoint), x = wheel_x - home, its integral
     (x 1 s, clamped +/-3), v = the smoothed speed (observer off, input filter off):
       u = -(-500 x - 30 Ix - 6 v + 32 pitch + 3 dqf); |u| > 20 gets 10 more; clipped +/-400
-  * the command goes out COMMAND_S into the cycle (wheel reads + IMU + compute) and holds until the next;
-    the firmware's sweep ('chirp': f0 -> f1 log over dur, 0.5 s fades) is added to it
+  * the command goes out at timing.command_s (wheel reads + IMU + compute + write) and holds until the next;
+    the firmware's sweep ('chirp': f0 -> f1 log over dur, 0.5 s fades) is added to it; the law's dt is the
+    period the firmware measures at the cycle's start (the previous cycle's)
 Sensor noise MEASURED 2026-10-28 lying still (drop_tests.csv): gyro ~0.06 deg/s (its resolution),
 accelerometer angle 0.10-0.15 deg.
 
@@ -28,12 +31,10 @@ cycle: inj, cmdL, cmdR, wx_01mm, th_x100, rate_x10), so freq_response.py treats 
 """
 import numpy as np
 
+from fw_timing import FW_NOW_LQR
 from model import G, Params, plant_module
 
-CYCLE_S = 0.005          # 200 Hz (telemetry lhz 201 balancing, 10-28)
-READ_S = 0.0025          # wheel reads before the IMU (both wheels; rdms worst 2.9 ms)
-COMMAND_S = 0.0027       # + the compute
-SUB_S = 0.00025          # physics step
+SUB_S = 0.00025          # physics step (fw_timing's periods and moments are whole steps of it)
 IMU_H = 0.098            # m, IMU above the axle (Marc's ruler 100, imu_position_fit 96-98)
 COMP_M = -0.5 * 0.12     # firmware lever-arm correction, m (imucomp x KIMU)
 SET_DEG = 3.55           # gSetpoint
@@ -56,8 +57,10 @@ PLAN_MAX_LEAD_M, PLAN_KI, PLAN_IMAX = 0.15, 100.0, 100.0
 HOME_K, HOME_VMAX = 2.0, 0.15                     # main.cpp LQR_HOME_*: the held home's gentle return (Marc, 10-28)
 # The Hover's IMU path (its boards/common/imu.cc, run per ~2.5 ms sample), for LQR2 verbatim (hover_sample()).
 HOVER_DQ_TAU = -0.0025 / np.log(0.6)             # 4.9 ms, the Hover's rate smoothing in time (for reference)
-# LQR2's IMU path runs in its own task like the Hover's imu_task (main.cpp imuTask: read, then vTaskDelay 2 ms): a
-# sample every HOVER_IMU_PERIOD_S on its own clock; the law takes the latest. The balance cycle is unchanged.
+# The IMU loop (main.cpp imuTask, since 10-28 12:44, like the Hover's imu_task: read, then vTaskDelay 2 ticks): a
+# sample every HOVER_IMU_PERIOD_S on its own clock; the LQR's Hover path takes it per sample, the balance loop the
+# latest one. ASSUMED 2.36 ms: vTaskDelay(2) of 1 ms ticks waits 1-2 ticks, so the real period is likely 1.4-2.4 ms;
+# no telemetry reports it yet.
 IMU_READ_S = 0.00036                              # 12 bytes at 400 kHz I2C
 HOVER_IMU_PERIOD_S = 0.002 + IMU_READ_S           # the Hover: "read every ~2-3 ms"
 LQR2_UP_DEG = 2.8                                 # LQR2's pitch reference (gL2Up): the measured balance point
@@ -276,28 +279,39 @@ class ModelPlant:
 
 
 def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5, kick=None, drive=None, log_all=False,
-        plant=None, cycle_s=CYCLE_S):
+        plant=None, timing=FW_NOW_LQR, seed=0):
     """Simulate T s standing; sweep = (a, f0, f1, dur) starts at sweep_at. Returns the recorded rows (every 2nd
     cycle, as the robot's capture) and whether it fell. kick = (t, deg/s): a shove, the body's pitch rate
     changed at once (+ forward). drive = (times s, m/s): the stick's speed command, held between the times.
     log_all: return every cycle (t, stick, u, axle speed m/s, body lean deg + forward) instead of the capture rows.
-    plant: the plant (ModelPlant(p) by default, see there); cycle_s: the firmware's loop period (a whole number of
-    SUB_S steps; the robot runs ~242 Hz since the single IMU loop, 2026-10-28)."""
+    plant: the plant (ModelPlant(p) by default, see there). timing: the firmware's (fw_timing.py; the robot as it is
+    now by default -- a replay of an old recording names its own); seed: the draw of each cycle's period."""
     p = p or Params()
     fw = fw or Firmware()
     plant = plant or ModelPlant(p, np.radians(th0_deg))
+    rng = np.random.default_rng(seed)
     B = plant.B
     u = 0.0
     rows = []
     hov = getattr(fw, "hover_imu", False)
-    cyc, rd, cm = cycle_s, READ_S, COMMAND_S
-    n_sub = int(round(cyc / SUB_S))
-    i_read, i_cmd = int(round(rd / SUB_S)), int(round(cm / SUB_S))
-    i_wheels = 0
+    imu_clock = hov or timing.imu_loop                  # samples on the IMU loop's own clock
+    i_wheels, i_read, i_cmd = (int(round(x / SUB_S)) for x in (timing.wheels_s, timing.imu_s, timing.command_s))
+    fixed = len(timing.periods_s) == 1
     next_hover = 0.0
-    for c in range(int(T / cyc)):
-        t = c * cyc
-        inj = chirp(t + READ_S - sweep_at, *sweep) if sweep else 0.0
+    last_imu = None                                     # the IMU loop's latest sample (body angle, rate, accelerations)
+    t, c = 0.0, 0
+    prev = timing.period(rng)                           # the period the firmware measures at a cycle's start
+    n_fixed = int(T / timing.periods_s[0]) if fixed else None   # (a fixed period: as before 10-29, exactly)
+    while True:
+        cyc = timing.period(rng)
+        if fixed:
+            if c >= n_fixed:
+                break
+            t = c * cyc
+        elif t + cyc > T + 1e-9:
+            break
+        n_sub = int(round(cyc / SUB_S))
+        inj = chirp(t + timing.imu_s - sweep_at, *sweep) if sweep else 0.0
         stick = 0.0
         if drive is not None:
             j = np.searchsorted(drive[0], t, side="right") - 1
@@ -306,15 +320,20 @@ def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5, kick=None
             plant.kick(np.radians(kick[1]))
         for k in range(n_sub):
             s = plant.s
-            if hov and t + k * SUB_S >= next_hover:   # the IMU task's sample, on its own clock
-                fw.hover_sample(s[B], s[B + 1], plant.accel_body(u), HOVER_IMU_PERIOD_S)
+            if imu_clock and t + k * SUB_S >= next_hover:   # the IMU loop's sample, on its own clock
+                last_imu = (s[B], s[B + 1], plant.accel_body(u))
+                if hov:
+                    fw.hover_sample(*last_imu, HOVER_IMU_PERIOD_S)
                 next_hover += HOVER_IMU_PERIOD_S
             if k == i_wheels:
                 fw.read_wheels(plant.p, s)
             if k == i_read:
-                fw.read_imu(s[B], s[B + 1], plant.accel_body(u), cyc)
+                if timing.imu_loop:
+                    fw.read_imu(*last_imu, prev)
+                else:
+                    fw.read_imu(s[B], s[B + 1], plant.accel_body(u), prev)
             if k == i_cmd:
-                u_fw = fw.control(cyc, stick)
+                u_fw = fw.control(prev, stick)
                 u = u_fw + inj
             plant.step(u, SUB_S)
         s = plant.s
@@ -324,6 +343,10 @@ def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5, kick=None
             rows.append((t, stick, u, s[1], np.degrees(s[B])))
         elif c % 2 == 0:
             rows.append((t * 1e6, inj, u, -u, fw.wheel_x * 1e4, fw.theta * 100, np.degrees(fw.om_prev) * 10))
+        prev = cyc
+        c += 1
+        if not fixed:
+            t += cyc
     return np.array(rows), False
 
 

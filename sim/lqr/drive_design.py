@@ -23,7 +23,7 @@ import numpy as np
 
 import closed_loop as CL
 import linear_model as L
-from closed_loop import CYCLE_S, U_MAX, Firmware, run
+from closed_loop import U_MAX, Firmware, run
 from model import Params
 
 LQR2 = dict(x=-1916.0, xi=0.0, vx=-7.46, q=59.4, dq=1.39)      # main.cpp gLqr* (named LQR2 until 2026-10-28; its own

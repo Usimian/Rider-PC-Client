@@ -15,7 +15,7 @@ from dataclasses import replace
 
 import numpy as np
 
-from closed_loop import CYCLE_S, Firmware, run
+from closed_loop import Firmware, run
 from drive_design import LQR2, feedforward
 from model import Params
 

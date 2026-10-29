@@ -22,7 +22,7 @@ import closed_loop as CL                                             # noqa: E40
 from drive_design import LQR2, feedforward                           # noqa: E402
 
 A_MAX = 0.6                                  # main.cpp gLqrAMax (2026-10-28)
-LOOP_HZ = 242.0                              # the robot's loop since the single IMU loop (telemetry lhz 239-244)
+# the loop's timing: closed_loop.run's default, fw_timing.FW_NOW_LQR (each cycle's period drawn from the robot's)
 
 
 class MujocoPlant:
@@ -71,14 +71,13 @@ def firmware():
     return CL.Firmware(k=LQR2, up_deg=2.8, fric_comp=True, plan=plan, hover_imu=True, tau_v=0.100)
 
 
-def scenario(plant_name, kind, gain=1.0, hz=LOOP_HZ):
+def scenario(plant_name, kind, gain=1.0):
     """One run: returns the per-cycle log (t, stick, u, axle speed, lean deg + forward) and whether it fell."""
     th0 = 0.0
     plant = MujocoPlant(th0, gain) if plant_name == "mujoco" else None
     if plant is None and gain != 1.0:
         plant = CL.ModelPlant(replace(CL.Params(), ku_over_b=CL.Params().ku_over_b * gain), th0)
-    cyc = round(1.0 / hz / CL.SUB_S) * CL.SUB_S
-    kw = dict(fw=firmware(), th0_deg=0.0, log_all=True, plant=plant, cycle_s=cyc)
+    kw = dict(fw=firmware(), th0_deg=0.0, log_all=True, plant=plant)
     if kind == "stand":
         return CL.run(T=8.0, **kw)
     if kind == "push":
@@ -117,7 +116,7 @@ def main():
     global A_MAX
     kinds = ["stand", "push", "start 0.30", "start 0.45", "reversal 0.30", "reversal 0.45"]
     for gain in (1.0, 0.85):
-        print(f"\n== motor {gain:.2f}x, loop {LOOP_HZ:.0f} Hz")
+        print(f"\n== motor {gain:.2f}x, timing: {CL.FW_NOW_LQR.name}")
         for kind in kinds:
             for plant in ("model", "mujoco"):
                 L, fell = scenario(plant, kind, gain)

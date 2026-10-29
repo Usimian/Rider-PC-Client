@@ -4,9 +4,11 @@ for the Rider's firmware timing).
     python3 sim/lqr/linear_model.py        # today's gains on it: modes, frequency, damping
 
 model.accel is linearised numerically about rest with friction and cogging left out (friction gets its own
-compensation, as on the Hover). Discretised over one control cycle T (closed_loop.CYCLE_S) with the
-firmware's timing inside it: the wheels are read at the start, the IMU at TI (closed_loop.READ_S), and the
-new command goes out at TAU (closed_loop.COMMAND_S) -- until then the wheels still run the previous one.
+compensation, as on the Hover). Discretised over one control cycle T with the firmware's timing inside it
+(fw_timing.py; the robot as it runs now by default, FW_NOW_LQR, its mean period): the wheels are read at TW,
+the IMU at TI, and the new command goes out at TAU -- until then the wheels still run the previous one. With the
+IMU loop (since 10-28 12:44) the reading is that loop's latest sample, on average half its period older than the
+moment the balance loop takes it.
 
 State, at the start of cycle k:  z = (x, v, th, w, u_prev, vf_prev, dqf_prev)
   x, v, th, w   the axle and the body (model.py), u_prev the command running since the last cycle,
@@ -26,10 +28,17 @@ from dataclasses import replace
 
 import numpy as np
 
-from closed_loop import COMMAND_S, CYCLE_S, K_TODAY, READ_S
+from closed_loop import HOVER_IMU_PERIOD_S, K_TODAY
+from fw_timing import FW_NOW_LQR
 from model import Params, plant_module
 
-T, TI, TAU = CYCLE_S, READ_S, COMMAND_S
+def times(timing):
+    """(T, TW, TI, TAU) of a fw_timing.Timing: the mean period, and when the wheels, the IMU and the command act."""
+    age = HOVER_IMU_PERIOD_S / 2 if timing.imu_loop else 0.0      # the IMU loop's sample, on average
+    return timing.mean_period_s, timing.wheels_s, timing.imu_s - age, timing.command_s
+
+
+T, TW, TI, TAU = times(FW_NOW_LQR)
 SPEED_UNITS = 327.6 * 0.828        # firmware 'scaled' speed units per m/s (271)
 A_V_TODAY = 0.85
 A_Q = 0.6
@@ -66,19 +75,21 @@ def weighted(p=None):
     return [0, 1, B, B + 1]
 
 
-def plant(p=None, a_v=A_V_TODAY, corrected=True, motor=1.0, a_q=A_Q, v_corr_by_dqf=False, lqr2=False):
+def plant(p=None, a_v=A_V_TODAY, corrected=True, motor=1.0, a_q=A_Q, v_corr_by_dqf=False, lqr2=False, timing=None):
     """Az, Bz (z_{k+1} = Az z_k + Bz u_k) and C (y_k = C z_k); z = (s, u_prev, vf_prev, dqf_prev).
     a_q: the rate smoothing per cycle (A_Q: the firmware's shared 0.6).
     v_corr_by_dqf: correct the speed with the smoothed rate (the Hover's robot.cc) instead of the raw one.
     lqr2: LQR2's IMU path, the Hover's 0.6/0.4 rate smoothing on the IMU task's samples, ~2 a cycle (every ~2.4 ms):
-    taken as two, at the cycle's start and at TI (0.36 / 0.24 / 0.4 per cycle)."""
+    taken as two, at the cycle's start and at TI (0.36 / 0.24 / 0.4 per cycle). APPROXIMATE since 10-28 12:44: at
+    the 4.13 ms cycle it is ~1.75 samples a cycle, not 2.
+    timing: a fw_timing.Timing (the module's, the robot now, by default)."""
     p = p or Params()
     m = plant_module(p)
     A, B = continuous(p)
     n = A.shape[0]
     N = n + 3
     B = B * motor
-    Tc, TIc, TAUc, TWc = T, TI, TAU, 0.0
+    Tc, TWc, TIc, TAUc = (T, TW, TI, TAU) if timing is None else times(timing)
     PhT, _ = flow(A, B, Tc)
     Ph1, G1 = flow(A, B, TAUc)              # old command over [0, TAU]
     Ph2, G2 = flow(A, B, Tc - TAUc)         # new command over [TAU, T]
@@ -124,13 +135,14 @@ def from_fw(k):
     return np.array([-k["x"], -k["vx"] * SPEED_UNITS, k["q"] * DEG, k["dq"] * DEG])
 
 
-def modes(Acl):
-    """Closed-loop modes: (frequency Hz, damping ratio, time constant s, |eigenvalue|)."""
+def modes(Acl, period=None):
+    """Closed-loop modes: (frequency Hz, damping ratio, time constant s, |eigenvalue|); period: the cycle Acl was
+    made at (the module's T by default)."""
     out = []
     for lam in np.linalg.eigvals(Acl):
         if lam.imag < -1e-9 or abs(lam) < 1e-9:
             continue
-        s = np.log(lam) / T
+        s = np.log(lam) / (T if period is None else period)
         wn = abs(s)
         zeta = -s.real / wn if wn > 0 else 1.0
         out.append((s.imag / (2 * np.pi), zeta, -1 / s.real if s.real < 0 else np.inf, abs(lam)))

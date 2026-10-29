@@ -17,6 +17,7 @@ from scipy.optimize import minimize
 
 from closed_loop import Firmware, run
 from freq_response import DATA, bands, bands_for, from_rows, load
+from fw_timing import FW_2026_10_19          # the sweep it fits ran on that firmware
 from model import Params
 from model_flex import FlexParams
 
@@ -29,7 +30,7 @@ ROBOT = bands(load(os.path.join(DATA, REC)), EDGES)
 
 
 def model_bands(p):
-    rows, fell = run(p, Firmware(up_deg=UP), T=SWEEP[3] + 4.0, sweep=SWEEP, sweep_at=3.0)
+    rows, fell = run(p, Firmware(up_deg=UP), T=SWEEP[3] + 4.0, sweep=SWEEP, sweep_at=3.0, timing=FW_2026_10_19)
     return None if fell else bands(from_rows(rows), EDGES)
 
 
