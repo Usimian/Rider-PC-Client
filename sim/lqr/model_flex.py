@@ -1,9 +1,9 @@
 """The Rider model with its body sprung on its legs (2026-10-28): model.py's robot, split in two above the axle.
 
-PARKED 2026-10-28, not used by the flashed LQR2: designed the Hover's way (0.1 s speed smoothing) the law has no fast
-mode on the floor, so the resonance below did not need modelling. fit_flex.py's grid preferred a soft spring
-(8 N m/rad: cost 6.5 vs rigid 10.1) and was stopped before its refinement. Pick it up if the Rider's ~20-25 Hz
-response (or LQR's 21 Hz buzz) has to be designed around.
+2026-10-29: the spring MEASURED (legs clamped, the body tapped: ~5.9 Hz, below). On the four 10-29 sweeps with the
+flashed LQR it brings the 9-14 Hz response closer to the robot's than the rigid model does (with no dead zone the
+robot answers 2.3-2.8x the model there, rigid 3.2-4.7x); with model.py's 10-unit dead zone both sit 3.7-7.8x low
+there on the small +/-30 sweep -- the near-standstill behaviour is not yet a pure dead zone. Not the default plant.
 
 Why: a 1-30 Hz sweep on the floor (data/captures/2026-10-28_chirp_lqr_30hz.csv, freq_response.py) shows the robot
 answering 1.3x the rigid model at 9 Hz rising to ~4x at 23 Hz with a steeply growing lag -- a lightly damped
@@ -23,15 +23,18 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from model import G, Params, dead_zone
+from model import G, Params, dead_zone, friction
 
 BODY = 4                                   # index of the IMU body's angle in s (its rate at BODY + 1)
 
 
 @dataclass
 class FlexParams(Params):
-    flex_k: float = 30.0                   # N m/rad, the body on the legs (to be fitted: fit_flex.py)
-    flex_c: float = 0.02                   # N m s/rad
+    flex_k: float = 2.8                    # N m/rad, the body on the legs. MEASURED 2026-10-29: legs clamped and
+                                           # powered, the body tapped (ring_capture.py, ring_down.py; the flex = the
+                                           # body against the legs by the encoders): ~5.9 Hz (4.2-7.7), k 2.4-3.2
+                                           # with this split of the body; small swings ring softer
+    flex_c: float = 0.015                  # N m s/rad: damping ratio ~0.12 (0.02-0.19), the same taps
     m_legs: float = 0.080                  # kg, ASSUMED (rider_params.leg_mass_kg: wheel servos ~2 x 20 g + links)
     l_legs: float = 0.020                  # m, the legs' centre above the axle, ASSUMED
     i_legs_com: float = 1.7e-5             # kg m^2, the legs about their own centre, ASSUMED (50 mm rods)
@@ -78,7 +81,7 @@ def accel3(p, s, u):
     cog = 0.0
     for off in (0.0, p.cog_phase2):
         cog += p.b * (p.cog20_rate * np.sin(20 * phi + off) + p.cog24_rate * np.sin(24 * phi + 2 * off))
-    T = 2.0 * (p.ku * dead_zone(u, p.u0) - p.b * rel - p.fric * np.tanh(rel / p.fric_w)) + cog
+    T = 2.0 * (p.ku * dead_zone(u, p.u0) - p.b * rel - friction(p, rel)) + cog
     tau = p.flex_k * (thb - thl) + p.flex_c * (wb - wl)          # the spring's pull on the legs (minus on the body)
     ml, ll, mbd, lb = p.m_legs, p.l_legs, p.m_body, p.l_body
     a11 = p.mb + p.m_wheels + 2.0 * p.iw_one / p.r ** 2

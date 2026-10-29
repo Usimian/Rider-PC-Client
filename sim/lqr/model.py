@@ -64,7 +64,10 @@ class Params:
     # wheel motion in the driving sweeps, with no speed-dependent lag; these ~94 % / 94 % standing. The friction is
     # ~1.4x the Hover's, as the weight on the wheels is (560 vs 415 g): ASSUMED the cause.
     b: float = 1.63e-3         # N m s/rad, one motor's damping (back-EMF through the driver)
-    u0: float = 0.0            # dead zone in the drive, units (none, as on the Hover)
+    u0: float = 10.0           # dead zone in the drive, units. ESTIMATED 2026-10-29 (amplitude_check.py): the standing
+                               # robot answers the +/-60 sweep 1.6-2.1x the +/-30 per unit of command; 10 units gives
+                               # the model 1.3-1.7x (0: 1.1-1.2x; 20-30: stick-slip). The RL sim measured ~19 on
+                               # 10-19 under its velocity-servo model. Was 0 ("as on the Hover")
     fric: float = 5.29e-3      # N m, Coulomb friction per wheel (33 units)
     fric_w: float = 0.844      # rad/s, the friction rounded off (tanh) below this
     # Torque off (balancing off: main.cpp writes the wheels' register 0x18 = 0): the wheels turn by hand but feel
@@ -104,6 +107,13 @@ def encoder(p: Params, s):
     return s[0] - p.r * s[2], s[1] - p.r * s[3]
 
 
+def friction(p, rel):
+    """One wheel's friction torque (N m) at rate rel against its body: Coulomb fric rounded through zero by
+    tanh(rel / fric_w); model_flex uses the same. (A stiction term was tried 2026-10-29 -- amplitude_check.py --
+    and made the standing amplitude dependence worse: removed.)"""
+    return p.fric * np.tanh(rel / p.fric_w)
+
+
 def dead_zone(u, u0):
     return np.sign(u) * np.maximum(np.abs(u) - u0, 0.0)
 
@@ -118,7 +128,7 @@ def accel(p: Params, s, u):
     cog = 0.0
     for off in (0.0, p.cog_phase2):
         cog += p.b * (p.cog20_rate * np.sin(20 * phi + off) + p.cog24_rate * np.sin(24 * phi + 2 * off))
-    T = 2.0 * (p.ku * drive - p.b * rel - p.fric * np.tanh(rel / p.fric_w)) + cog
+    T = 2.0 * (p.ku * drive - p.b * rel - friction(p, rel)) + cog
     M = p.mb + p.m_wheels
     a11 = M + 2.0 * p.iw_one / p.r ** 2
     a12 = p.mb * p.L * np.cos(th)
