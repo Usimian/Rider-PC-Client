@@ -213,6 +213,12 @@ volatile float gDqUMax   = 60.0f;   // clamp on rate-damping term
 volatile float gVelIClamp= 8.0f;    // velocity integral anti-windup clamp (deg of lean)
 volatile int   gDither   = 0;       // +/- buzz added to wheel cmd each cycle (stiction fluidizer); 0=off
 volatile float gFallDeg  = 25.0f;   // cut torque past this tilt error
+volatile float gFallRollDeg = 40.0f; // ... and past this roll (deg, the fused roll: true in turns since tiltRates) -- past
+                                     // the most the legs can lean the body, so it is falling, not leaning (2026-10-29,
+                                     // Marc): ~+/-30 deg at full reach, DERIVED (tools/balance/lean_cpd.py: 1.5 counts/deg
+                                     // MEASURED to +/-15, ~47 counts of room each way at ride height). On a tilted plate
+                                     // (legs equal) it slid off at +31 / -32 deg MEASURED, then rolled with the wheels at
+                                     // full command for up to 7 s: no roll cutoff then. 40 (Marc)
 volatile float gMaxPosErr = 0.50f;  // cut torque past this position runaway (m)
 // --- factory R-1.1.3 position-goal wheel command (toggleable A/B vs torque-only) ---
 volatile int   gPosMode  = 0;       // 0 = torque-write (current); 1 = position-goal accumulate
@@ -307,23 +313,23 @@ volatile int   gLevelSign= -1;               // correction sign ('levsign'); -1 
 static float   gLevCmd   = 0.0f;             // ACCUMULATOR: leg differential command (counts); integrates roll error to reach level
 static int     gLevAnchR=LEG_NONE, gLevAnchL=LEG_NONE; // leg height anchor, captured when the roll split starts
 // ---- TURN LEAN (2026-10-29). Roll level ON: the body stays FLAT -- turning, or one wheel higher than the other.
-// Roll level OFF: the body leans ALONG THE PULL, gravity plus the turn's centripetal pull: driving round a curve the
-// pull tilts by atan(v w / g) (tPull, from the measured wheel speed and gyro turn rate, IMU section) and the body's
-// roll is set to minus that -- leaning in -- as a feed-forward split on the legs (gLeanCpd counts per deg); no slope
-// correction. First try (10-29, gain 1, cpd 5, cap 8 deg): the circles turned 1.9 rad/s, not the stick's 1, so the
-// lean reached 7-8 deg, and the body rolled ~2.5x the lean asked (cpd nearer 2); with the body rolled the single-gyro
-// pitch ran away (tiltRates) and it fell. Held OFF (gain 0) until cpd is measured.
-volatile float gLeanGain = 0.0f;             // share of the full lean ('lean'; 0 = none, 1 = along the pull)
-volatile float gLeanCpd  = 5.0f;             // leg differential counts per deg of body roll ('leancpd'). ESTIMATED:
-                                             // the 10-21 incident's 10 deg of roll was ~50 counts; 10-29 says ~2
+// Roll level OFF: the body lines up with the PULL, gravity plus the turn's centripetal pull: straight or on a slope
+// that is upright; driving round a curve the pull tilts by atan(v w / g) (tPull, from the measured wheel speed and
+// gyro turn rate, IMU section) and the body's target roll is minus that -- leaning in. Both are the accumulator below
+// (closed loop on the true roll), which runs whenever balancing; only its target differs. Closed loop because the
+// legs' roll per count is lopsided (tools/balance/lean_cpd.py, 10-29: +3 deg took 12 counts per leg, -3 deg about
+// 1 -- the servos' slack), so no feed-forward count works both ways. (First try, a feed-forward with an estimated
+// 5 counts/deg and an 8 deg cap: the body rolled ~2.5x the lean asked, the single-gyro pitch ran away -- tiltRates
+// -- and it fell.)
+volatile float gLeanGain = 1.0f;             // share of the full lean ('lean'; 0 = none, 1 = along the pull)
 #define LEAN_TAU_S     0.10f                 // smoothing of the pull (s)
 #define LEAN_SLEW_DPS  8.0f                  // the lean's rate limit (deg/s)
-#define LEAN_MAX_DEG   4.0f                  // the lean's limit (deg); full stick at 0.45 m/s is ~2.5-4.5
+#define LEAN_MAX_DEG   4.0f                  // the lean's limit (deg); full stick at 0.43 m/s pulls ~4.8
 volatile float tPull = 0.0f;                 // the pull's tilt (deg, roll's sign), telemetry 'pull'
 volatile float tLean = 0.0f;                 // the lean the legs are given (deg of roll), telemetry 'lean'
 // ---- leg state machine: balance-ON -> slew both legs to MID (slow); balance-OFF -> roll-level off +
-// equalize legs (remove the roll differential, keep height) and HOLD torqued; leveling-OFF while balancing
-// -> same equalize (return to neutral). 'Slowly' = a per-cycle slew on the leg command.
+// equalize legs (remove the roll differential, keep height) and HOLD torqued. While balancing the roll accumulator
+// runs (flat, or along the pull: TURN LEAN). 'Slowly' = a per-cycle slew on the leg command.
 #define LEG_R_MID 480                              // ride height PINNED (was midpoint of MIN/MAX) so tightening the
 #define LEG_L_MID 920                              // low-height floor doesn't shift the default balancing height
 #define LEG_EQUAL_SUM (LEG_R_MID+LEG_L_MID)        // R+L when the two legs are equal length (differential = 0)
@@ -1045,7 +1051,7 @@ static void balanceTask(void*){
     // here anyway, so runaway protection is unaffected).
     bool ctrlInit = (gCtrl == CTRL_POL) ? polInit : lqrInit;
     float posRef = ctrlInit ? gPosTargetEff : wheel_x;
-    bool fallen = (fabsf(qErr) > gFallDeg) || (fabsf(wheel_x - posRef) > gMaxPosErr);
+    bool fallen = (fabsf(qErr) > gFallDeg) || (fabsf(tRoll) > gFallRollDeg) || (fabsf(wheel_x - posRef) > gMaxPosErr);
     gFallen = fallen;                          // expose to the LED status (loop() reads it)
     if(gPosZeroReq){                           // re-zero the distance frame mid-balance: odometer + target + slew
       wheel1_x = 0; wheel2_x = 0; wheel_x = 0; //   are zeroed TOGETHER so posErr stays 0 -> no jolt, balance holds
@@ -1308,7 +1314,7 @@ static void balanceTask(void*){
       // this cycle (alternating). Servicing BOTH in one cycle collided on the bus -> one leg stayed
       // unenergized (which one was timing-dependent). One-leg-per-cycle = ~83Hz/leg, plenty fast.
       // ===== leg state machine =====
-      static bool drvPrev=false, levPrev=false;
+      static bool drvPrev=false;
       int hp;
       // STOP-button limp ('leglimp'): torque-OFF both legs and stay limp until the next balance-on.
       if(gLegLimpReq){
@@ -1333,7 +1339,7 @@ static void balanceTask(void*){
       if(driving && !drvPrev){ gLegLimped=false;                 // re-enabling balance un-limps the legs
         if(gLegEnR.stage==LEG_EN_FAILED) gLegEnR=LegEn{LEG_EN_GOAL,0,0};   // ...and gives a given-up leg fresh tries
         if(gLegEnL.stage==LEG_EN_FAILED) gLegEnL=LegEn{LEG_EN_GOAL,0,0}; }
-      if(gLegLimped){ drvPrev=driving; levPrev=gLevelOn; gLegHomeReq=false; }  // stay limp: skip the machine (a 'leghome' while limp is dropped)
+      if(gLegLimped){ drvPrev=driving; gLegHomeReq=false; }  // stay limp: skip the machine (a 'leghome' while limp is dropped)
       else {
       // balance ON, or 'leghome' (DS4 R3) -> slew both legs to the ride height (MID), slowly. A balance-on
       // with both legs still powered (a pick-up / put-down, a fall) KEEPS the chosen height (2026-10-21):
@@ -1345,19 +1351,19 @@ static void balanceTask(void*){
         gLegHomeL = (gLegEnerL&&gLegTgtL!=LEG_NONE)?gLegTgtL:(legReadPos(LEFT_LEG,&hp)?hp:LEG_L_MID);
         gLegDestR = LEG_R_MID; gLegDestL = LEG_L_MID; gLegHoming = true;
       }
-      // balance OFF -> roll-level off, then equalize (remove differential, keep height) + hold;
-      // leveling OFF while still balancing -> same equalize (legs return to neutral, body un-tilts).
-      bool equalize = (!driving && drvPrev) || (!gLevelOn && levPrev && driving);
+      // balance OFF -> roll-level off, then equalize (remove differential, keep height) + hold. (Roll level
+      // off while balancing only changes the accumulator's target: flat -> along the pull.)
+      bool equalize = (!driving && drvPrev);
       if(!driving && drvPrev) gLevelOn = false;
       if(equalize){
         int cr=(gLegTgtR!=LEG_NONE)?gLegTgtR:LEG_R_MID, cl=(gLegTgtL!=LEG_NONE)?gLegTgtL:LEG_L_MID;
         int diff=(cr+cl-LEG_EQUAL_SUM)/2;                         // the roll-differential component
         gLegHomeR=cr; gLegHomeL=cl; gLegDestR=cr-diff; gLegDestL=cl-diff; gLegHoming=true;
       }
-      drvPrev=driving; levPrev=gLevelOn;
+      drvPrev=driving;
 
-      // the roll split (the turn lean, + roll balancing's accumulator when on) runs whenever balancing, once homing
-      // is done; it starts from the legs as they stand
+      // the roll accumulator (flat with roll level on, along the pull with it off) runs whenever balancing, once
+      // homing is done; it starts from the legs as they stand
       bool levRun = (!gLegHoming && driving);
       static bool levRunPrev=false;
       if(levRun && !levRunPrev){                                  // the split just started -> anchor at the (homed) pos
@@ -1397,21 +1403,17 @@ static void balanceTask(void*){
         // roll std ~0.06-0.5 deg). The Sept wheel-read fix raised the loop to ~234 Hz, so the same per-cycle
         // step integrated 42 % harder per second and leveling began rocking at ~1.2-1.5 Hz (std ~0.9 deg).
         // Scale the step by elapsed time so levki/levslew keep their 165 Hz meaning at ANY loop rate.
-        // TURN LEAN (roll level off): the body's target roll is minus the pull, rate-limited; the legs get it as
-        // feed-forward counts. The accumulator raises roll (-sign) per count, so L deg needs -sign * cpd * L counts.
-        // Roll level on: the lean slews back to 0 and the accumulator holds the body flat.
+        // The target: levset (a trim, 0) plus the TURN LEAN -- minus the pull with roll level off, rate-limited;
+        // with roll level on it slews back to 0 and the body is held flat.
         float leanT = gLevelOn ? 0.0f : clampf(-gLeanGain * tPull, -LEAN_MAX_DEG, LEAN_MAX_DEG);
         tLean += clampf(leanT - tLean, -LEAN_SLEW_DPS * dt, LEAN_SLEW_DPS * dt);
-        float leanC = -(float)gLevelSign * gLeanCpd * tLean;
-        if(gLevelOn){                                               // roll level: integrate toward levset (flat)
-          float levK = dt * LEV_REF_HZ;                             // = 1 at the tuned 165 Hz
-          float inc = gLevelSign * gLevelKi * (tRoll - gLevelSet) * levK;   // integration step this cycle
-          float slewC = gLevelSlew * levK;
-          if(inc >  slewC) inc =  slewC; else if(inc < -slewC) inc = -slewC;
-          gLevCmd += inc;
-          if(gLevCmd >  (float)gLevelMax) gLevCmd =  (float)gLevelMax; else if(gLevCmd < -(float)gLevelMax) gLevCmd = -(float)gLevelMax;
-        } else gLevCmd = 0.0f;
-        float cmd = clampf(gLevCmd + leanC, -(float)gLevelMax, (float)gLevelMax);
+        float levK = dt * LEV_REF_HZ;                               // = 1 at the tuned 165 Hz
+        float inc = gLevelSign * gLevelKi * (tRoll - (gLevelSet + tLean)) * levK;   // integration step this cycle
+        float slewC = gLevelSlew * levK;
+        if(inc >  slewC) inc =  slewC; else if(inc < -slewC) inc = -slewC;
+        gLevCmd += inc;
+        if(gLevCmd >  (float)gLevelMax) gLevCmd =  (float)gLevelMax; else if(gLevCmd < -(float)gLevelMax) gLevCmd = -(float)gLevelMax;
+        float cmd = gLevCmd;
         // RESOLUTION: split the tilt between the legs at single-leg-count granularity. The old code put
         // the same +c on BOTH legs -> roll could only step in 2s. t = total tilt (counts); even t splits
         // evenly, odd t puts the extra count on ONE leg -> a tiny roll correction moves a single leg.
@@ -1662,14 +1664,13 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"legstep"))  gLegStepReq += (int)v; // BOTH legs mirrored (body raise/lower); +extend / -retract; clamped, in-loop
   else if (!strcmp(s,"legR"))     gLegAbsR = (int)v;     // RIGHT leg -> absolute position (clamped); per-leg, for test + leveling
   else if (!strcmp(s,"legL"))     gLegAbsL = (int)v;     // LEFT  leg -> absolute position (clamped); per-leg, for test + leveling
-  else if (!strcmp(s,"level"))    gLevelOn = (v!=0);     // IMU-roll body leveling on/off (differential legs)
+  else if (!strcmp(s,"level"))    gLevelOn = (v!=0);     // roll level: 1 = body held flat, 0 = along the pull (gravity + the turn: TURN LEAN)
   else if (!strcmp(s,"levki"))    gLevelKi = v;          // leveling integral gain: leg counts accumulated per deg roll error per cycle
   else if (!strcmp(s,"levslew"))  gLevelSlew = v;        // leveling slew limit: max leg-counts change per control cycle
   else if (!strcmp(s,"levset"))   gLevelSet = v;         // leveling roll setpoint (deg); 0 = level
   else if (!strcmp(s,"levmax"))   gLevelMax = (int)v;    // leveling max |differential| authority (counts)
   else if (!strcmp(s,"levsign"))  gLevelSign = (v<0)?-1:1; // leveling correction sign (flip if it tilts the wrong way)
   else if (!strcmp(s,"lean"))     gLeanGain = v;         // turn lean: share of the lean along the pull (0 = none, 1 = full)
-  else if (!strcmp(s,"leancpd"))  gLeanCpd = v;          // turn lean: leg differential counts per deg of body roll
   else if (!strcmp(s,"leghomeslew")) gLegHomeSlew = v;   // leg home/equalize slew (counts/cycle) = how 'slowly' the legs move on balance on/off
   else if (!strcmp(s,"legrate"))  { gLegRate = clampf(v,-200.0f,200.0f); gLegRateMs = millis(); }  // height rate (counts/s, + up); heartbeat
   else if (!strcmp(s,"leghome"))  gLegHomeReq = true;    // legs -> ride height (MID), slow slew; ignored while limp
@@ -1678,6 +1679,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"cfa"))   gCfAlpha=clampf(v,0.9f,0.9999f); // compl-filter gyro weight
   else if (!strcmp(s,"imucomp")) gImuComp=v;                    // IMU lever-arm comp scale/sign (0=off, -0.5 verified)
   else if (!strcmp(s,"fall"))  gFallDeg=clampf(v,10.0f,70.0f);  // tilt-error torque cutoff (deg)
+  else if (!strcmp(s,"fallroll")) gFallRollDeg=clampf(v,10.0f,70.0f);  // roll torque cutoff (deg)
   else if (!strcmp(s,"dither")) gDither=(int)v;                 // stiction dither amplitude (0=off)
   else if (!strcmp(s,"get")||!strcmp(s,"?")) {}
   else { char b[48]; int k=snprintf(b,sizeof(b),"# ? '%s'\n", s); emit(b,k); return; }
