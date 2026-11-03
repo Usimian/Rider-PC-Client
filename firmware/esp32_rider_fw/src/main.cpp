@@ -17,6 +17,8 @@
 #include <Wire.h>
 #include <Preferences.h>       // NVS key/value store -- persists the controller choice (gCtrl) and body roll (gRollMode)
 #include "rider_policy.h"   // auto-generated PPO policy weights (sim/export_policy.py)
+#include "mpc_admm.h"       // the MPC drive planner's QP solver (sim/lqr/mpc_plan.py's Qp)
+#include "mpc_bench_data.h" // GENERATED: one planner QP for 'mpcbench' (sim/lqr/mpc_export.py)
 #ifndef POL_FRAME
 #define POL_FRAME 7                 // inputs per frame: 7, or 8 with the turn input (headers from 2026-10-20 define it)
 #endif
@@ -1576,6 +1578,33 @@ void setup(){
 
 // ---------------- command protocol (UART0 + UART1) ----------------
 static void emit(const char* b, int k){ Serial.write((const uint8_t*)b,k); Serial1.write((const uint8_t*)b,k); }
+
+// 'mpcbench [reps]' (2026-11-03): how long the MPC drive planner's QP takes on this chip, before the planner is built.
+// One real QP of the ESP32-sized planner (mpc_bench_data.h: 25 jerks, 75 limit rows, 50 ADMM iterations, from a
+// weak-battery start where the limits bind) solved reps times from cold by a task on core 0 below the IMU loop --
+// where a planner task would run, so the IMU loop's interruptions are in the time. Its answer is checked against
+// Python's after the same iterations (single vs double precision) and the converged one. Refused while balancing.
+// Reply on USB and the Pi link: '# mpcbench reps us_per_solve diff_ref diff_conv jerk'.
+static void mpcBenchTask(void* arg){
+  int reps = (int)(intptr_t)arg;
+  static float x[MPCB_N], z[MPCB_M], y[MPCB_M], work[2 * MPCB_N + MPCB_M];
+  uint32_t t0 = micros();
+  for(int r = 0; r < reps; r++){
+    for(int i = 0; i < MPCB_N; i++) x[i] = 0.0f;
+    mpcAdmm(MPCB_N, MPCB_M, MPCB_MINV, MPCB_A, MPCB_Q, MPCB_L, MPCB_U, MPCB_RHO, MPCB_SIGMA, MPCB_ALPHA, MPCB_SOFT,
+            MPCB_ITERS, x, z, y, work);
+  }
+  uint32_t us = (micros() - t0) / (uint32_t)reps;
+  float dref = 0.0f, dconv = 0.0f;
+  for(int i = 0; i < MPCB_N; i++){
+    dref = fmaxf(dref, fabsf(x[i] - MPCB_X_REF[i])); dconv = fmaxf(dconv, fabsf(x[i] - MPCB_X_CONV[i]));
+  }
+  char b[160];
+  int k = snprintf(b, sizeof(b), "# mpcbench reps=%d n=%d m=%d iters=%d us=%lu diff_ref=%.2e diff_conv=%.4f jerk=%.3f\n",
+                   reps, MPCB_N, MPCB_M, MPCB_ITERS, (unsigned long)us, dref, dconv, x[0] * 10.0f);
+  emit(b, k);
+  vTaskDelete(NULL);
+}
 static void ackState(){
   char b[210];
   int k = snprintf(b, sizeof(b),
@@ -1704,6 +1733,11 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"fall"))  gFallDeg=clampf(v,10.0f,70.0f);  // tilt-error torque cutoff (deg)
   else if (!strcmp(s,"fallroll")) gFallRollDeg=clampf(v,10.0f,70.0f);  // roll torque cutoff (deg)
   else if (!strcmp(s,"acccomp")) gAccComp = (v!=0);   // pitch estimates less the plan's acceleration (ACC_COMP), 1 default
+  else if (!strcmp(s,"mpcbench")){                     // time the MPC planner's QP on this chip (see mpcBenchTask)
+    if(gEnabled){ emit("# mpcbench REFUSED: balancing (en 0 first)\n", 43); return; }
+    xTaskCreatePinnedToCore(mpcBenchTask, "mpcb", 4096, (void*)(intptr_t)(v >= 1.0f ? (int)v : 20), 1, NULL, 0);
+    return;
+  }
   else if (!strcmp(s,"dither")) gDither=(int)v;                 // stiction dither amplitude (0=off)
   else if (!strcmp(s,"get")||!strcmp(s,"?")) {}
   else { char b[48]; int k=snprintf(b,sizeof(b),"# ? '%s'\n", s); emit(b,k); return; }
