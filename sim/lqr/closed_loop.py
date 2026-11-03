@@ -63,6 +63,7 @@ HOVER_DQ_TAU = -0.0025 / np.log(0.6)             # 4.9 ms, the Hover's rate smoo
 # balance loop the latest one.
 HOVER_IMU_PERIOD_S = IMU_LOOP_PERIOD_S
 LP_VEL = 0.85
+ACC_TAU_V, ACC_TAU_A = 0.015, 0.030              # Firmware acc_comp "wheels": the axle speed's and its derivative's smoothing
 SPEED_COUNTS = 327.6     # speed register counts per m/s
 SCALED_PER_COUNT = 4.5 * 60.0 * np.pi / 1024.0   # main.cpp 4.5 x K_V (K_V = 60 pi / 1024): 0.82835
 POS_STEP = np.pi * 0.06 / 1024
@@ -79,14 +80,20 @@ FLASHED_PLAN = dict(a_max=0.6, t_jerk=0.12, gain=8.0, th_v=0.0, th_a=np.radians(
 
 class Firmware:
     def __init__(self, k=None, up_deg=2.8, rng=None, gyro_noise=0.06, acc_noise=0.02, corrected=False, a_v=LP_VEL,
-                 fric_comp=False, plan=None, hover_imu=False, tau_v=None):
+                 fric_comp=False, plan=None, hover_imu=False, tau_v=None, acc_comp=None):
         """corrected: the encoders' body part taken off (the new law, lqr_design.py): position wheel_x + r*pitch,
         speed register + r*rate before its smoothing a_v (per cycle; today LP_VEL 0.85). plan: drive by the
         Hover's plan (drive_design.py: a_max, t_jerk, gain, th_v, th_a, u_v, u_a) instead of the LQR's drive
         handling; it implies corrected readings and uses its own integral (k['xi'] unused). hover_imu: the law
         reads the Hover's IMU path (theta2, dq2: hover_sample(), per IMU-loop sample) against FLASHED_UP_DEG and corrects
         the speed with its smoothed rate, as the Hover's robot.cc does; the shared estimate (theta, dqf, against
-        SET_DEG) is what the other controllers read."""
+        SET_DEG) is what the other controllers read.
+        acc_comp: the robot's forward acceleration taken out of the accelerometer before its angle is blended in (both
+        IMU paths): "wheels" = the rate-corrected wheel speed differentiated (ACC_TAU_V / ACC_TAU_A smoothing), "plan"
+        = the plan's a_r; None = as flashed. Without it the accelerometer reads an acceleration a as a tilt of
+        a/g, and the pitch drifts that way at the filter's ~0.5 s: MEASURED 11-03 in this simulation, a flashed
+        0.6 m/s^2 start to 0.45 m/s leaves the estimate ~2.8 deg under the true lean, still ~3 deg after a 1.0 m/s^2
+        start's acceleration is over."""
         self.k = dict(K_TODAY if k is None else k)
         self.corrected, self.a_v, self.tau_v = corrected, a_v, tau_v   # tau_v (s): smoothing in time, as main.cpp
         self.fric_comp, self.u_lp = fric_comp, 0.0
@@ -106,6 +113,8 @@ class Firmware:
         self.plan = plan
         self.hover_imu = hover_imu
         self.theta2, self.dq2 = None, 0.0
+        self.acc_comp, self.acc_est = acc_comp, 0.0  # the forward acceleration the accelerometers are corrected by
+        self.v_ax_f, self.v_ax_prev = None, 0.0
         self.plan_x = None                       # the plan's position, speed, acceleration, smoothed speed, integral
         self.v_r = self.a_r = self.v_r_f = self.plan_i = 0.0
         if plan is not None:
@@ -120,7 +129,7 @@ class Firmware:
         """The IMU on the body: its angle th and rate w (+ forward lean), acc = (x'', its angular acceleration)."""
         xdd, thdd = acc
         # specific force in body axes (forward, up) at the IMU, IMU_H up the body's axis, forward lean th
-        F = -G * np.sin(th) + thdd * IMU_H + xdd * np.cos(th) + self.rng.normal(0, self.an)
+        F = -G * np.sin(th) + thdd * IMU_H + xdd * np.cos(th) + self.rng.normal(0, self.an) - self.acc_est
         U = G * np.cos(th) - w * w * IMU_H + xdd * np.sin(th) + self.rng.normal(0, self.an)
         rate = np.round((-np.degrees(w) + self.rng.normal(0, self.gn)) * 16.4) / 16.4   # firmware frame, deg/s
         om = np.radians(rate)
@@ -142,7 +151,7 @@ class Firmware:
     def hover_sample(self, th, w, acc, dts):
         """One sample of the Hover's IMU path (boards/common/imu.cc), verbatim: dts = time since the last."""
         xdd, thdd = acc
-        F = -G * np.sin(th) + thdd * IMU_H + xdd * np.cos(th) + self.rng.normal(0, self.an)
+        F = -G * np.sin(th) + thdd * IMU_H + xdd * np.cos(th) + self.rng.normal(0, self.an) - self.acc_est
         U = G * np.cos(th) - w * w * IMU_H + xdd * np.sin(th) + self.rng.normal(0, self.an)
         g = np.round((-np.degrees(w) + self.rng.normal(0, self.gn)) * 16.4) / 16.4
         acc_pitch = np.degrees(np.arctan(F / U)) + self.up      # plain angle, no lever correction
@@ -187,6 +196,7 @@ class Firmware:
         if self.tau_v:
             self.a_v = float(np.exp(-dt / self.tau_v))
         self.vel_s = self.a_v * self.vel_s + (1 - self.a_v) * v
+        self._track_acc(dt)
         if self.plan is not None:
             return self._control_plan(dt, stick, pitch)
         if self.tgt is None:
@@ -227,6 +237,20 @@ class Firmware:
               + k["dq"] * self.dq_law) + self.plan_i + u_ff
         return self._output(u, dt)
 
+    def _track_acc(self, dt):
+        """acc_comp: the forward acceleration (m/s^2, + forward) the next IMU samples are corrected by."""
+        if self.acc_comp == "plan":
+            self.acc_est = self.a_r
+        elif self.acc_comp == "wheels":
+            rr = self.dq2 if self.hover_imu else self.rate
+            v = (self.raw_v - R_WHEEL * np.radians(rr) * SPEED_COUNTS * SCALED_PER_COUNT) / L2_SPEED   # the axle
+            if self.v_ax_f is None:
+                self.v_ax_f = self.v_ax_prev = v
+            self.v_ax_f += (v - self.v_ax_f) * min(1.0, dt / ACC_TAU_V)
+            a = (self.v_ax_f - self.v_ax_prev) / dt
+            self.v_ax_prev = self.v_ax_f
+            self.acc_est += (a - self.acc_est) * min(1.0, dt / ACC_TAU_A)
+
     def _plan_acc(self, dt, stick, held, x, pitch):
         """The plan's acceleration (main.cpp plan_step): toward the stick's speed (released: back home, gently) at up
         to a_max, the acceleration building over t_jerk. x, pitch: the axle and the pitch this cycle (firmware frame),
@@ -264,7 +288,7 @@ def drive_ramp(v, tgt, dt):
 def flashed(up_deg=FLASHED_UP_DEG, a_max=None, **kw):
     """The firmware's LQR as flashed (FLASHED_*). up_deg: the robot's, not the firmware's -- what its IMU reads with
     the centre of mass over the axle (a recording's mean pitch; 2.8 on 10-28, 3.9-4.3 later); a_max: a live
-    'lqramax' in place of the compiled one; kw: Firmware's sensor options (rng, gyro_noise, acc_noise)."""
+    'lqramax' in place of the compiled one; kw: Firmware's options (rng, gyro_noise, acc_noise, acc_comp)."""
     plan = dict(FLASHED_PLAN, **({} if a_max is None else dict(a_max=a_max)))
     return Firmware(k=FLASHED_K, up_deg=up_deg, fric_comp=True, plan=plan, hover_imu=True, tau_v=0.100, **kw)
 
