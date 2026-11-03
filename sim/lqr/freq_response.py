@@ -74,7 +74,8 @@ def model_rows(sweep, v, up, p=None):
     """The flashed LQR on the model (p: model.Params / model_flex.FlexParams, the default model if None) at the
     robot's timing: standing, or driving at v m/s (the stick from 0.5 s), the sweep from SWEEP_AT on."""
     drive = (np.array([0.0, 0.5]), np.array([0.0, v])) if v else None
-    return run(p, fw=flashed(up_deg=up), T=SWEEP_AT + sweep[3] + 1.0, sweep=sweep, sweep_at=SWEEP_AT, drive=drive)
+    return run(p, fw=flashed(up_deg=up, acc_comp=None),        # the 10-29 sweeps ran before ACC_COMP (11-03)
+               T=SWEEP_AT + sweep[3] + 1.0, sweep=sweep, sweep_at=SWEEP_AT, drive=drive)
 
 
 def main():

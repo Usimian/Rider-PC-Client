@@ -235,7 +235,9 @@ volatile float tPacc=0, tPraw=0;    // accel-pitch: comp-corrected vs raw (lever
 // drivecap extras (2026-10-19, turning-shimmy hunt): what the POLICY is fed this cycle (0 under LQR), both
 // wheels' FINAL commands (after the turn differential), and the right wheel's reported speed.
 static float tPolPP=0, tPolPR=0, tPolXV=0, tPolPI=0, tPolBias=0, tCmdL=0, tCmdR=0; static int tVR=0;
-static float tPlanA=0, tPlanLean=0;  // (2026-10-28) the LQR plan's acceleration (m/s^2) and lean (deg) -- 0 under the policy
+volatile float tPlanA=0;  // (2026-10-28) the LQR plan's acceleration (m/s^2, + forward) -- 0 under the policy; read by the
+                          // IMU loop too (ACC_COMP)
+static float tPlanLean=0; // ... and its lean (deg)
 volatile float tVest=0;             // velocity-observer estimate (vs raw wv) -- observer verify
 volatile float tLqrInQ=0;           // pitch as the LQR sees it after the factory input filter ('lqrin')
 volatile float tRoll=0;                  // lateral tilt (deg), GYRO-FUSED (low-lag) -- feeds leg leveling
@@ -408,6 +410,14 @@ volatile float gCfAlpha=0.996f;     // compl-filter gyro weight PER SAMPLE @~333
 // the accel-tilt. Subtract it so atan2 sees only gravity -> the body's TRUE lean (IMU reading
 // normalized to the axle/CoM). KIMU converts the m/s^2 lever terms to accel counts: (LSB/g)/g * r.
 static const float KIMU = (2048.0f/9.81f)*0.12f;   // ICM-42670 +-16g => 2048 LSB/g; r=0.12m (120mm up)
+// ACC_COMP (2026-11-03): the accelerometer reads the robot's forward acceleration a as a tilt of a/g, and both pitch
+// estimates blend it in at ~0.5 s -- through a start the LQR's pitch drifts toward less lean than the body has (the
+// simulation, sim/lqr/pitch_estimate.py: up to -2.9 deg in a 0.6 m/s^2 start, +2.9 in the stop, ~-1.8 still 1 s on),
+// the body leans past the plan, then lies back as the estimate recovers. The plan's acceleration (tPlanA; the
+// controller asks for it, the axle follows it closely) is taken out of the forward axis first: there +-0.7 deg, the
+// lean-back mostly gone. Under the policy tPlanA is 0: no change. Live 'acccomp 0/1' for an A/B on the floor.
+static const float ACC_COUNTS_PER_MPS2 = 2048.0f/9.81f;  // accelerometer counts per m/s^2 (+-16 g)
+volatile bool gAccComp = true;
 volatile float gImuComp = -0.5f;    // lever-arm comp scale+sign (0=off; -0.5 verified on robot). 'imucomp'
 // --- factory control-input filter (R-1.1.3 FUN_400d529c, Ghidra-confirmed) ---
 // Between IMU fusion and the PID, the factory heavily low-passes pitch & rate
@@ -480,7 +490,8 @@ static void lqrImuStep(int16_t ay, int16_t az, int16_t gx, int16_t gy, int16_t g
   float pit_gyro, roll_rate;                     // the pitch rate from all three gyros (roll: the balance task's)
   tiltRates((float)gx / GYRO_LSB_PER_DPS - gGyroBias, (float)gy / GYRO_LSB_PER_DPS,
             (float)gz / GYRO_LSB_PER_DPS - gYawBias, lqrPitch, tRoll, &pit_gyro, &roll_rate);
-  float pit_acc = atanf((float)ay / (float)az) * 57.2958f;
+  float ayc = (float)ay - (gAccComp ? ACC_COUNTS_PER_MPS2 * tPlanA : 0.0f);   // less the plan's acceleration (ACC_COMP)
+  float pit_acc = atanf(ayc / (float)az) * 57.2958f;
   if(lqrImuUs == 0){ lqrPitch = pit_acc; lqrRate = pit_gyro; dts = 0.0f; }   // the first sample
   lqrImuUs = now;
   lqrRate = 0.6f * lqrRate + 0.4f * pit_gyro;
@@ -959,7 +970,8 @@ static void balanceTask(void*){
     float pcAlpha = (dt>1e-4f) ? (pcOmega - pcOmPrev)/dt : 0.0f;            // angular accel, rad/s^2
     pcAlphaF = 0.8f*pcAlphaF + 0.2f*pcAlpha;                               // filter the noisy derivative
     pcOmPrev = pcOmega;
-    float ayC = (float)ay - gImuComp*KIMU*pcAlphaF;            // remove tangential (alpha*r)
+    float ayC = (float)ay - gImuComp*KIMU*pcAlphaF             // remove tangential (alpha*r)
+                - (gAccComp ? ACC_COUNTS_PER_MPS2 * tPlanA : 0.0f);   // and the plan's acceleration (ACC_COMP)
     float azC = (float)az + gImuComp*KIMU*pcOmega*pcOmega;     // remove centripetal (omega^2*r)
     float pit_acc  = atan2f(ayC, azC)*57.2958f;                // forward/vertical -> deg (lever-arm corrected)
     float pit_acc_raw = atan2f((float)ay,(float)az)*57.2958f;  // uncorrected, for verify-against-raw
@@ -1691,6 +1703,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"imucomp")) gImuComp=v;                    // IMU lever-arm comp scale/sign (0=off, -0.5 verified)
   else if (!strcmp(s,"fall"))  gFallDeg=clampf(v,10.0f,70.0f);  // tilt-error torque cutoff (deg)
   else if (!strcmp(s,"fallroll")) gFallRollDeg=clampf(v,10.0f,70.0f);  // roll torque cutoff (deg)
+  else if (!strcmp(s,"acccomp")) gAccComp = (v!=0);   // pitch estimates less the plan's acceleration (ACC_COMP), 1 default
   else if (!strcmp(s,"dither")) gDither=(int)v;                 // stiction dither amplitude (0=off)
   else if (!strcmp(s,"get")||!strcmp(s,"?")) {}
   else { char b[48]; int k=snprintf(b,sizeof(b),"# ? '%s'\n", s); emit(b,k); return; }

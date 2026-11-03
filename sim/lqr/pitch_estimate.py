@@ -18,7 +18,8 @@ import closed_loop as CL
 import drive_design as DD
 from model import Params
 
-VARIANTS = ((None, "as flashed"), ("plan", "less the plan's acceleration"), ("wheels", "less the wheels' acceleration"))
+VARIANTS = ((None, "uncorrected (flashed to 11-03)"), ("plan", "less the plan's acceleration (flashed)"),
+            ("wheels", "less the wheels' acceleration"))
 
 
 class _Rec(CL.Firmware):

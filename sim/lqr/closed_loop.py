@@ -76,6 +76,8 @@ R_WHEEL = 0.030
 FLASHED_K = dict(x=-1916.0, xi=0.0, vx=-7.46, q=59.4, dq=1.39)
 FLASHED_UP_DEG = 2.8      # gLqrUp: the pitch reference (the balance point measured 10-28; the robot's own varies)
 FLASHED_PLAN = dict(a_max=0.6, t_jerk=0.12, gain=8.0, th_v=0.0, th_a=np.radians(10.68), u_v=333.0, u_a=58.0)
+FLASHED_ACC_COMP = "plan"  # main.cpp ACC_COMP since 2026-11-03 (both pitch estimates less the plan's acceleration);
+                           # recordings before ran without (acc_comp=None)
 
 
 class Firmware:
@@ -285,12 +287,14 @@ def drive_ramp(v, tgt, dt):
     return n
 
 
-def flashed(up_deg=FLASHED_UP_DEG, a_max=None, **kw):
+def flashed(up_deg=FLASHED_UP_DEG, a_max=None, acc_comp=FLASHED_ACC_COMP, **kw):
     """The firmware's LQR as flashed (FLASHED_*). up_deg: the robot's, not the firmware's -- what its IMU reads with
     the centre of mass over the axle (a recording's mean pitch; 2.8 on 10-28, 3.9-4.3 later); a_max: a live
-    'lqramax' in place of the compiled one; kw: Firmware's options (rng, gyro_noise, acc_noise, acc_comp)."""
+    'lqramax' in place of the compiled one; acc_comp: None for a recording made before 2026-11-03 (or live
+    'acccomp 0'); kw: Firmware's sensor options (rng, gyro_noise, acc_noise)."""
     plan = dict(FLASHED_PLAN, **({} if a_max is None else dict(a_max=a_max)))
-    return Firmware(k=FLASHED_K, up_deg=up_deg, fric_comp=True, plan=plan, hover_imu=True, tau_v=0.100, **kw)
+    return Firmware(k=FLASHED_K, up_deg=up_deg, fric_comp=True, plan=plan, hover_imu=True, tau_v=0.100,
+                    acc_comp=acc_comp, **kw)
 
 
 def chirp(t, a, f0, f1, dur):

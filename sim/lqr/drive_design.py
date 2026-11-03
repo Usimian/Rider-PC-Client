@@ -78,7 +78,7 @@ def main():
         plan = dict(ff, a_max=am, t_jerk=a.t_jerk, gain=a.gain)
         ctrls.append((f"LQR, Hover plan {am:g} m/s^2",
                       lambda plan=plan: Firmware(k=FLASHED_K, up_deg=UP, fric_comp=True, plan=plan, hover_imu=True,
-                                                 tau_v=0.100)))
+                                                 tau_v=0.100, acc_comp=CL.FLASHED_ACC_COMP)))
     for motor in a.motors:
         p = replace(p0, ku_over_b=p0.ku_over_b * motor)
         print(f"\nmotors x{motor:g}" + ("  (a weaker battery)" if motor < 1 else ""))

@@ -58,7 +58,7 @@ U_MARGIN = 40.0            # command units kept free for the friction compensati
 J_SCALE = 10.0             # m/s^3 per unit of the QP's variable (keeps it near 1)
 E_WEIGHT = 1.0 / 210.0     # the IMU path's accelerometer weight a sample, 1/(|rate| + 200) at ~10 deg/s
 SOFT = 1e4                 # the price of a limit overstepped (per limit's width): steep, but never impossible
-ACC_COMP = "plan"          # the pitch estimate corrected by the plan's acceleration (closed_loop.Firmware acc_comp):
+ACC_COMP = CL.FLASHED_ACC_COMP   # the pitch estimate corrected by the plan's acceleration (as flashed since 11-03):
                            # MEASURED 11-03, uncorrected the estimate drifts ~3 deg through a start, the body outruns
                            # the plan and the weak-battery 0.60 m/s start falls; "wheels" holds too but leans 13-14
 # cost weights, per planner step: speed error (m/s)^2, position error (m)^2 when released, jerk (m/s^3)^2,
@@ -341,9 +341,9 @@ def predcheck(V=0.30, T0=2.0, T=1.5):
 
 def cases(motors, speeds):
     import drive_design as DD
-    ctrls = [("LQR, plan 0.6 (flashed)", lambda m: CL.flashed(up_deg=DD.UP)),
-             ("LQR, plan 0.6, pitch corrected", lambda m: CL.flashed(up_deg=DD.UP, acc_comp=ACC_COMP)),
-             ("LQR, plan 1.0, pitch corrected", lambda m: CL.flashed(up_deg=DD.UP, a_max=1.0, acc_comp=ACC_COMP)),
+    ctrls = [("LQR, plan 0.6, uncorrected (to 11-03)", lambda m: CL.flashed(up_deg=DD.UP, acc_comp=None)),
+             ("LQR, plan 0.6 (flashed)", lambda m: CL.flashed(up_deg=DD.UP)),
+             ("LQR, plan 1.0", lambda m: CL.flashed(up_deg=DD.UP, a_max=1.0)),
              (f"LQR, MPC {LEAN_MAX_DEG:g} deg, pitch corr.", lambda m: MpcFirmware(motor=m, up_deg=DD.UP))]
     p0 = Params()
     for motor in motors:
