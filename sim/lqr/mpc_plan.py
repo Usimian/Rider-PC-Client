@@ -4,6 +4,7 @@ program, looking ahead, within the motor's authority and a body-lean limit.
     python3 sim/lqr/mpc_plan.py --check          # the QP solver against scipy on sample problems
     python3 sim/lqr/mpc_plan.py                  # driving cases: the MPC against today's plan (drive_design.py's)
     python3 sim/lqr/mpc_plan.py --predcheck      # the predictor against the full simulation, a start
+    python3 sim/lqr/mpc_plan.py --shapes         # the QP's size (an ESP32's) against the hard cases
 
 Why (drive_design.py, 10-29 / 11-03): no fixed plan cap is right for every battery. At 0.6 m/s^2 (flashed) the LQR
 never reaches its +/-400 limit, but starts take 0.45-0.9 s; at 1.0-1.5 m/s^2 a full battery starts 1.5-2x faster,
@@ -12,8 +13,8 @@ The falls come from the LQR's own transient (its correction as the body leans in
 planner predicts with the whole closed loop.
 
 The LQR, its readings and filters stay exactly as flashed (closed_loop.flashed); only the plan's acceleration a_r
-(closed_loop.Firmware._plan_acc) is replaced. Every STEP_CYCLES control cycles the planner solves for the jerk of
-a_r over the next HORIZON steps (each held over a step), predicting with linear_model's cycle model (the plant, the
+(closed_loop.Firmware._plan_acc) is replaced. Every shape.step_cycles control cycles the planner solves for the jerk
+of a_r over the next shape.horizon steps (each held over a step), predicting with linear_model's cycle model (the plant, the
 firmware's readings and filters) closed by the flashed law and the plan's references (position, speed,
 acceleration, the speed as the law sees it, smoothed 0.1 s) and the pitch estimate's error (Predictor), 12 states.
 Stick held: the planned speed toward the
@@ -30,6 +31,12 @@ than the flashed plan (0.53 vs 0.46 s, the jerk weight), a 5-6 deg lean-back aft
 correction the MPC fell (the drifting estimate leaned the body past the plan, the robot outran it).
 The predictor MEASURED against the full simulation (--predcheck): 0.2 deg rms of lean, ~10 units of command once the
 friction compensation (~32, the margin) is taken out.
+The battery (tools/balance/motor_strength.py): motor = vbat / 8.29 V on the robot (2.7 % rms); told 5 % wrong either
+way the planner's cases do not change; predicting with the full-strength model and only scaling the command limit
+falls (x0.78, 0.60 m/s): the strength has to be in the model -- on a microcontroller, a QP per ~10 % of strength.
+The size (--shapes, 11-03): every trimmed shape held every case; 25 steps x 41 ms (1.03 s), the limits checked once a
+step, 30-50 ADMM iterations, solved a step late (a planner task): ~6-11 M multiply-adds a second, starts ~0.04 s
+slower, the lean up to ~13.4 deg against the 12 (its peak falls between the checked points: aim ~1 deg lower).
 
 Not modelled by the predictor: friction, cogging, the 4.1 ms actuator delay, the plan's lead limit -- the full
 simulation (closed_loop.run) has them all, so the cases test the planner against them. The motor strength (the
@@ -41,7 +48,7 @@ the state, so the one matrix to factor is factored once per mode (held / release
 work, warm-started from the last plan shifted by a step -- the shape a microcontroller can run.
 """
 import argparse
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import numpy as np
 from scipy.linalg import cho_factor, cho_solve
@@ -51,8 +58,28 @@ import linear_model as L
 from closed_loop import FLASHED_K, FLASHED_PLAN, FLASHED_UP_DEG, L2_SPEED, U_MAX, Firmware
 from model import Params
 
-STEP_CYCLES = 5            # control cycles per planner step (~20.7 ms at 4.13 ms: the planner at ~48 Hz)
-HORIZON = 50               # planner steps looked ahead (~1.03 s)
+
+
+@dataclass(frozen=True)
+class Shape:
+    """The QP's size: steps looked ahead, control cycles per step, cycles between the checked points of the command
+    and the lean, ADMM iterations; late: the plan used one step after the state it was solved from (a planner task
+    slower than the control cycle, as on the ESP32) -- solved from the state predicted a step on instead."""
+    horizon: int = 50
+    step_cycles: int = 5
+    check_every: int = 1
+    iters: int = 200
+    late: bool = False
+
+    @property
+    def name(self):
+        T = L.T * self.step_cycles
+        return (f"{self.horizon} x {T * 1000:.0f} ms ({self.horizon * T:.2f} s), checks every "
+                f"{self.check_every} cycle{'s' if self.check_every > 1 else ''}, {self.iters} iters"
+                + (", a step late" if self.late else ""))
+
+
+FULL = Shape()                                            # the prototype: ~48 Hz, 1.03 s, every cycle checked
 LEAN_MAX_DEG = 12.0        # the body's lean limit, deg (Marc, 11-03)
 U_MARGIN = 40.0            # command units kept free for the friction compensation (32.5) and slack
 J_SCALE = 10.0             # m/s^3 per unit of the QP's variable (keeps it near 1)
@@ -79,7 +106,7 @@ class Predictor:
     the law reads th + e. MEASURED 11-03 (predcheck): left out, the predictor's start peaked 0.9 deg and ~35 units
     under the full simulation's; with friction, the delay and that left out it matched to 0.16 deg and 4 units."""
 
-    def __init__(self, p=None, motor=1.0, plan=FLASHED_PLAN, tau_v=0.100, acc_comp=None):
+    def __init__(self, p=None, motor=1.0, plan=FLASHED_PLAN, tau_v=0.100, acc_comp=None, shape=FULL):
         """acc_comp: as closed_loop.Firmware's -- the accelerometer corrected by the plan's acceleration ("plan") or the
         measured one ("wheels", taken as the axle's own): e is then pushed only by what the correction misses."""
         p = p or Params()
@@ -136,28 +163,37 @@ class Predictor:
             self.A[7, n:] += self.w_c / CL.G * Rr[2]
             self.B[7] += self.w_c / CL.G * Rj[2]
         self.ix, self.iv, self.ia, self.ivf, self.ith = ix, iv, ia, ivf, 2
+        self.shape = shape
         self._lift()
 
     def _lift(self):
-        """Every output over the horizon as Y0 xi0 + Yj J (J = the HORIZON jerks / J_SCALE): per cycle the command and
-        the lean, per step the plan's position, speed and acceleration."""
-        NC, N = HORIZON * STEP_CYCLES, self.N
-        Mx, Mj = np.eye(N), np.zeros((N, HORIZON))
-        U0, Uj, Th0, Thj = (np.zeros((NC, N)), np.zeros((NC, HORIZON)), np.zeros((NC, N)), np.zeros((NC, HORIZON)))
-        S0 = {k: np.zeros((HORIZON, N)) for k in ("x", "v", "a")}
-        Sj = {k: np.zeros((HORIZON, HORIZON)) for k in ("x", "v", "a")}
-        for c in range(NC):
-            s = c // STEP_CYCLES
-            U0[c], Uj[c] = self.Ku @ Mx, self.Ku @ Mj
-            Uj[c, s] += self.Kuj
+        """Every output over the horizon as Y0 xi0 + Yj J (J = the horizon's jerks / J_SCALE): the command and the lean
+        at every shape.check_every-th cycle, per step the plan's position, speed and acceleration; and one step's
+        flow (Phi, Gam: xi a step on, the step's jerk held)."""
+        H, S, ce, N = self.shape.horizon, self.shape.step_cycles, self.shape.check_every, self.N
+        Mx, Mj = np.eye(N), np.zeros((N, H))
+        U0, Uj, Th0, Thj = [], [], [], []
+        S0 = {k: np.zeros((H, N)) for k in ("x", "v", "a")}
+        Sj = {k: np.zeros((H, H)) for k in ("x", "v", "a")}
+        for c in range(H * S):
+            s = c // S
+            chk = c % ce == ce - 1
+            if chk:
+                U0.append(self.Ku @ Mx)
+                Uj.append(self.Ku @ Mj)
+                Uj[-1][s] += self.Kuj
             Mx, Mj = self.A @ Mx, self.A @ Mj
             Mj[:, s] += self.B
-            Th0[c], Thj[c] = Mx[self.ith], Mj[self.ith]
-            if c % STEP_CYCLES == STEP_CYCLES - 1:
+            if chk:
+                Th0.append(Mx[self.ith])
+                Thj.append(Mj[self.ith])
+            if c % S == S - 1:
                 for k, i in (("x", self.ix), ("v", self.iv), ("a", self.ia)):
                     S0[k][s], Sj[k][s] = Mx[i], Mj[i]
+            if c == S - 1:
+                self.Phi, self.Gam = Mx.copy(), Mj[:, 0].copy()
         sc = J_SCALE
-        self.U0, self.Uj, self.Th0, self.Thj = U0, Uj * sc, Th0, Thj * sc
+        self.U0, self.Uj, self.Th0, self.Thj = np.array(U0), np.array(Uj) * sc, np.array(Th0), np.array(Thj) * sc
         self.S0, self.Sj = S0, {k: v * sc for k, v in Sj.items()}
 
 
@@ -205,10 +241,14 @@ class MpcPlanner:
         G = np.vstack([pred.Uj / self.lim["u"], pred.Thj / self.lim["th"], pred.Sj["v"] / self.lim["v"]])
         self.G = G
         Sv, Sx, Sa = pred.Sj["v"], pred.Sj["x"], pred.Sj["a"]
-        reg = W_J * J_SCALE ** 2 * np.eye(HORIZON) + W_A * Sa.T @ Sa
-        self.qps = {"held": Qp(2 * (W_V * Sv.T @ Sv + reg), G, soft=SOFT),
-                    "released": Qp(2 * (W_X * Sx.T @ Sx + W_V_REL * Sv.T @ Sv + reg), G, soft=SOFT)}
-        self.J = np.zeros(HORIZON)
+        H, it = pred.shape.horizon, pred.shape.iters
+        # the weights are per step: a step of another length weighs in proportion (FULL's 5 cycles = 1)
+        ws = pred.shape.step_cycles / FULL.step_cycles
+        reg = ws * (W_J * J_SCALE ** 2 * np.eye(H) + W_A * Sa.T @ Sa)
+        self.ws = ws
+        self.qps = {"held": Qp(2 * ws * W_V * Sv.T @ Sv + 2 * reg, G, soft=SOFT, iters=it),
+                    "released": Qp(2 * ws * (W_X * Sx.T @ Sx + W_V_REL * Sv.T @ Sv) + 2 * reg, G, soft=SOFT, iters=it)}
+        self.J = np.zeros(H)
 
     def bounds(self, xi0):
         pr, lim = self.p, self.lim
@@ -216,16 +256,16 @@ class MpcPlanner:
         return -1.0 - free, 1.0 - free
 
     def solve(self, xi0, v_target=None, home=None):
-        """The jerk plan (m/s^3, HORIZON steps) from the state xi0: toward v_target (held) or back to home (released)."""
+        """The jerk plan (m/s^3, a horizon's steps) from the state xi0: toward v_target (held) or back to home (released)."""
         pr = self.p
         lo, hi = self.bounds(xi0)
         Sv, Sx, Sa = pr.Sj["v"], pr.Sj["x"], pr.Sj["a"]
         fa = W_A * Sa.T @ (pr.S0["a"] @ xi0)
         if home is None:
-            mode, q = "held", 2 * (W_V * Sv.T @ (pr.S0["v"] @ xi0 - v_target) + fa)
+            mode, q = "held", 2 * self.ws * (W_V * Sv.T @ (pr.S0["v"] @ xi0 - v_target) + fa)
         else:
             mode = "released"
-            q = 2 * (W_X * Sx.T @ (pr.S0["x"] @ xi0 - home) + W_V_REL * Sv.T @ (pr.S0["v"] @ xi0) + fa)
+            q = 2 * self.ws * (W_X * Sx.T @ (pr.S0["x"] @ xi0 - home) + W_V_REL * Sv.T @ (pr.S0["v"] @ xi0) + fa)
         warm = np.r_[self.J[1:], self.J[-1]]
         self.J = self.qps[mode].solve(q, lo, hi, warm=warm)
         self.qp, self.q, self.lo, self.hi = self.qps[mode], q, lo, hi
@@ -235,11 +275,17 @@ class MpcPlanner:
 class MpcFirmware(Firmware):
     """The flashed firmware (closed_loop.flashed) with the plan's acceleration from the MPC planner."""
 
-    def __init__(self, motor=1.0, lean_max_deg=LEAN_MAX_DEG, p=None, up_deg=FLASHED_UP_DEG, acc_comp=ACC_COMP, **kw):
+    def __init__(self, motor=1.0, lean_max_deg=LEAN_MAX_DEG, p=None, up_deg=FLASHED_UP_DEG, acc_comp=ACC_COMP,
+                 pred_motor=None, shape=FULL, **kw):
+        """motor: the strength the planner believes (on the robot: tools/balance/motor_strength.py, vbat / 8.29 V).
+        pred_motor: predict with a motor of this strength instead and scale the command limit by motor / pred_motor
+        (pred_motor 1: one QP for every battery, as a microcontroller would keep it)."""
         super().__init__(k=FLASHED_K, up_deg=up_deg, fric_comp=True, plan=dict(FLASHED_PLAN), hover_imu=True,
                          tau_v=0.100, acc_comp=acc_comp, **kw)
-        self.pred = Predictor(p, motor=motor, acc_comp=acc_comp)
-        self.mpc = MpcPlanner(self.pred, lean_max_deg=lean_max_deg)
+        pm = motor if pred_motor is None else pred_motor
+        self.pred = Predictor(p, motor=pm, acc_comp=acc_comp, shape=shape)
+        self.shape, self.plan_j = shape, np.zeros(shape.horizon)
+        self.mpc = MpcPlanner(self.pred, lean_max_deg=lean_max_deg, u_max=(U_MAX - U_MARGIN) * motor / pm)
         self.cycle, self.jerk, self.u_last, self.e_est = 0, 0.0, 0.0, 0.0
 
     def _output(self, u, dt):
@@ -264,12 +310,18 @@ class MpcFirmware(Firmware):
         return xi
 
     def _plan_acc(self, dt, stick, held, x, pitch):
-        if self.cycle % STEP_CYCLES == 0:
+        if self.cycle % self.shape.step_cycles == 0:
             xi0 = self.xi(x, pitch)
+            if self.shape.late:                          # this step runs the last plan's next jerk; solve from a step on
+                self.jerk = self.plan_j[1]
+                xi0 = self.pred.Phi @ xi0 + self.pred.Gam * self.jerk
             if held:
-                self.jerk = self.mpc.solve(xi0, v_target=float(np.clip(stick, -CL.VMAX, CL.VMAX)))[0]
+                J = self.mpc.solve(xi0, v_target=float(np.clip(stick, -CL.VMAX, CL.VMAX)))
             else:
-                self.jerk = self.mpc.solve(xi0, home=self.home)[0]
+                J = self.mpc.solve(xi0, home=self.home)
+            if not self.shape.late:
+                self.jerk = J[0]
+            self.plan_j = np.r_[0.0, J]                  # late: the step after this one starts the new plan
         self.cycle += 1
         self.a_r += self.jerk * dt
         self.track_bias()
@@ -294,7 +346,7 @@ def check(n=6, seed=1):
         cost = lambda x: 0.5 * x @ qp.P @ x + q @ x
         cons = [dict(type="ineq", fun=lambda x: hi - qp.A @ x, jac=lambda x: -qp.A),
                 dict(type="ineq", fun=lambda x: qp.A @ x - lo, jac=lambda x: qp.A)]
-        ref = minimize(cost, np.zeros(HORIZON), jac=lambda x: qp.P @ x + q, constraints=cons, method="SLSQP",
+        ref = minimize(cost, np.zeros(mpc.J.size), jac=lambda x: qp.P @ x + q, constraints=cons, method="SLSQP",
                        options=dict(maxiter=500, ftol=1e-10))
         viol = lambda x: float(max(0.0, np.max(qp.A @ x - hi), np.max(lo - qp.A @ x)))
         print(f"  {'held ' if held else 'home '}  ADMM {cost(Jn):10.4f} (viol {viol(Jn):.4f})   SLSQP {ref.fun:10.4f} "
@@ -373,10 +425,52 @@ def cases(motors, speeds):
                       f"{log[st, 4].min():+5.1f}..{log[st, 4].max():+5.1f}  | {rev}")
 
 
+SHAPES = (FULL,
+          Shape(horizon=50, step_cycles=5, check_every=5),
+          Shape(horizon=25, step_cycles=10, check_every=10, iters=50),
+          Shape(horizon=25, step_cycles=10, check_every=10, iters=50, late=True),
+          Shape(horizon=25, step_cycles=5, check_every=5, iters=50, late=True),
+          Shape(horizon=25, step_cycles=10, check_every=10, iters=30, late=True))
+
+
+def shapes_compare(shapes=SHAPES):
+    """The QP's size against the hard cases (full / near-empty battery, 0.45 / 0.60 m/s; starts and their stops), and
+    one solve's arithmetic (multiply-adds, roughly what a microcontroller does)."""
+    import time
+    import drive_design as DD
+    p0 = Params()
+    cases = [(1.0, 0.30), (1.0, 0.45), (1.0, 0.60), (0.78, 0.45), (0.78, 0.60)]
+    print("each: time to 90 % | lean range | % at the limit | lean range after the release")
+    for sh in shapes:
+        H, rows = sh.horizon, 3 * (sh.horizon * sh.step_cycles // sh.check_every)
+        flops = sh.iters * (2 * H * H + 4 * rows * H)
+        out = []
+        t_solve = []
+        for motor, V in cases:
+            p = replace(p0, ku_over_b=p0.ku_over_b * motor)
+            fws = []
+            mk = lambda: fws.append(MpcFirmware(motor=motor, up_deg=DD.UP, shape=sh)) or fws[-1]
+            t0 = time.perf_counter()
+            log, fell = DD.case(p, mk, (np.array([0.0, 2.0, 5.0]), np.array([0.0, V, 0.0])), 7.0)
+            t_solve.append((time.perf_counter() - t0) / max(1, fws[-1].cycle / sh.step_cycles))
+            if fell:
+                out.append(f"x{motor:g} {V}: FELL {log[-1, 0]:.2f} s")
+                continue
+            t90, l0, l1, lim = DD.describe(log, 2.0, V)
+            st = (log[:, 0] >= 5.0) & (log[:, 0] < 7.0)
+            out.append(f"x{motor:g} {V}: {t90:4.2f} s {l0:+5.1f}..{l1:+5.1f} {lim:2.0f}% | {log[st, 4].min():+5.1f}.."
+                       f"{log[st, 4].max():+5.1f}")
+        print(f"\n{sh.name}: {H} variables, {rows} limit rows, ~{flops / 1e3:.0f}k multiply-adds a solve "
+              f"({flops / (L.T * sh.step_cycles) / 1e6:.1f} M/s)")
+        for o in out:
+            print("   " + o)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true", help="the QP solver against scipy")
     ap.add_argument("--predcheck", action="store_true", help="the predictor against the full simulation")
+    ap.add_argument("--shapes", action="store_true", help="the QP's size (SHAPES) against the hard cases")
     ap.add_argument("--motors", type=float, nargs="+", default=[1.0, 0.78])
     ap.add_argument("--speeds", type=float, nargs="+", default=[0.30, 0.45, 0.60])
     ap.add_argument("--vmax", type=float, default=0.6, help="the firmware's top speed (closed_loop.VMAX)")
@@ -387,6 +481,9 @@ def main():
         return
     if a.predcheck:
         predcheck()
+        return
+    if a.shapes:
+        shapes_compare()
         return
     cases(a.motors, a.speeds)
 
