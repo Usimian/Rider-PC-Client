@@ -328,8 +328,9 @@ def predcheck(V=0.30, T0=2.0, T=1.5):
     xi = fw.rec[k0][0].copy()
     print(f"the flashed plan's start to {V} m/s on the full model, against the predictor (from the state at the step):")
     print("   t (s)   jerk m/s^3   command: sim  predicted   lean deg: sim  predicted   plan speed: sim  predicted")
-    for k in range(k0, min(len(fw.rec) - 1, len(log))):
+    for k in range(k0, min(len(fw.rec), len(log)) - 1):
         xi_k, j, _ = fw.rec[k]
+        j *= (t[k + 1] - t[k]) / pred.T                  # the firmware's step over this cycle, as one of the mean length
         u_pred = pred.Ku @ xi + pred.Kuj * j
         u_sim = fw.rec[k + 1][2]                         # the command this cycle sent (read at the next one)
         if (k - k0) % 12 == 0:
