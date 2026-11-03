@@ -216,12 +216,7 @@ class Firmware:
         if self.stick_held and not held:
             self.home = x                                              # the stick released: hold this spot
         self.stick_held = held
-        target = float(np.clip(stick, -VMAX, VMAX))
-        if not held:                                                   # released: back home, gently (main.cpp)
-            target = float(np.clip(HOME_K * (self.home - self.plan_x), -HOME_VMAX, HOME_VMAX))
-        a_des = np.clip(R["gain"] * (target - self.v_r), -R["a_max"], R["a_max"])
-        jerk = R["a_max"] / R["t_jerk"]
-        self.a_r += np.clip(a_des - self.a_r, -jerk * dt, jerk * dt)
+        self._plan_acc(dt, stick, held, x, pitch)                      # the plan's acceleration a_r, this cycle
         self.v_r += self.a_r * dt
         self.plan_x = float(np.clip(self.plan_x + self.v_r * dt, x - PLAN_MAX_LEAD_M, x + PLAN_MAX_LEAD_M))
         self.v_r_f = self.a_v * self.v_r_f + (1 - self.a_v) * self.v_r
@@ -231,6 +226,18 @@ class Firmware:
         u = -(k["x"] * xerr + k["vx"] * (self.vel_s - L2_SPEED * self.v_r_f) + k["q"] * (pitch - lean_fw)
               + k["dq"] * self.dq_law) + self.plan_i + u_ff
         return self._output(u, dt)
+
+    def _plan_acc(self, dt, stick, held, x, pitch):
+        """The plan's acceleration (main.cpp plan_step): toward the stick's speed (released: back home, gently) at up
+        to a_max, the acceleration building over t_jerk. x, pitch: the axle and the pitch this cycle (firmware frame),
+        for a planner that predicts from the robot's state (mpc_plan.MpcFirmware)."""
+        R = self.plan
+        target = float(np.clip(stick, -VMAX, VMAX))
+        if not held:                                                   # released: back home, gently (main.cpp)
+            target = float(np.clip(HOME_K * (self.home - self.plan_x), -HOME_VMAX, HOME_VMAX))
+        a_des = np.clip(R["gain"] * (target - self.v_r), -R["a_max"], R["a_max"])
+        jerk = R["a_max"] / R["t_jerk"]
+        self.a_r += np.clip(a_des - self.a_r, -jerk * dt, jerk * dt)
 
     def _output(self, u, dt):
         if self.fric_comp:
@@ -327,6 +334,9 @@ def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5, kick=None
         elif t + cyc > T + 1e-9:
             break
         n_sub = int(round(cyc / SUB_S))
+        # a cycle shorter than the moments inside it (fw_timing's 3.0-3.75 ms periods, ~2.5 % of cycles) still reads
+        # and commands -- at its last step (until 2026-11-03 those cycles skipped the law and held the command)
+        k_wheels, k_read, k_cmd = (min(i, n_sub - 1) for i in (i_wheels, i_read, i_cmd))
         inj = chirp(t + timing.imu_s - sweep_at, *sweep) if sweep else 0.0
         stick = 0.0
         if drive is not None:
@@ -341,14 +351,14 @@ def run(p=None, fw=None, T=5.0, sweep=None, sweep_at=3.0, th0_deg=0.5, kick=None
                 if hov:
                     fw.hover_sample(*last_imu, HOVER_IMU_PERIOD_S)
                 next_hover += HOVER_IMU_PERIOD_S
-            if k == i_wheels:
+            if k == k_wheels:
                 fw.read_wheels(plant.p, s)
-            if k == i_read:
+            if k == k_read:
                 if timing.imu_loop:
                     fw.read_imu(*last_imu, prev)
                 else:
                     fw.read_imu(s[B], s[B + 1], plant.accel_body(u), prev)
-            if k == i_cmd:
+            if k == k_cmd:
                 u_fw = fw.control(prev, stick)
                 u = u_fw + inj
             pipe.append(u)                              # the command reaches the wheels actuator_delay later
