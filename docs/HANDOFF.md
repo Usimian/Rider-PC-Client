@@ -160,6 +160,14 @@ list, and what not to trust.
    87 deg on 11-03: require upright and still first?; (c) watch `vrejL/R` -- the first nonzero count shows the
    speed check catching a bad reply; (d) the speed register reads 0.966 of the position's rate: one scale ~3 % off;
    (e) MPC tuning: slower than the fixed plan at 0.30 m/s, brakes at ~-11 deg (fixed ~-7).
+   (f) the planner stops late at walls (with the ToF governor on, 0.45 m/s: 9-16 mm, touched twice; 0.30 m/s:
+   ~45 mm): it chases the governor's falling speed cap a step late and smoothly -- give it the wall's distance as a
+   position limit; meanwhile drive near walls with it off. Baseline with it off not yet recorded.
+   (g) "turns by itself while reversing" (Marc, 11-03 ~19:15-19:17, planner off): the heading hold's target moved
+   in steps with telemetry turnrate 0 -- it only moves while a turn command is non-zero, so brief ones arrived
+   between telemetry lines; their source unknown (the right stick now rests at 0.00 -- not the 10-19 resting
+   offset). Not reproduced since. Every command is now recorded (rider/control/line in riderlog.txt) and the web
+   page shows the sticks: at the next one, read the commands at that moment.
 1. **Body roll, to check (10-29):** (a) persistence VERIFIED 11-03 (OFF came back OFF after every power-cycle that
    day); (b) the bubble level's left/right is ASSUMED from the leg
    naming: lower the robot's left side (seen from behind), the bubble should go right; (c) the lean cap is 4 deg,
