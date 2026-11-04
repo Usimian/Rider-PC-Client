@@ -862,22 +862,48 @@ static float wheel_x=0, wheel_vx=0;        // fused: meters, scaled vel
 static float wheel_vr=0;                   // fused unfiltered scaled vel
 static float gHdgTarget=0;                 // heading-lock target = (wheel1_x - wheel2_x) to hold
 
+// WHEEL SPEED CHECK (2026-11-03). Defect: driving backward at 0.45 m/s on the LQR, wheel 1's speed register read
+// about -8000 counts (~4 m/s) for one sample -- not a failed read: its position moved on exactly as wheel 2's (-49
+// vs -50 mm that 0.1 s). The LQR took the speed and pinned its command, the heading hold (wheel1_vel - wheel2_vel)
+// threw the turn to 219, the body pitched over at 240-320 deg/s and it fell. So each reply's speed is held to the
+// speed its position implies (the counts moved since the last reply over the time between): within VCHK_TOL the
+// register is used as before; past it, whichever of the two is nearer the wheel's last speed (a bad position read is
+// caught the same way), and the reply is counted (telemetry vrejL / vrejR). The two agree to ~16 mm/s cruising
+// (2026-11-03 telemetry: the register reads 0.966 of the position's rate -- one of the two scales is ~3 % off).
+#define VCHK_TOL (0.25f * LQR_SPEED_PER_MPS)       // scaled units (0.25 m/s; the register's step ~3 mm/s, a count 0.05 m/s a cycle)
+volatile uint32_t tVrejL = 0, tVrejR = 0;
+static uint32_t gVchkUsL = 0, gVchkUsR = 0;
+static float vCheck(float vReg, int dCounts, bool haveD, uint32_t* lastUs, float vPrev, volatile uint32_t* rej){
+  uint32_t now = micros();
+  float dt = (now - *lastUs) * 1e-6f;
+  *lastUs = now;
+  if(!haveD || dt <= 1e-4f || dt > 0.05f) return vReg;                     // no position step to hold it to
+  float vPos = (float)dCounts / 1024.0f * WHEEL_CIRC_M / dt * LQR_SPEED_PER_MPS;
+  if(fabsf(vReg - vPos) <= VCHK_TOL) return vReg;
+  (*rej)++;
+  return (fabsf(vReg - vPrev) <= fabsf(vPos - vPrev)) ? vReg : vPos;
+}
+
 static void odomUpdate(uint8_t id, int pos, int vel){
   if(id==LEFT_W){
-    if(last11>=0){
+    int dd = 0; bool have = last11 >= 0;
+    if(have){
       int d = pos - last11;
-      if(d < -800) wheel1_x += 1023 + d; else if(d > 800) wheel1_x += -1023 + d; else wheel1_x += d;
+      dd = (d < -800) ? 1023 + d : ((d > 800) ? -1023 + d : d);
+      wheel1_x += dd;
     }
     last11 = pos;
-    wheel1_vr = 4.5f*(float)vel*K_V;
+    wheel1_vr = vCheck(4.5f*(float)vel*K_V, dd, have, &gVchkUsL, wheel1_vr, &tVrejL);
     wheel1_vel = LP_VEL*wheel1_vel + (1.0f-LP_VEL)*wheel1_vr;
   } else { // RIGHT_W — mirrored (matches L:+u / R:-u)
-    if(last21>=0){
+    int dd = 0; bool have = last21 >= 0;
+    if(have){
       int d = pos - last21;
-      if(d < -800) wheel2_x -= 1023 + d; else if(d > 800) wheel2_x -= -1023 + d; else wheel2_x -= d;
+      dd = -((d < -800) ? 1023 + d : ((d > 800) ? -1023 + d : d));
+      wheel2_x += dd;
     }
     last21 = pos;
-    wheel2_vr = 4.5f*(float)(-vel)*K_V;
+    wheel2_vr = vCheck(4.5f*(float)(-vel)*K_V, dd, have, &gVchkUsR, wheel2_vr, &tVrejR);
     wheel2_vel = LP_VEL*wheel2_vel + (1.0f-LP_VEL)*wheel2_vr;
   }
   wheel_x  = (wheel1_x + wheel2_x) / 2.0f / 1024.0f * WHEEL_CIRC_M;
@@ -1874,8 +1900,8 @@ void loop(){
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
     char b[704];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f amax=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f pull=%.2f lean=%.2f mpc=%u mpcus=%u gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u legstkL=%u legstkR=%u legst=%u rfL=%u rfR=%u rft0=%u rft1=%u ms=%u\n",
-      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gLqrAMax, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gRollMode, tRollAcc, tPull, tLean, (unsigned)tMpcState, (unsigned)tMpcUs, gTurn, gHdgTarget, gYawRateCmd,
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f amax=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f pull=%.2f lean=%.2f mpc=%u mpcus=%u vrejL=%u vrejR=%u gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u legstkL=%u legstkR=%u legst=%u rfL=%u rfR=%u rft0=%u rft1=%u ms=%u\n",
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gLqrAMax, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gRollMode, tRollAcc, tPull, tLean, (unsigned)tMpcState, (unsigned)tMpcUs, (unsigned)tVrejL, (unsigned)tVrejR, gTurn, gHdgTarget, gYawRateCmd,
       (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID), (unsigned)gDriveWdTrips, (unsigned)tLegRetryL, (unsigned)tLegRetryR, (unsigned)tLegFailL, (unsigned)tLegFailR, (unsigned)tLegStuckL, (unsigned)tLegStuckR, (unsigned)((gLegLimped?1:0)|(gLegHoming?2:0)|(gLegEnerR?4:0)|(gLegEnerL?8:0)), (unsigned)tRfL, (unsigned)tRfR, (unsigned)tRfFirstMs, (unsigned)tRfLastMs, (unsigned)millis());
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     emit(b,k);
