@@ -5,6 +5,7 @@ program, looking ahead, within the motor's authority and a body-lean limit.
     python3 sim/lqr/mpc_plan.py                  # driving cases: the MPC against today's plan (drive_design.py's)
     python3 sim/lqr/mpc_plan.py --predcheck      # the predictor against the full simulation, a start
     python3 sim/lqr/mpc_plan.py --shapes         # the QP's size (an ESP32's) against the hard cases
+    python3 sim/lqr/mpc_plan.py --walls          # full stick at a wall through the ToF governor
 
 Why (drive_design.py, 10-29 / 11-03): no fixed plan cap is right for every battery. At 0.6 m/s^2 (flashed) the LQR
 never reaches its +/-400 limit, but starts take 0.45-0.9 s; at 1.0-1.5 m/s^2 a full battery starts 1.5-2x faster,
@@ -37,6 +38,13 @@ falls (x0.78, 0.60 m/s): the strength has to be in the model -- on a microcontro
 The size (--shapes, 11-03): every trimmed shape held every case; 25 steps x 41 ms (1.03 s), the limits checked once a
 step, 30-50 ADMM iterations, solved a step late (a planner task): ~6-11 M multiply-adds a second, starts ~0.04 s
 slower, the lean up to ~13.4 deg against the 12 (its peak falls between the checked points: aim ~1 deg lower).
+
+WALLS (--walls, 11-03): the planner chased the ToF governor's falling speed cap a step late and smoothly -- on the
+floor it stopped 9-16 mm from a wall at 0.45 m/s (touching twice) against the governor's 100 mm. The WALL rows hold
+the predicted axle behind the stop mark at every step (the governor's distance, the axle's position, less the travel
+during the assumed latency WALL_LATENCY). Through a simulated governor at 0.45 m/s, real latency 0.1 / 0.2 / 0.3 s
+(the recordings cannot tell): the planner with the wall limit 108-110 / 103-105 / 95-97 mm, braking at ~-4 deg; the
+fixed plan 91-98 / 69-72 / 23-32 mm; the planner without the limit 42-50 mm at 0.1 s.
 
 Not modelled by the predictor: friction, cogging, the 4.1 ms actuator delay, the plan's lead limit -- the full
 simulation (closed_loop.run) has them all, so the cases test the planner against them. The motor strength (the
@@ -85,6 +93,8 @@ U_MARGIN = 40.0            # command units kept free for the friction compensati
 J_SCALE = 10.0             # m/s^3 per unit of the QP's variable (keeps it near 1)
 E_WEIGHT = 1.0 / 210.0     # the IMU path's accelerometer weight a sample, 1/(|rate| + 200) at ~10 deg/s
 SOFT = 1e4                 # the price of a limit overstepped (per limit's width): steep, but never impossible
+WALL_SCALE = 0.10          # m: the wall rows' unit -- 10 cm past the stop mark costs as much as a limit's width
+WALL_FREE = 1e3            # the wall rows' bound with no wall (in WALL_SCALE units: 100 m)
 ACC_COMP = CL.FLASHED_ACC_COMP   # the pitch estimate corrected by the plan's acceleration (as flashed since 11-03):
                            # MEASURED 11-03, uncorrected the estimate drifts ~3 deg through a start, the body outruns
                            # the plan and the weak-battery 0.60 m/s start falls; "wheels" holds too but leans 13-14
@@ -173,8 +183,8 @@ class Predictor:
         H, S, ce, N = self.shape.horizon, self.shape.step_cycles, self.shape.check_every, self.N
         Mx, Mj = np.eye(N), np.zeros((N, H))
         U0, Uj, Th0, Thj = [], [], [], []
-        S0 = {k: np.zeros((H, N)) for k in ("x", "v", "a")}
-        Sj = {k: np.zeros((H, H)) for k in ("x", "v", "a")}
+        S0 = {k: np.zeros((H, N)) for k in ("x", "v", "a", "xa")}
+        Sj = {k: np.zeros((H, H)) for k in ("x", "v", "a", "xa")}
         for c in range(H * S):
             s = c // S
             chk = c % ce == ce - 1
@@ -188,7 +198,7 @@ class Predictor:
                 Th0.append(Mx[self.ith])
                 Thj.append(Mj[self.ith])
             if c % S == S - 1:
-                for k, i in (("x", self.ix), ("v", self.iv), ("a", self.ia)):
+                for k, i in (("x", self.ix), ("v", self.iv), ("a", self.ia), ("xa", 0)):
                     S0[k][s], Sj[k][s] = Mx[i], Mj[i]
             if c == S - 1:
                 self.Phi, self.Gam = Mx.copy(), Mj[:, 0].copy()
@@ -238,7 +248,8 @@ class MpcPlanner:
     def __init__(self, pred, lean_max_deg=LEAN_MAX_DEG, u_max=U_MAX - U_MARGIN, v_max=None):
         self.p = pred
         self.lim = dict(u=u_max, th=np.radians(lean_max_deg), v=CL.VMAX if v_max is None else v_max)
-        G = np.vstack([pred.Uj / self.lim["u"], pred.Thj / self.lim["th"], pred.Sj["v"] / self.lim["v"]])
+        G = np.vstack([pred.Uj / self.lim["u"], pred.Thj / self.lim["th"], pred.Sj["v"] / self.lim["v"],
+                       pred.Sj["xa"] / WALL_SCALE])
         self.G = G
         Sv, Sx, Sa = pred.Sj["v"], pred.Sj["x"], pred.Sj["a"]
         H, it = pred.shape.horizon, pred.shape.iters
@@ -250,15 +261,19 @@ class MpcPlanner:
                     "released": Qp(2 * ws * (W_X * Sx.T @ Sx + W_V_REL * Sv.T @ Sv) + 2 * reg, G, soft=SOFT, iters=it)}
         self.J = np.zeros(H)
 
-    def bounds(self, xi0):
+    def bounds(self, xi0, wall=None):
+        """The limit rows' bounds from xi0: the command, the lean and the speed within +-1 of their limits; the
+        axle's position (the WALL rows, per step) under wall (m, the stop mark), or free when there is none."""
         pr, lim = self.p, self.lim
         free = np.concatenate([pr.U0 @ xi0 / lim["u"], pr.Th0 @ xi0 / lim["th"], pr.S0["v"] @ xi0 / lim["v"]])
-        return -1.0 - free, 1.0 - free
+        xa = pr.S0["xa"] @ xi0 / WALL_SCALE
+        hi_w = np.full(xa.size, WALL_FREE) if wall is None else wall / WALL_SCALE - xa
+        return np.r_[-1.0 - free, np.full(xa.size, -WALL_FREE)], np.r_[1.0 - free, hi_w]
 
-    def solve(self, xi0, v_target=None, home=None):
+    def solve(self, xi0, v_target=None, home=None, wall=None):
         """The jerk plan (m/s^3, a horizon's steps) from the state xi0: toward v_target (held) or back to home (released)."""
         pr = self.p
-        lo, hi = self.bounds(xi0)
+        lo, hi = self.bounds(xi0, wall)
         Sv, Sx, Sa = pr.Sj["v"], pr.Sj["x"], pr.Sj["a"]
         fa = W_A * Sa.T @ (pr.S0["a"] @ xi0)
         if home is None:
@@ -287,6 +302,7 @@ class MpcFirmware(Firmware):
         self.shape, self.plan_j = shape, np.zeros(shape.horizon)
         self.mpc = MpcPlanner(self.pred, lean_max_deg=lean_max_deg, u_max=(U_MAX - U_MARGIN) * motor / pm)
         self.cycle, self.jerk, self.u_last, self.e_est = 0, 0.0, 0.0, 0.0
+        self.wall_x = None                                # the stop mark ahead (axle, m), None: no wall
 
     def _output(self, u, dt):
         self.u_last = super()._output(u, dt)
@@ -316,9 +332,9 @@ class MpcFirmware(Firmware):
                 self.jerk = self.plan_j[1]
                 xi0 = self.pred.Phi @ xi0 + self.pred.Gam * self.jerk
             if held:
-                J = self.mpc.solve(xi0, v_target=float(np.clip(stick, -CL.VMAX, CL.VMAX)))
+                J = self.mpc.solve(xi0, v_target=float(np.clip(stick, -CL.VMAX, CL.VMAX)), wall=self.wall_x)
             else:
-                J = self.mpc.solve(xi0, home=self.home)
+                J = self.mpc.solve(xi0, home=self.home, wall=self.wall_x)
             if not self.shape.late:
                 self.jerk = J[0]
             self.plan_j = np.r_[0.0, J]                  # late: the step after this one starts the new plan
@@ -425,6 +441,72 @@ def cases(motors, speeds):
                       f"{log[st, 4].min():+5.1f}..{log[st, 4].max():+5.1f}  | {rev}")
 
 
+# The ToF obstacle governor (pi/rider_tof_safety.py) as the wall cases see it: a frame every GOV_PERIOD, its speed cap
+# (full speed beyond SLOW_FWD, zero at STOP_FWD, linear between; forward only) reaching the robot GOV_LATENCY later;
+# with the planner's wall limit, the same frame's distance too -- the firmware turns it into the stop mark, the axle
+# STOP_FWD short of the wall: where the axle is now, plus the distance, less the travel during GOV_LATENCY (its own
+# speed estimate).
+GOV_PERIOD, GOV_LATENCY = 0.10, 0.10
+WALL_LATENCY = 0.20        # s: the latency the firmware ASSUMES for the stop mark (the real one is not known: the
+                           # 11-03 recording fits 0-0.3 s about equally -- the ToF's distance jumps ~3 cm a frame)
+SLOW_FWD, STOP_FWD = 0.40, 0.10
+
+
+def governed(cls):
+    """cls (a Firmware) driven through the governor toward a wall wall_at m ahead of the start; use_wall: the planner
+    gets the wall's stop mark (MpcFirmware only)."""
+    from collections import deque
+
+    class Governed(cls):
+        def __init__(self, wall_at, use_wall=False, latency=GOV_LATENCY, assumed=WALL_LATENCY, **kw):
+            super().__init__(**kw)
+            self.wall_at, self.use_wall, self.latency, self.assumed = wall_at, use_wall, latency, assumed
+            self.t = self.next_frame = 0.0
+            self.inbox, self.factor, self.gaps = deque(), 1.0, []
+
+        def control(self, dt, stick=0.0):
+            self.t += dt
+            x = self.wheel_x                                   # the firmware's own position (axle ~ wheel_x)
+            if self.t >= self.next_frame:                      # a ToF frame: the distance to the wall now
+                self.next_frame += GOV_PERIOD
+                self.inbox.append((self.t + self.latency, self.wall_at - x))
+            while self.inbox and self.inbox[0][0] <= self.t:    # ... reaching the robot GOV_LATENCY later
+                _, d = self.inbox.popleft()
+                self.factor = float(np.clip((d - STOP_FWD) / (SLOW_FWD - STOP_FWD), 0.0, 1.0))
+                if self.use_wall:
+                    v = self.vel_s / L2_SPEED
+                    self.wall_x = x + d - STOP_FWD - v * self.assumed
+            return super().control(dt, stick * self.factor if stick > 0 else stick)
+
+    return Governed
+
+
+def wall_cases(wall_at=1.2, T=6.0):
+    """Full stick at a wall wall_at m ahead: the fixed plan, the planner, and the planner with its wall limit, each
+    through the governor. Per case the closest the axle came to the stop mark and to the wall (axle position against
+    the wall's; < 0 = through it), the lean range, where it settled."""
+    import drive_design as DD
+    p0 = Params()
+    fixed = dict(k=FLASHED_K, up_deg=DD.UP, fric_comp=True, plan=dict(FLASHED_PLAN), hover_imu=True, tau_v=0.100,
+                 acc_comp=ACC_COMP)
+    ctrls = [("fixed plan", lambda m: governed(Firmware)(wall_at, **fixed)),
+             ("MPC", lambda m: governed(MpcFirmware)(wall_at, motor=m, up_deg=DD.UP)),
+             ("MPC + wall limit", lambda m: governed(MpcFirmware)(wall_at, use_wall=True, motor=m, up_deg=DD.UP))]
+    print(f"full stick at a wall {wall_at} m ahead, through the governor (frames every {GOV_PERIOD} s, "
+          f"{GOV_LATENCY} s late); the stop mark {STOP_FWD * 1000:.0f} mm short of the wall")
+    print("                               closest to the wall   settled at   lean range     fell")
+    for motor in (1.0, 0.78):
+        p = replace(p0, ku_over_b=p0.ku_over_b * motor)
+        for V in (0.30, 0.45):
+            for name, mk in ctrls:
+                log, fell = DD.case(p, lambda: mk(motor), (np.array([0.0, 1.0]), np.array([0.0, V])), T)
+                t, v, lean = log[:, 0], log[:, 3], log[:, 4]
+                x = np.cumsum(v * np.gradient(t))
+                gap = (wall_at - x) * 1000
+                print(f"  x{motor:<5g}{V:.2f} m/s  {name:17s}  {gap.min():6.0f} mm           {gap[-1]:6.0f} mm   "
+                      f"{lean.min():+5.1f}..{lean.max():+5.1f}   {'FELL' if fell else ''}", flush=True)
+
+
 SHAPES = (FULL,
           Shape(horizon=50, step_cycles=5, check_every=5),
           Shape(horizon=25, step_cycles=10, check_every=10, iters=50),
@@ -471,6 +553,7 @@ def main():
     ap.add_argument("--check", action="store_true", help="the QP solver against scipy")
     ap.add_argument("--predcheck", action="store_true", help="the predictor against the full simulation")
     ap.add_argument("--shapes", action="store_true", help="the QP's size (SHAPES) against the hard cases")
+    ap.add_argument("--walls", action="store_true", help="full stick at a wall through the governor")
     ap.add_argument("--motors", type=float, nargs="+", default=[1.0, 0.78])
     ap.add_argument("--speeds", type=float, nargs="+", default=[0.30, 0.45, 0.60])
     ap.add_argument("--vmax", type=float, default=0.6, help="the firmware's top speed (closed_loop.VMAX)")
@@ -484,6 +567,10 @@ def main():
         return
     if a.shapes:
         shapes_compare()
+        return
+    if a.walls:
+        CL.VMAX = 0.45
+        wall_cases()
         return
     cases(a.motors, a.speeds)
 
