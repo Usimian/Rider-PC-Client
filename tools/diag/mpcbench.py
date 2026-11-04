@@ -3,13 +3,14 @@
     /home/marc/.xgo-cal/bin/python tools/diag/mpcbench.py [reps ...] [--port /dev/ttyUSB0]
 
 The robot on the stand, balancing off, USB-C to this machine. The port is opened with DTR / RTS held low, so the
-ESP32 does not reset. Each reps value is one run (main.cpp mpcBenchTask: the QP of firmware/esp32_rider_fw/src/
-mpc_bench_data.h, from sim/lqr/mpc_export.py, solved reps times on core 0 below the IMU loop). Reply fields: us = the
-microseconds a solve, diff_ref = its answer against Python's after the same iterations (precision), diff_conv =
-against the converged one, jerk = the plan's first jerk (m/s^3). The planner's step at the ESP32 size is ~41 ms.
-MEASURED 2026-11-03 (on the stand): 14.2-14.3 ms a solve (20 / 100 / 200 reps; 25 jerks, 75 limit rows, 50
-iterations from cold), the answer within 6e-6 of Python's -- ~31 M multiply-adds a second; ~35 % of core 0 at the
-planner's 41 ms step. The matrices are read from flash and the firmware is built for size (-Os): room to gain.
+ESP32 does not reset. Each reps value is one run (main.cpp mpcBenchTask: the MPC planner's own solve, mpcSolve, on the
+stored real state of mpc_plan_data.h -- sim/lqr/mpc_export.py -- reps times from cold, on core 0 below the IMU loop).
+Reply fields: us = the microseconds a solve, bin = the battery bin it chose, ok = finite, diff = its 25 jerks against
+the Python mirror's (m/s^3; single vs double precision), jerk / ref = the first one, its and the mirror's. The
+planner's step is ~41 ms.
+MEASURED 2026-11-03 (on the stand, the bare QP before the planner was built): 14.2-14.3 ms a solve (20 / 100 / 200
+reps; 25 jerks, 75 limit rows, 50 iterations), the answer within 6e-6 of Python's -- ~31 M multiply-adds a second,
+~35 % of core 0 at the planner's 41 ms step.
 """
 import argparse
 import time

@@ -17,8 +17,7 @@
 #include <Wire.h>
 #include <Preferences.h>       // NVS key/value store -- persists the controller choice (gCtrl) and body roll (gRollMode)
 #include "rider_policy.h"   // auto-generated PPO policy weights (sim/export_policy.py)
-#include "mpc_admm.h"       // the MPC drive planner's QP solver (sim/lqr/mpc_plan.py's Qp)
-#include "mpc_bench_data.h" // GENERATED: one planner QP for 'mpcbench' (sim/lqr/mpc_export.py)
+#include "mpc_solve.h"      // the MPC drive planner's solve (its tables, mpc_plan_data.h; its QP solver, mpc_admm.h)
 #ifndef POL_FRAME
 #define POL_FRAME 7                 // inputs per frame: 7, or 8 with the turn input (headers from 2026-10-20 define it)
 #endif
@@ -516,6 +515,74 @@ static void imuLatest(int16_t*ax,int16_t*ay,int16_t*az,int16_t*gx,int16_t*gy,int
   while(gImuN == 0) vTaskDelay(1);          // until the IMU loop's first sample
   int16_t a[6]; portENTER_CRITICAL(&gImuMux); memcpy(a, gImuLast, sizeof(a)); portEXIT_CRITICAL(&gImuMux);
   *ax=a[0]; *ay=a[1]; *az=a[2]; *gx=a[3]; *gy=a[4]; *gz=a[5];
+}
+
+// ===== MPC PLANNER (2026-11-03): the LQR plan's acceleration chosen by a model-predictive planner. The design and its
+// tests: sim/lqr/mpc_plan.py; the tables (mpc_plan_data.h) and a Python mirror of this arithmetic: sim/lqr/
+// mpc_export.py. Every MPC_STEP_CYCLES control cycles (~41 ms) the balance task posts its state (MpcReq) and a task on
+// core 0, below the IMU loop, solves a QP: the jerks of the plan's acceleration over ~1 s that track the stick's speed
+// (released: back to the held home) within the command's authority (the motor's strength = vbat / 8.29 V,
+// tools/balance/motor_strength.py; a table set per strength bin), the body's lean (aimed at 11 deg for Marc's 12: the
+// limits are checked once a step) and the top speed. The solve takes ~14 ms ('mpcbench'), so it is solved from the
+// state predicted a step on and its plan runs from the next step. Off by default ('mpcplan 1'); the fixed plan
+// (gLqrAMax) runs whenever there is no fresh plan (none yet, or 2 steps missed), a plan is not believable, ACC_COMP is
+// off (the planner's model assumes it), or after a plan_start. In simulation (mpc_export.py, the firmware's arithmetic):
+// 0.45 m/s starts 0.58-0.61 s to 90 % against the fixed plan's 0.71-0.73, the lean ~12, never at the limit, full to
+// ~19 % battery; 0.30 m/s starts slower (0.54-0.59 vs 0.48).
+volatile bool gMpcOn = false;                // 'mpcplan 0/1'
+#define MPC_JERK_MAX 60.0f                   // m/s^3: a planned jerk past this is not believed (the simulation plans < ~20)
+#define MPC_A_MAX    2.0f                    // m/s^2: the plan's acceleration under the planner, clamped
+struct MpcOut { float J[MPC_N]; uint32_t seq, us; uint8_t ok, bin; };
+static MpcReq gMpcReq;
+static MpcOut gMpcOut = {{0}, 0, 0, 0, 0};
+static portMUX_TYPE gMpcMux = portMUX_INITIALIZER_UNLOCKED;
+static TaskHandle_t gMpcTask = NULL;
+volatile uint8_t  tMpcState = 0;             // telemetry mpc: 0 off, 1 the planner's plan, 2 on but the fixed plan running
+volatile uint32_t tMpcUs = 0;                // telemetry mpcus: the last solve (us)
+
+static void mpcTaskFn(void*){                // the planner task: one solve per request
+  static float warm[MPC_N];
+  for(;;){
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    MpcReq r; portENTER_CRITICAL(&gMpcMux); r = gMpcReq; portEXIT_CRITICAL(&gMpcMux);
+    MpcOut o; uint32_t t0 = micros();
+    o.ok = mpcSolve(r, warm, o.J, &o.bin) ? 1 : 0;
+    o.us = micros() - t0; o.seq = r.seq;
+    portENTER_CRITICAL(&gMpcMux); gMpcOut = o; portEXIT_CRITICAL(&gMpcMux);
+    tMpcUs = o.us;
+  }
+}
+
+// The balance task's side, once a cycle in the LQR's plan step. Planner steps are numbered (bnd); the request posted
+// at step s is solved from the state predicted at s + 1, so its plan's J[0] runs at step s + 1, J[1] at s + 2 (if the
+// next plan is late), then the fixed plan. start: a plan_start (re-arm, Circle) -- earlier plans are dropped. xi: as
+// mpc_export.py (the model's frame: + forward; the firmware's pitch and rate are + backward). Returns true with
+// *jerk (m/s^3) when the planner's plan runs this cycle.
+static bool mpcStep(bool start, bool held, float target, const float* xi, float* jerk){
+  static uint32_t bnd = 1, startB = 1, planSeq = 0;
+  static int cyc = 0; static bool have = false, on = false; static float J[MPC_N], jcur = 0.0f;
+  bool use = gMpcOn && gAccComp && gMpcTask != NULL;
+  if(!use){ on = false; tMpcState = 0; return false; }
+  if(start || !on){ startB = bnd; cyc = 0; have = false; on = true; }
+  if(cyc % MPC_STEP_CYCLES == 0){
+    MpcOut o; portENTER_CRITICAL(&gMpcMux); o = gMpcOut; portEXIT_CRITICAL(&gMpcMux);
+    if(o.ok && o.seq >= startB && o.seq < bnd && (!have || o.seq != planSeq)){
+      memcpy(J, o.J, sizeof(J)); planSeq = o.seq; have = true;
+    }
+    int idx = have ? (int)(bnd - (planSeq + 1)) : MPC_N;
+    bool valid = have && idx >= 0 && idx < 2 && isfinite(J[idx]) && fabsf(J[idx]) < MPC_JERK_MAX;
+    jcur = valid ? J[idx] : 0.0f;
+    tMpcState = valid ? 1 : 2;
+    MpcReq r;
+    memcpy(r.xi, xi, sizeof(r.xi));
+    r.jap = jcur; r.target = target; r.vbat = tVbat; r.held = held ? 1 : 0; r.reset = (bnd == startB) ? 1 : 0;
+    r.seq = bnd++;
+    portENTER_CRITICAL(&gMpcMux); gMpcReq = r; portEXIT_CRITICAL(&gMpcMux);
+    xTaskNotifyGive(gMpcTask);
+  }
+  cyc++;
+  *jerk = jcur;
+  return tMpcState == 1;
 }
 
 // ---------------- servo bus (all Serial2 access is in the balance task) ------
@@ -1227,6 +1294,7 @@ static void balanceTask(void*){
       if(!lqrVInit){ lqrV = vax; lqrULp = 0.0f; lqrVInit = true; }
       lqrV = av*lqrV + (1.0f-av)*vax;                               // v_axle, scaled units
       float xax = wheel_x - LQR_WHEEL_R * q * 0.0174533f;           // x_axle
+      bool planStart = !lqrInit;
       if(!lqrInit){                                                 // plan_start: where the robot is, at its speed
         planX = xax; planV = planVF = lqrV / LQR_SPEED_PER_MPS; planA = 0.0f; planI = 0.0f; lqrInit = true;
         lqrHome = xax; lqrStick = false;
@@ -1238,9 +1306,18 @@ static void balanceTask(void*){
         lqrStick = held;
         float stick = clampf(gDriveVel, -gPosVmaxBack, gPosVmax);
         if(!held) stick = clampf(LQR_HOME_K * (lqrHome - planX), -LQR_HOME_VMAX, LQR_HOME_VMAX);   // back home, gently
-        float ades = clampf(LQR_PLAN_GAIN * (stick - planV), -gLqrAMax, gLqrAMax);
-        float jerk = gLqrAMax / LQR_PLAN_TJERK * odt;
-        planA += clampf(ades - planA, -jerk, jerk);
+        // the MPC PLANNER's jerk (it plans from the state before this step), else the fixed plan
+        float xi[MPC_X] = {xax, vax / LQR_SPEED_PER_MPS, -q * 0.0174533f, -dq * 0.0174533f, tU, lqrV / LQR_SPEED_PER_MPS,
+                           -dq * 0.0174533f, 0.0f, planX, planV, planA, planVF};
+        float mpcJerk;
+        float mpcTarget = held ? clampf(stick, -MPC_VMAX, MPC_VMAX) : lqrHome;
+        if(mpcStep(planStart, held, mpcTarget, xi, &mpcJerk)){
+          planA = clampf(planA + mpcJerk * odt, -MPC_A_MAX, MPC_A_MAX);
+        } else {
+          float ades = clampf(LQR_PLAN_GAIN * (stick - planV), -gLqrAMax, gLqrAMax);
+          float jerk = gLqrAMax / LQR_PLAN_TJERK * odt;
+          planA += clampf(ades - planA, -jerk, jerk);
+        }
         planV += planA * odt;
         planX = clampf(planX + planV * odt, xax - LQR_PLAN_LEAD, xax + LQR_PLAN_LEAD);
         planVF = av * planVF + (1.0f - av) * planV;
@@ -1574,34 +1651,32 @@ void setup(){
   policyToRam();                                    // copy NN weights flash -> SRAM (fast matmul)
   xTaskCreatePinnedToCore(imuTask, "imu", 2048, NULL, 12, NULL, 0);   // the IMU loop (the Hover's imu_task)
   xTaskCreatePinnedToCore(balanceTask, "balance", 4096, NULL, 12, NULL, 1);
+  xTaskCreatePinnedToCore(mpcTaskFn, "mpc", 6144, NULL, 1, &gMpcTask, 0);   // the MPC PLANNER, below the IMU loop
 }
 
 // ---------------- command protocol (UART0 + UART1) ----------------
 static void emit(const char* b, int k){ Serial.write((const uint8_t*)b,k); Serial1.write((const uint8_t*)b,k); }
 
-// 'mpcbench [reps]' (2026-11-03): how long the MPC drive planner's QP takes on this chip, before the planner is built.
-// One real QP of the ESP32-sized planner (mpc_bench_data.h: 25 jerks, 75 limit rows, 50 ADMM iterations, from a
-// weak-battery start where the limits bind) solved reps times from cold by a task on core 0 below the IMU loop --
-// where a planner task would run, so the IMU loop's interruptions are in the time. Its answer is checked against
-// Python's after the same iterations (single vs double precision) and the converged one. Refused while balancing.
-// Reply on USB and the Pi link: '# mpcbench reps us_per_solve diff_ref diff_conv jerk'.
+// 'mpcbench [reps]' (2026-11-03): the MPC PLANNER's solve on this chip. The stored sample (mpc_plan_data.h MPCB_*: a
+// real planner state from a simulated weak-battery start, sim/lqr/mpc_export.py) solved reps times from cold by
+// mpcSolve -- the planner's own path: the battery bin, the step ahead, the limits, ADMM -- in a task on core 0 below
+// the IMU loop, where the planner runs. Its plan is checked against the Python mirror's (single vs double precision).
+// Refused while balancing. MEASURED (the bare QP, before the planner): 14.2-14.3 ms a solve, ~35 % of core 0 at the
+// planner's 41 ms step. Reply on USB and the Pi link: '# mpcbench reps us bin diff jerk' (tools/diag/mpcbench.py).
 static void mpcBenchTask(void* arg){
   int reps = (int)(intptr_t)arg;
-  static float x[MPCB_N], z[MPCB_M], y[MPCB_M], work[2 * MPCB_N + MPCB_M];
+  MpcReq r;
+  memcpy(r.xi, MPCB_XI0, sizeof(r.xi));
+  r.jap = MPCB_JAP; r.target = MPCB_TARGET; r.vbat = MPCB_VBAT; r.held = 1; r.reset = 1; r.seq = 0;
+  static float warm[MPC_N], J[MPC_N]; uint8_t bin = 0; bool ok = true;
   uint32_t t0 = micros();
-  for(int r = 0; r < reps; r++){
-    for(int i = 0; i < MPCB_N; i++) x[i] = 0.0f;
-    mpcAdmm(MPCB_N, MPCB_M, MPCB_MINV, MPCB_A, MPCB_Q, MPCB_L, MPCB_U, MPCB_RHO, MPCB_SIGMA, MPCB_ALPHA, MPCB_SOFT,
-            MPCB_ITERS, x, z, y, work);
-  }
+  for(int k = 0; k < reps; k++) ok = mpcSolve(r, warm, J, &bin) && ok;
   uint32_t us = (micros() - t0) / (uint32_t)reps;
-  float dref = 0.0f, dconv = 0.0f;
-  for(int i = 0; i < MPCB_N; i++){
-    dref = fmaxf(dref, fabsf(x[i] - MPCB_X_REF[i])); dconv = fmaxf(dconv, fabsf(x[i] - MPCB_X_CONV[i]));
-  }
+  float d = 0.0f;
+  for(int i = 0; i < MPC_N; i++) d = fmaxf(d, fabsf(J[i] - MPCB_J[i]));
   char b[160];
-  int k = snprintf(b, sizeof(b), "# mpcbench reps=%d n=%d m=%d iters=%d us=%lu diff_ref=%.2e diff_conv=%.4f jerk=%.3f\n",
-                   reps, MPCB_N, MPCB_M, MPCB_ITERS, (unsigned long)us, dref, dconv, x[0] * 10.0f);
+  int k = snprintf(b, sizeof(b), "# mpcbench reps=%d n=%d m=%d iters=%d us=%lu bin=%u ok=%d diff=%.2e jerk=%.3f ref=%.3f\n",
+                   reps, MPC_N, MPC_M, MPC_ITERS, (unsigned long)us, bin, ok ? 1 : 0, d, J[0], MPCB_J[0]);
   emit(b, k);
   vTaskDelete(NULL);
 }
@@ -1733,7 +1808,8 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"fall"))  gFallDeg=clampf(v,10.0f,70.0f);  // tilt-error torque cutoff (deg)
   else if (!strcmp(s,"fallroll")) gFallRollDeg=clampf(v,10.0f,70.0f);  // roll torque cutoff (deg)
   else if (!strcmp(s,"acccomp")) gAccComp = (v!=0);   // pitch estimates less the plan's acceleration (ACC_COMP), 1 default
-  else if (!strcmp(s,"mpcbench")){                     // time the MPC planner's QP on this chip (see mpcBenchTask)
+  else if (!strcmp(s,"mpcplan")) gMpcOn = (v!=0);     // the MPC PLANNER chooses the LQR plan's acceleration (0 default)
+  else if (!strcmp(s,"mpcbench")){                     // time the MPC planner's solve on this chip (see mpcBenchTask)
     if(gEnabled){ emit("# mpcbench REFUSED: balancing (en 0 first)\n", 43); return; }
     xTaskCreatePinnedToCore(mpcBenchTask, "mpcb", 4096, (void*)(intptr_t)(v >= 1.0f ? (int)v : 20), 1, NULL, 0);
     return;
@@ -1798,8 +1874,8 @@ void loop(){
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
     char b[704];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f amax=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f pull=%.2f lean=%.2f gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u legstkL=%u legstkR=%u legst=%u rfL=%u rfR=%u rft0=%u rft1=%u ms=%u\n",
-      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gLqrAMax, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gRollMode, tRollAcc, tPull, tLean, gTurn, gHdgTarget, gYawRateCmd,
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f amax=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f pull=%.2f lean=%.2f mpc=%u mpcus=%u gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u legstkL=%u legstkR=%u legst=%u rfL=%u rfR=%u rft0=%u rft1=%u ms=%u\n",
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gLqrAMax, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gRollMode, tRollAcc, tPull, tLean, (unsigned)tMpcState, (unsigned)tMpcUs, gTurn, gHdgTarget, gYawRateCmd,
       (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID), (unsigned)gDriveWdTrips, (unsigned)tLegRetryL, (unsigned)tLegRetryR, (unsigned)tLegFailL, (unsigned)tLegFailR, (unsigned)tLegStuckL, (unsigned)tLegStuckR, (unsigned)((gLegLimped?1:0)|(gLegHoming?2:0)|(gLegEnerR?4:0)|(gLegEnerL?8:0)), (unsigned)tRfL, (unsigned)tRfR, (unsigned)tRfFirstMs, (unsigned)tRfLastMs, (unsigned)millis());
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     emit(b,k);
