@@ -112,6 +112,37 @@
     </div>
   </section>
   <section class="card">
+    <h2>CONTROLLER STICKS</h2>
+    <div class="sticks">
+      <div class="stickpad">
+        <svg id="lstick" viewBox="-60 -60 120 120" width="120" height="120" aria-label="left: drive">
+          <rect class="frame" x="-50" y="-50" width="100" height="100" rx="6"/>
+          <rect class="dzv" x="0" y="-50" width="0" height="100"/>
+          <rect class="dzh" x="-50" y="0" width="100" height="0"/>
+          <line class="cross" x1="-50" y1="0" x2="50" y2="0"/><line class="cross" x1="0" y1="-50" x2="0" y2="50"/>
+          <circle class="dot" cx="0" cy="0" r="6"/>
+        </svg>
+        <div class="k">left: drive</div>
+        <div class="num" id="lsticktxt">–</div>
+      </div>
+      <div class="stickpad">
+        <svg id="rstick" viewBox="-60 -60 120 120" width="120" height="120" aria-label="right: turn / height">
+          <rect class="frame" x="-50" y="-50" width="100" height="100" rx="6"/>
+          <rect class="dzv" x="0" y="-50" width="0" height="100"/>
+          <rect class="dzh" x="-50" y="0" width="100" height="0"/>
+          <line class="cross" x1="-50" y1="0" x2="50" y2="0"/><line class="cross" x1="0" y1="-50" x2="0" y2="50"/>
+          <circle class="dot" cx="0" cy="0" r="6"/>
+        </svg>
+        <div class="k">right: turn / height</div>
+        <div class="num" id="rsticktxt">–</div>
+      </div>
+    </div>
+    <div class="row"><span class="k">sent</span><span class="num" id="stickcmd">–</span></div>
+    <p class="hint">The DS4's sticks as the controller service reads them (10 a second). The shaded bands are the dead
+      zones: inside them a stick commands nothing. The dot turns blue when it is out of its dead zone -- commanding.
+      Left: up/down drives. Right: sideways turns, up/down sets the height (only when mostly vertical).</p>
+  </section>
+  <section class="card">
     <h2>OBSTACLES (ToF)</h2>
     <div class="row">
       <button class="btn" id="tofbtn" disabled title="Forward speed is capped near an obstacle (slows from 40 cm, stops at 10 cm). It does not see table edges. Reverse is never limited.">Obstacle: –</button>

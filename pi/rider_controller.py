@@ -43,6 +43,8 @@ def _shutdown(*_a):
 BROKER, PORT = "localhost", 1883
 TOPIC_CMD, TOPIC_STATUS = "rider/control/line", "rider/status"
 TOPIC_FWDLIMIT = "rider/safety/fwd_limit"  # ToF safety governor -> forward-speed factor (rider_tof_safety.py)
+TOPIC_STICKS = "rider/controller/sticks"   # the raw stick positions, the dead zones and the last drive / turn sent,
+STICKS_HZ = 10                             # for the web page (2026-11-03: the worn right stick -- self-turns?)
 TOPIC_MAXSPEED = "rider/control/maxspeed"  # RETAINED {"mps": v}: full-stick speed, set by the web page's slider.
                                            # Scales the whole stick range (stays proportional); capped at MAX_SPEED
                                            # (= the firmware's gPosVmax) -- going faster needs both raised.
@@ -258,6 +260,7 @@ def main():
     last_send = 0.0
     last_turn = None
     last_turn_send = 0.0
+    last_sticks = 0.0
     drive_mode = "computer"   # BOOT in computer mode (safe default). 'joystick' = stick drives; press Start to opt in.
     last_height_rate = 0.0    # last height rate sent (counts/s)
     last_height_send = 0.0
@@ -300,6 +303,13 @@ def main():
             time.sleep(0.15); continue
 
         now = time.time()
+        if now - last_sticks >= 1.0 / STICKS_HZ:
+            last_sticks = now
+            ax = lambda i: round(axes[i], 3) if i < len(axes) else 0.0
+            mqc.publish(TOPIC_STICKS, json.dumps({
+                "lx": ax(0), "ly": ax(AXIS_DRIVE), "rx": ax(AXIS_TURN), "ry": ax(AXIS_HEIGHT),
+                "dz_drive": DEADZONE, "dz_turn": TURN_DEADZONE, "dz_height": HEIGHT_DEADZONE,
+                "mode": drive_mode, "dv": last_vel, "turnrate": last_turn}), qos=0)
 
         # controller health: a silent DS4 (dead battery / lost link, before Bluetooth notices) or a nearly flat one
         # must not keep driving the robot -> drive + turn held at 0 (the robot stops and holds); a silent one also
