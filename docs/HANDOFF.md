@@ -161,8 +161,11 @@ list, and what not to trust.
    speed check catching a bad reply; (d) the speed register reads 0.966 of the position's rate: one scale ~3 % off;
    (e) MPC tuning: slower than the fixed plan at 0.30 m/s, brakes at ~-11 deg (fixed ~-7).
    (f) the planner stops late at walls (with the ToF governor on, 0.45 m/s: 9-16 mm, touched twice; 0.30 m/s:
-   ~45 mm): it chases the governor's falling speed cap a step late and smoothly -- give it the wall's distance as a
-   position limit; meanwhile drive near walls with it off. Baseline with it off not yet recorded.
+   ~45 mm): it chases the governor's falling speed cap a step late and smoothly. SIM DONE (`354e703`, mpc_plan
+   --walls): a wall limit (the predicted axle behind the stop mark; WALL_LATENCY 0.2 s assumed) stops at 95-110 mm
+   for real latencies 0.1-0.3 s. NEXT: export the wall rows (mpc_export.py: M 75 -> 100), the firmware ('wall <mm>'
+   -> stop mark; stale after ~0.3 s), the governor sending 'wall <mm>' while on; then the floor. Meanwhile drive
+   near walls with the planner off. Baseline with it off not yet recorded.
    (g) "turns by itself while reversing" (Marc, 11-03 ~19:15-19:17, planner off): the heading hold's target moved
    in steps with telemetry turnrate 0 -- it only moves while a turn command is non-zero, so brief ones arrived
    between telemetry lines; their source unknown (the right stick now rests at 0.00 -- not the 10-19 resting
