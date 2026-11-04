@@ -49,6 +49,8 @@ BROKER, PORT = "localhost", 1883
 TOF_TOPIC = "rider/tof"
 TELEM_TOPIC = "rider/debug/telem"
 LIMIT_TOPIC = "rider/safety/fwd_limit"
+BRIEF_TOPIC = "rider/safety/fwd_brief"  # the same verdict without the zone points (~100 B, not the ~2 kB of LIMIT_TOPIC):
+                                        # for the Pi's always-on recorder (rider-recorder.service, 2026-11-03)
 ENABLE_TOPIC = "rider/safety/enable"    # retained {"on": bool} from the web page; absent = off
 
 # --- calibrated kinematic model (tof_calib_solve.py) ---
@@ -191,6 +193,11 @@ def main():
                               "pts": r["pts"], "h_mm": r["h_mm"],
                               "slow_mm": round(SLOW_FWD * 1000), "stop_mm": round(STOP_FWD * 1000)}),
                   qos=0, retain=True)
+        c.publish(BRIEF_TOPIC,
+                  json.dumps({"factor": round(factor, 3) if _state["on"] else 1.0, "would": round(factor, 3),
+                              "on": _state["on"], "reason": reason, "min_mm": mm,
+                              "slow_mm": round(SLOW_FWD * 1000), "stop_mm": round(STOP_FWD * 1000)}),
+                  qos=0)
 
     def on_message(c, u, msg):
         if msg.topic == ENABLE_TOPIC:

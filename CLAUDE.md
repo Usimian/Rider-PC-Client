@@ -80,7 +80,7 @@ It runs these systemd services (deployed by `pi/deploy_bridge.sh`):
   never limited). **No table-edge stop**: removed 2026-10-27, the sensor sits too low to see an edge reliably.
   Always running, but it only limits while switched ON by the retained `rider/safety/enable {"on"}`
   (web page button); off — the default — it reports what it sees and publishes factor 1.0.
-- **rider-recorder** — bare `mosquitto_sub` unit logging `rider/debug/telem` + `rider/debug/dcap` + `rider/debug/leg` + `rider/debug/unknown`
+- **rider-recorder** — bare `mosquitto_sub` unit logging `rider/debug/telem` + `rider/debug/dcap` + `rider/debug/leg` + `rider/debug/unknown` + `rider/safety/fwd_brief` (the ToF governor's compact verdict, its obstacle distance)
   to `/home/pi/riderlog.txt`, always on so no fall/swing is ever missed. Needs `mosquitto-clients`.
 - **rider-wifi-watchdog** (`pi/rider_wifi_watchdog.sh`, root) — pings the router every 5 s; after
   30 s down it snapshots the WiFi state to `/home/pi/wifi_snapshots/`, restarts the WiFi driver and
