@@ -45,7 +45,10 @@ OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "firm
 
 
 def planner(motor):
-    return M.MpcPlanner(M.Predictor(motor=motor, acc_comp="plan", shape=SHAPE), lean_max_deg=LEAN_AIM_DEG, v_max=VMAX)
+    # walls=False: the firmware has no wall limit yet (its tables are the 75 limit rows; the wall rows are the HANDOFF's
+    # next step: export them, M 75 -> 100, with the firmware's 'wall <mm>')
+    return M.MpcPlanner(M.Predictor(motor=motor, acc_comp="plan", shape=SHAPE), lean_max_deg=LEAN_AIM_DEG, v_max=VMAX,
+                        walls=False)
 
 
 def tables(motor):

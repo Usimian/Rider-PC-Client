@@ -245,11 +245,14 @@ class Qp:
 class MpcPlanner:
     """The QP per mode (stick held: track a speed; released: return to a position), built on a Predictor."""
 
-    def __init__(self, pred, lean_max_deg=LEAN_MAX_DEG, u_max=U_MAX - U_MARGIN, v_max=None):
+    def __init__(self, pred, lean_max_deg=LEAN_MAX_DEG, u_max=U_MAX - U_MARGIN, v_max=None, walls=True):
+        """walls: with the WALL rows (the wall limit, 11-03); False: without them -- the planner as flashed
+        (mpc_export.py, until the firmware has the wall limit)."""
         self.p = pred
+        self.walls = walls
         self.lim = dict(u=u_max, th=np.radians(lean_max_deg), v=CL.VMAX if v_max is None else v_max)
-        G = np.vstack([pred.Uj / self.lim["u"], pred.Thj / self.lim["th"], pred.Sj["v"] / self.lim["v"],
-                       pred.Sj["xa"] / WALL_SCALE])
+        rows = [pred.Uj / self.lim["u"], pred.Thj / self.lim["th"], pred.Sj["v"] / self.lim["v"]]
+        G = np.vstack(rows + [pred.Sj["xa"] / WALL_SCALE] if walls else rows)
         self.G = G
         Sv, Sx, Sa = pred.Sj["v"], pred.Sj["x"], pred.Sj["a"]
         H, it = pred.shape.horizon, pred.shape.iters
@@ -266,6 +269,10 @@ class MpcPlanner:
         axle's position (the WALL rows, per step) under wall (m, the stop mark), or free when there is none."""
         pr, lim = self.p, self.lim
         free = np.concatenate([pr.U0 @ xi0 / lim["u"], pr.Th0 @ xi0 / lim["th"], pr.S0["v"] @ xi0 / lim["v"]])
+        if not self.walls:
+            if wall is not None:
+                raise ValueError("a wall for a planner built without the wall rows (walls=False)")
+            return -1.0 - free, 1.0 - free
         xa = pr.S0["xa"] @ xi0 / WALL_SCALE
         hi_w = np.full(xa.size, WALL_FREE) if wall is None else wall / WALL_SCALE - xa
         return np.r_[-1.0 - free, np.full(xa.size, -WALL_FREE)], np.r_[1.0 - free, hi_w]

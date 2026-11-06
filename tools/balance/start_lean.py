@@ -80,7 +80,8 @@ def main():
             continue
         lean = -sg * (th - th[pre].mean())                        # + = into the direction of travel
         fwd = lean[window(ms, t0, 0, 1)].max()
-        lie = lean[window(ms, t0, 0.6, min(2.0, (tr - t0) / 1000))].min() if tr - t0 > 700 else np.nan
+        lw = window(ms, t0, 0.6, min(2.0, (tr - t0) / 1000)) if tr - t0 > 700 else None
+        lie = lean[lw].min() if lw is not None and lw.any() else np.nan   # a start just over 0.7 s: maybe no sample
         brake = lean[window(ms, tr, 0, 1)].min()
         st = lean[window(ms, tr, 1, 3)]
         rng = st.max() - st.min() if len(st) else np.nan

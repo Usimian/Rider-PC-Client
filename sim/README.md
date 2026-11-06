@@ -24,7 +24,9 @@ a hand-tuned PD balances the full 10 s. Plant is controllable, traction works.
 | `sanity_check.py` | headless: builds, falls on zero action, PD balances |
 | `train.py`        | SB3 PPO training + eval (net_arch [64,64] → fits on the ESP32) |
 
-Run: `sim/.venv/bin/python sanity_check.py` (or `train.py`).
+Run: `sim/.venv/bin/python sanity_check.py` (or `train.py`). The same venv runs `sim/lqr/` (the LQR and MPC
+design; `mpc_export.py` writes the firmware's planner tables) -- its scripts' usage lines say `python3`, which works on
+the workstation (system numpy / scipy) but not on a fresh machine: use `sim/.venv/bin/python` there.
 
 ## Parameter provenance — what we trust vs. what we must measure
 

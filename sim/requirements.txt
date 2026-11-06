@@ -8,3 +8,6 @@ stable-baselines3==2.8.0
 torch==2.12.0
 tensorboard==2.20.0
 matplotlib==3.11.0
+# sim/lqr (the LQR / MPC design scripts; mpc_export.py writes the firmware's MPC tables) -- added 2026-11-06, verified:
+# mpc_export.py on this venv regenerates firmware/esp32_rider_fw/src/mpc_plan_data.h byte-identical
+scipy==1.18.1
