@@ -1173,7 +1173,7 @@ static void balanceTask(void*){
     // Before, it resumed the moment the pitch error was back under gFallDeg: on 11-03, being picked up after a fall,
     // it drove -400 in Marc's hands and rolled the robot to 87 deg. Disarming clears the latch (arming as before).
     #define UPRIGHT_DEG     15.0f
-    #define UPRIGHT_HOLD_MS 1500
+    #define UPRIGHT_HOLD_MS 1000          // 1 s (Marc, 11-06; was 1.5 s)
     #define PICKUP_VEL      350.0f
     #define PICKUP_MS       50
     static bool fallLatch = false; static uint32_t uprightSince = 0, fastSince = 0;

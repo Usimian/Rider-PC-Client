@@ -4,10 +4,10 @@ Read at session start. Facts live in the repo (commit messages carry the numbers
 provenance, `docs/HARDWARE.md` -> Power / Audio the hardware facts); this is only the running story, the open
 list, and what not to trust.
 
-## Where it stands (2026-11-06): pick-up / fall = wheels off + legs limp, resume after 1.5 s level
+## Where it stands (2026-11-06): pick-up / fall = wheels off + legs limp, resume after 1 s level
 
 - **Flashed + committed (see `git log`):** a fall or pick-up while armed stops the wheels AND limps the legs; it stays
-  armed and resumes once held level (pitch error and roll < 15 deg) for 1.5 s -- the legs re-power and slew to the
+  armed and resumes once held level (pitch error and roll < 15 deg) for 1 s (1.5 s until 11-06) -- the legs re-power and slew to the
   ride height while it balances. Also: arming reads the wheel mode (0x11 must be 0; `wmode` removed), non-numbers
   refused, Circle shifts the plan instead of restarting it. Floor 08:47-08:50: 4 of 4 limp/resume cycles clean.
 - **Not explained:** the first two resumes at 08:46 (armed lying at 34 deg, then held level) ran the wheels to full
@@ -170,7 +170,7 @@ list, and what not to trust.
 ## Open list, in order
 
 0. **Drive planner + safety (11-03):** (a) the MPC vs the fixed plan on a WEAK battery (~30-40 %): the same 0.45 m/s
-   A/B (tools/balance/start_lean.py --split) -- its only real case so far; (b) resume after a fall: the 1.5 s
+   A/B (tools/balance/start_lean.py --split) -- its only real case so far; (b) resume after a fall: the 1 s
    level wait is in (11-06), but two resumes at 08:46 ran away to u 400 unexplained (see the top); (c) watch `vrejL/R` -- the first nonzero count shows the
    speed check catching a bad reply; (d) the speed register reads 0.966 of the position's rate: one scale ~3 % off;
    (e) MPC tuning: slower than the fixed plan at 0.30 m/s, brakes at ~-11 deg (fixed ~-7).
