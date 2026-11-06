@@ -87,8 +87,9 @@ It runs these systemd services (deployed by `pi/deploy_bridge.sh`):
   tells NetworkManager to reconnect. Every dropout/recovery is a line in `/home/pi/wifi_events.log`
   (never trimmed) and the retained `rider/wifi`; the web page's fault item shows today's dropouts.
 
-Read-only `ssh rider …` commands are auto-allowed (`.claude/settings.json`); changes
-(`sudo`, `systemctl restart`, `scp`, `rm`, …) prompt. LCD button + LED pin map: `docs/xgo-cm4-pinout.md`.
+Every `ssh rider …` command is allowed — `sudo`, `systemctl restart`, `scp` and `rm` included — by Marc's
+`Bash(ssh rider *)` in `.claude/settings.local.json` (machine-local, never committed; Marc's choice 2026-11-06). On
+a fresh machine they prompt until that is granted again. LCD button + LED pin map: `docs/xgo-cm4-pinout.md`.
 
 ## Project layout (reorganized 2026-06-15) — three codebases, each in its own home
 
