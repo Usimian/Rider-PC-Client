@@ -183,8 +183,8 @@ list, and what not to trust.
    (g) "turns by itself while reversing" (Marc, 11-03 ~19:15-19:17, planner off): the heading hold's target moved
    in steps with telemetry turnrate 0 -- it only moves while a turn command is non-zero, so brief ones arrived
    between telemetry lines; their source unknown (the right stick now rests at 0.00 -- not the 10-19 resting
-   offset). Not reproduced since. Every command is now recorded (rider/control/line in riderlog.txt) and the web
-   page shows the sticks: at the next one, read the commands at that moment.
+   offset). Not reproduced since. Every command is now recorded (rider/control/line in riderlog.txt): at the next
+   one, read the commands at that moment.
 1. **Body roll, to check (10-29):** (a) persistence VERIFIED 11-03 (OFF came back OFF after every power-cycle that
    day); (b) the bubble level's left/right is ASSUMED from the leg
    naming: lower the robot's left side (seen from behind), the bubble should go right; (c) the lean cap is 4 deg,

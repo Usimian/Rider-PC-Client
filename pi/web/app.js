@@ -36,37 +36,11 @@ const client = new MqttLite("ws://" + location.host + "/", {
     else if (topic === "rider/tof") tofFrame(p);
     else if (topic === "rider/safety/fwd_limit") tofSafety(p);
     else if (topic === "rider/wifi") wifi(p);
-    else if (topic === "rider/controller/sticks") sticks(p);
   },
 });
 for (const t of ["rider/status", "rider/status/imu", "rider/status/odom", "rider/control/drivemode",
                  "rider/control/maxspeed", "rider/debug/telem", "rider/tof", "rider/safety/fwd_limit",
-                 "rider/response/image_capture", "rider/wifi", "rider/controller/sticks"]) client.subscribe(t);
-
-// The DS4's sticks (rider/controller/sticks, the controller service, ~10 Hz): raw axes in -1..1 (y + down, as the
-// joystick reads them), the dead zones it applies, the last drive (dv, m/s) and turn (turnrate, rad/s) it sent. Left
-// pad: drive = the left stick's Y (dead zone a horizontal band). Right pad: turn = X (a vertical band), height = Y (a
-// horizontal band, counted only when the stick is mostly vertical).
-function stickPad(id, x, y, dzx, dzy, live) {
-  const svg = $(id), S = 50;
-  const v = svg.querySelector(".dzv"), h = svg.querySelector(".dzh");
-  v.setAttribute("x", -dzx * S); v.setAttribute("width", 2 * dzx * S);
-  h.setAttribute("y", -dzy * S); h.setAttribute("height", 2 * dzy * S);
-  const d = svg.querySelector(".dot");
-  d.setAttribute("cx", x * S); d.setAttribute("cy", y * S);
-  d.classList.toggle("live", live);
-}
-function sticks(p) {
-  const ly = Number(p.ly), rx = Number(p.rx), ry = Number(p.ry), lx = Number(p.lx);
-  const turnLive = Math.abs(rx) > p.dz_turn;
-  const heightLive = Math.abs(ry) > p.dz_height && Math.abs(ry) > 1.5 * Math.abs(rx);
-  stickPad("lstick", lx, ly, 0, p.dz_drive, Math.abs(ly) > p.dz_drive);
-  stickPad("rstick", rx, ry, p.dz_turn, p.dz_height, turnLive || heightLive);
-  set("lsticktxt", `x ${lx.toFixed(2)}  y ${ly.toFixed(2)}`);
-  set("rsticktxt", `x ${rx.toFixed(2)}  y ${ry.toFixed(2)}`);
-  const f = (v, u) => (v === null || v === undefined) ? "–" : `${Number(v).toFixed(2)} ${u}`;
-  set("stickcmd", `drive ${f(p.dv, "m/s")} · turn ${f(p.turnrate, "rad/s")} · ${p.mode}`);
-}
+                 "rider/response/image_capture", "rider/wifi"]) client.subscribe(t);
 
 // WiFi watchdog (retained rider/wifi): today's dropouts and the latest one go in the fault item, spelled out
 let wifiFault = "";
