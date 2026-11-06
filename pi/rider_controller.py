@@ -13,13 +13,17 @@ Mapping:
                          clamps to the servo limits). Acts only when the stick is mostly vertical,
                          so a turn doesn't also change height.
   R3 (right stick click) -> height back to the normal ride height (firmware 'leghome', slow)
-  Triangle            -> balance controller = RL POLICY  (firmware 'ctrl 0')  } only while balance
-  Cross (X)           -> balance controller = LQR        (firmware 'ctrl 1')  } is OFF; LCD shows it
+  Triangle            -> balance controller: LQR <-> RL policy (firmware 'ctrl 1' / 'ctrl 0'), only while balance is
+                         OFF; the LCD shows it
+  Cross (X)           -> obstacle stop on/off (the retained rider/safety/enable, as the web page's button); a beep
   Square (#)          -> body roll: lean into turns -> stay flat -> off -> ... (level 2/1/0)
   Circle (O)          -> reset position (poszero) without dropping balance
   Share               -> BALANCE / STOP: idle -> en 1; balancing -> en 0 + leglimp (legs limp too),
                          the same stop as the LCD upper-left button and the web page's E-STOP
   Options             -> toggle joystick <-> computer drive
+
+Joystick mode is manual operation: everything above works. Computer mode is all computer: only Share and
+Options act; the sticks and every other button are ignored (the service boots in computer mode).
 
 Run normally:  /home/pi/xgovenv/bin/python rider_controller.py
 Verify mapping: /home/pi/xgovenv/bin/python rider_controller.py --test
@@ -43,6 +47,7 @@ def _shutdown(*_a):
 BROKER, PORT = "localhost", 1883
 TOPIC_CMD, TOPIC_STATUS = "rider/control/line", "rider/status"
 TOPIC_FWDLIMIT = "rider/safety/fwd_limit"  # ToF safety governor -> forward-speed factor (rider_tof_safety.py)
+TOPIC_SAFE_ON = "rider/safety/enable"      # RETAINED {"on": bool}: the governor limits only while on (web page / Cross)
 TOPIC_STICKS = "rider/controller/sticks"   # the raw stick positions, the dead zones and the last drive / turn sent,
 STICKS_HZ = 10                             # for the web page (2026-11-03: to watch the sticks' rest and dead zones)
 TOPIC_MAXSPEED = "rider/control/maxspeed"  # RETAINED {"mps": v}: full-stick speed, set by the web page's slider.
@@ -56,8 +61,8 @@ AXIS_TURN = 3        # right stick X (verify with --test)
 AXIS_HEIGHT = 4      # right stick Y (stick up = negative). 6-axis DS4 under hid_playstation: 0 LX, 1 LY,
                      # 2 L2, 3 RX, 4 RY, 5 R2 (3 = RX verified; 4 = RY verified with --test 2026-10-18)
 BTN_BALANCE     = 8  # Share        -- toggle balance (en 1/en 0); off = stop. (moved to Share 2026-06-24; VERIFY index w/ --test)
-BTN_CTRL_POLICY = 2  # Triangle    -- balance controller = RL policy ('ctrl 0'); only while balance is off
-BTN_CTRL_LQR    = 0  # Cross (X)   -- balance controller = LQR ('ctrl 1');       only while balance is off
+BTN_CTRL        = 2  # Triangle    -- balance controller: LQR <-> policy ('ctrl 1' / 'ctrl 0'); only while balance is off
+BTN_SAFETY      = 0  # Cross (X)   -- obstacle stop on/off (2026-11-06; Cross was 'LQR', Triangle 'policy')
 BTN_DISTZERO    = 1  # Circle (O)  -- poszero / reset position, balance stays on (Cross=0,Circle=1,Triangle=2,Square=3 verified --test 2026-06-16)
 BTN_LEVEL       = 3  # Square       -- next body roll mode: lean -> flat -> off (level 2/1/0)
 BTN_MODE        = 9  # Start/Options -- toggles joystick<->computer drive
@@ -176,7 +181,9 @@ class Liveness:
 state = {"en": 0, "pos": 0.0, "fwd_factor": 1.0,   # fwd_factor: ToF safety cap (1=clear..0=stop)
          "max_speed": DEFAULT_SPEED,                 # full-stick speed (m/s), from TOPIC_MAXSPEED
          "cbatt": None, "cchg": False,               # DS4 battery % / charging, from rider/status (the bridge)
-         "roll_mode": "lean"}                        # body roll (off/flat/lean), from rider/status
+         "roll_mode": "lean",                        # body roll (off/flat/lean), from rider/status
+         "ctrl": None,                               # the balance controller ("LQR" / "POL"), from rider/status
+         "safe_on": False}                           # the obstacle stop, from TOPIC_SAFE_ON (absent = off)
 
 
 def on_message(client, userdata, msg):
@@ -199,8 +206,13 @@ def on_message(client, userdata, msg):
         return
     if "roll_balance_enabled" in p:
         state["en"] = 1 if p["roll_balance_enabled"] else 0
+    if msg.topic == TOPIC_SAFE_ON:
+        state["safe_on"] = bool(p.get("on", False))
+        return
     if "roll_mode" in p:
         state["roll_mode"] = p["roll_mode"]
+    if "mode" in p:
+        state["ctrl"] = p["mode"]
     if "controller_battery" in p:
         state["cbatt"] = p["controller_battery"]
         state["cchg"] = bool(p.get("controller_charging", False))
@@ -225,6 +237,7 @@ def main():
         c.subscribe(TOPIC_STATUS)
         c.subscribe(TOPIC_FWDLIMIT)
         c.subscribe(TOPIC_MAXSPEED)
+        c.subscribe(TOPIC_SAFE_ON)
     mqc.on_connect = _on_connect
     mqc.reconnect_delay_set(min_delay=1, max_delay=10)
     mqc.connect(BROKER, PORT, keepalive=30)
@@ -335,23 +348,33 @@ def main():
             cur = buttons[idx] if idx < len(buttons) else 0
             return cur and not prev_btn.get(idx, 0)
 
-        if edge(BTN_BALANCE):                  # Share: BALANCE / STOP
+        def jedge(idx):                        # a button that acts only in joystick (manual) mode
+            return drive_mode == "joystick" and edge(idx)
+
+        if edge(BTN_BALANCE):                  # Share: BALANCE / STOP -- both modes
             if state["en"]:
                 send("en 0"); send("leglimp")  # STOP = balance off + legs limp -- same as the LCD button + web E-STOP
             else:
                 send("en 1")                       # firmware homes the target on enable
-        for btn, c, name in ((BTN_CTRL_POLICY, 0, "POLICY"), (BTN_CTRL_LQR, 1, "LQR")):
-            if edge(btn):                      # Triangle = policy, Cross = LQR
-                if state["en"]:                # the firmware refuses a swap mid-balance; don't even ask
-                    print("ctrl %s ignored: balance is on (Share to stop first)" % name, flush=True)
-                else:
-                    send("ctrl %d" % c)        # LCD shows the active controller from telemetry
-                    print("ctrl -> %s" % name, flush=True)
-        if edge(BTN_HEIGHT_HOME):              # R3: back to the normal ride height, slowly (balancing or not)
+        if jedge(BTN_CTRL):                     # Triangle: the other balance controller, from the robot's (rider/status)
+            nxt = "POL" if state["ctrl"] == "LQR" else "LQR"
+            if state["en"]:                    # the firmware refuses a swap mid-balance; don't even ask
+                print("ctrl %s ignored: balance is on (Share to stop first)" % nxt, flush=True)
+            else:
+                send("ctrl %d" % (1 if nxt == "LQR" else 0))   # LCD shows the active controller from telemetry
+                state["ctrl"] = nxt            # until the next status says otherwise
+                print("ctrl -> %s" % nxt, flush=True)
+        if jedge(BTN_SAFETY):                   # Cross: the obstacle stop on/off -- the web page's switch, retained
+            on = not state["safe_on"]
+            mqc.publish(TOPIC_SAFE_ON, json.dumps({"on": on}), qos=1, retain=True)
+            state["safe_on"] = on              # until the retained message comes back
+            sound("beep")
+            print("obstacle stop -> %s" % ("on" if on else "off"), flush=True)
+        if jedge(BTN_HEIGHT_HOME):              # R3: back to the normal ride height, slowly (balancing or not)
             send("leghome")
-        if edge(BTN_DISTZERO):                 # Circle: re-zero distance / reset position, balance stays on
+        if jedge(BTN_DISTZERO):                 # Circle: re-zero distance / reset position, balance stays on
             send("poszero")
-        if edge(BTN_LEVEL):                    # Square: the next body roll mode, from the robot's (rider/status)
+        if jedge(BTN_LEVEL):                    # Square: the next body roll mode, from the robot's (rider/status)
             nxt = {"lean": "flat", "flat": "off", "off": "lean"}[state["roll_mode"]]
             send("level %d" % {"off": 0, "flat": 1, "lean": 2}[nxt])
             state["roll_mode"] = nxt               # until the next status says otherwise
@@ -366,12 +389,13 @@ def main():
         prev_btn = {i: buttons[i] for i in range(len(buttons))}
 
         # body height (right stick Y) = a RATE the firmware integrates every control cycle into 1-count
-        # leg moves (smooth). Any mode/balance state, like the old leg buttons. Only when the stick is
+        # leg moves (smooth). Joystick mode only (computer mode is all computer: the switch sends one last 0),
+        # balancing or not. Only when the stick is
         # mostly VERTICAL, so a sideways turn push doesn't also move the legs. Sent on change (incl. the
         # return to 0) plus a heartbeat while moving; the firmware stops the legs if the heartbeat stops.
         hy = -axes[AXIS_HEIGHT] if AXIS_HEIGHT < len(axes) else 0.0      # stick up = positive = body up
         hx = axes[AXIS_TURN] if AXIS_TURN < len(axes) else 0.0
-        h = dz(hy, HEIGHT_DEADZONE) if abs(hy) > 1.5 * abs(hx) and alive else 0.0
+        h = dz(hy, HEIGHT_DEADZONE) if abs(hy) > 1.5 * abs(hx) and alive and drive_mode == "joystick" else 0.0
         rate = round(h * HEIGHT_RATE, 1)
         if ((rate != last_height_rate) or (rate != 0.0 and now - last_height_send >= 1.0 / HEIGHT_HZ)) \
                 and now - last_height_send >= send_period:
