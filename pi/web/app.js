@@ -123,7 +123,7 @@ function controls() {
   set("ctrlhint", ok && bal ? "stop balancing to switch" : "");
   $("speed").disabled = !ok;
   $("zero").disabled = !ok;
-  $("height").disabled = $("leghome").disabled = !ok;
+  $("height").disabled = $("leghome").disabled = !bal;   // the legs move only while balancing (firmware, 2026-11-06)
 }
 
 // Balance: idle -> 'en 1'; balancing -> STOP, same as the LCD button and E-STOP (balance off + legs limp)

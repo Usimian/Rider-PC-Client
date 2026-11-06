@@ -11,8 +11,9 @@ Mapping:
   Right stick left/right -> turn rate
   Right stick up/down -> body HEIGHT (legs extend/retract at a rate set by the stick; firmware
                          clamps to the servo limits). Acts only when the stick is mostly vertical,
-                         so a turn doesn't also change height.
-  R3 (right stick click) -> height back to the normal ride height (firmware 'leghome', slow)
+                         so a turn doesn't also change height. Only while balancing: otherwise the
+                         firmware keeps the legs limp and ignores leg commands.
+  R3 (right stick click) -> height back to the normal ride height (firmware 'leghome', slow; while balancing)
   Triangle            -> balance controller: LQR <-> RL policy (firmware 'ctrl 1' / 'ctrl 0'), only while balance is
                          OFF; the LCD shows it
   Cross (X)           -> obstacle stop on/off (the retained rider/safety/enable, as the web page's button); a beep
@@ -359,7 +360,7 @@ def main():
             state["safe_on"] = on              # until the retained message comes back
             sound("beep")
             print("obstacle stop -> %s" % ("on" if on else "off"), flush=True)
-        if jedge(BTN_HEIGHT_HOME):              # R3: back to the normal ride height, slowly (balancing or not)
+        if jedge(BTN_HEIGHT_HOME):              # R3: back to the normal ride height, slowly (the firmware moves the legs only while balancing)
             send("leghome")
         if jedge(BTN_DISTZERO):                 # Circle: re-zero distance / reset position, balance stays on
             send("poszero")
@@ -379,7 +380,7 @@ def main():
 
         # body height (right stick Y) = a RATE the firmware integrates every control cycle into 1-count
         # leg moves (smooth). Joystick mode only (computer mode is all computer: the switch sends one last 0),
-        # balancing or not. Only when the stick is
+        # the firmware moves the legs only while balancing (else they are limp). Only when the stick is
         # mostly VERTICAL, so a sideways turn push doesn't also move the legs. Sent on change (incl. the
         # return to 0) plus a heartbeat while moving; the firmware stops the legs if the heartbeat stops.
         hy = -axes[AXIS_HEIGHT] if AXIS_HEIGHT < len(axes) else 0.0      # stick up = positive = body up

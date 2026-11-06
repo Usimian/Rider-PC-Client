@@ -1475,8 +1475,7 @@ static void balanceTask(void*){
       // case a frame is dropped) BEFORE releasing torque, so the wheels stop dead.
       for(int i=0;i<5;i++){ wheelTorque(0,0); }
       wheelTorqueEnAll(0);                                  // disable both (broadcast, no collision)
-      // legs are NOT limped on balance-off -- the leg state machine below equalizes them (remove the roll
-      // differential, keep height) and HOLDS torqued, so the robot sits even instead of keeping its last tilt.
+      // the legs go limp too: the leg section below limps them whenever it is not balancing (2026-11-06).
     }
     wasDriving = driving;
 
@@ -1492,15 +1491,13 @@ static void balanceTask(void*){
       // ===== leg state machine =====
       static bool drvPrev=false;
       int hp;
-      // FALL / PICK-UP while armed (2026-11-06): the wheels stop (driving goes false) and the legs go limp too, via
-      // the STOP limp below. Balance stays enabled; once the fall latch clears (level for UPRIGHT_HOLD_MS) driving
-      // rises again, which un-limps the legs and slews them to the ride height (MID) while it balances -- the same
-      // path as STOP -> balance on.
-      static bool fallStopPrev=false;
-      bool fallStop = gEnabled && fallen;
-      if(fallStop && !fallStopPrev && !gLegLimped) gLegLimpReq = true;
-      fallStopPrev = fallStop;
-      // STOP-button limp ('leglimp'): torque-OFF both legs and stay limp until the next balance-on.
+      // LEGS POWERED ONLY WHILE BALANCING (Marc, 2026-11-06): actively balancing = armed and not fallen (not merely
+      // armed: a fall or pick-up holds balance on with the wheels off; not the stand-only wheel test). Any other time
+      // the legs go limp (the limp below) and every leg command is dropped -- balance off from anywhere, a fall, a
+      // refused arm, power-up. When balancing starts or resumes the legs re-power and slew to the ride height (MID).
+      bool balancing = gEnabled && !fallen;
+      if(!balancing && !gLegLimped) gLegLimpReq = true;
+      // the limp ('leglimp' too): torque-OFF both legs and stay limp until balancing starts.
       if(gLegLimpReq){
         // robust torque-OFF: SPACE the writes (the busy bus drops back-to-back writes -- the startup loops
         // space them too) and VERIFY via a reg 0x18 read-back; re-send until each leg confirms limp. Balance
@@ -1520,36 +1517,34 @@ static void balanceTask(void*){
                                                                  // one-leg-not-limp bug -- only one leg serviced/cycle)
         gLegHoming=false; gLegStepReq=0; gLegLimped=true; gLegLimpReq=false;
       }
-      if(driving && !drvPrev){ gLegLimped=false;                 // re-enabling balance un-limps the legs
+      if(balancing && !drvPrev){ gLegLimped=false;               // balancing (re)starts: un-limp the legs
         if(gLegEnR.stage==LEG_EN_FAILED) gLegEnR=LegEn{LEG_EN_GOAL,0,0};   // ...and gives a given-up leg fresh tries
         if(gLegEnL.stage==LEG_EN_FAILED) gLegEnL=LegEn{LEG_EN_GOAL,0,0}; }
-      if(gLegLimped){ drvPrev=driving; gLegHomeReq=false; }  // stay limp: skip the machine (a 'leghome' while limp is dropped)
+      if(gLegLimped){ drvPrev=balancing; gLegHomeReq=false; }  // stay limp: skip the machine (a 'leghome' while limp is dropped)
       else {
-      // balance ON, or 'leghome' (DS4 R3) -> slew both legs to the ride height (MID), slowly. A balance-on
-      // with both legs still powered (balance off -> on) KEEPS the chosen height (2026-10-21): the legs never
-      // went limp, so the height is known. Limp legs (power-up, STOP, a fall / pick-up) go to MID.
-      bool keepHeight = gLegEnerR && gLegEnerL && gLegTgtR != LEG_NONE && gLegTgtL != LEG_NONE;
-      if((driving && !drvPrev && !keepHeight) || gLegHomeReq){
+      // here it is balancing (else the legs are limp). Balancing starts, or 'leghome' (DS4 R3) -> slew both legs to
+      // the ride height (MID), slowly, from where they stand (they were limp: no height is kept, 2026-11-06).
+      if(!drvPrev || gLegHomeReq){
         gLegHomeReq = false; gLegStepReq = 0;                     // a reset discards any height nudge still pending
         gLegHomeR = (gLegEnerR&&gLegTgtR!=LEG_NONE)?gLegTgtR:(legReadPos(RIGHT_LEG,&hp)?hp:LEG_R_MID);
         gLegHomeL = (gLegEnerL&&gLegTgtL!=LEG_NONE)?gLegTgtL:(legReadPos(LEFT_LEG,&hp)?hp:LEG_L_MID);
         gLegDestR = LEG_R_MID; gLegDestL = LEG_L_MID; gLegHoming = true;
       }
-      // balance OFF, or body roll switched to OFF while balancing -> equalize (remove the roll differential,
-      // keep height) + hold. (FLAT <-> LEAN only changes the accumulator's target.)
+      // body roll switched to OFF while balancing -> equalize (remove the roll differential, keep height) + hold.
+      // (FLAT <-> LEAN only changes the accumulator's target.)
       static int modePrev = ROLL_LEAN;
-      bool equalize = (!driving && drvPrev) || (driving && gRollMode == ROLL_OFF && modePrev != ROLL_OFF);
+      bool equalize = gRollMode == ROLL_OFF && modePrev != ROLL_OFF;
       modePrev = gRollMode;
       if(equalize){
         int cr=(gLegTgtR!=LEG_NONE)?gLegTgtR:LEG_R_MID, cl=(gLegTgtL!=LEG_NONE)?gLegTgtL:LEG_L_MID;
         int diff=(cr+cl-LEG_EQUAL_SUM)/2;                         // the roll-differential component
         gLegHomeR=cr; gLegHomeL=cl; gLegDestR=cr-diff; gLegDestL=cl-diff; gLegHoming=true;
       }
-      drvPrev=driving;
+      drvPrev=balancing;
 
       // the roll accumulator (FLAT, or along the pull: LEAN) runs whenever balancing with body roll not OFF, once
       // homing is done; it starts from the legs as they stand
-      bool levRun = (!gLegHoming && driving && gRollMode != ROLL_OFF);
+      bool levRun = (!gLegHoming && gRollMode != ROLL_OFF);
       static bool levRunPrev=false;
       if(levRun && !levRunPrev){                                  // the split just started -> anchor at the (homed) pos
         if(gLegEnerR && gLegTgtR!=LEG_NONE) gLevAnchR=gLegTgtR; else if(legReadPos(RIGHT_LEG,&hp)) gLevAnchR=hp; else gLevAnchR=LEG_R_MID;
@@ -1622,10 +1617,13 @@ static void balanceTask(void*){
       }  // end !gLegLimped
       gLegTurn ^= 1;
       if(gLegTurn){
-        legService(RIGHT_LEG, &gLegTgtR, &gLegEnerR, &gLegWroteR, &gLegSetlR, &gLegEnR, &tLegRetryR, &tLegFailR, gLegAbsR, gLegStepR, LEG_R_MIN, LEG_R_MAX);
+        // limp: no request reaches a leg (a 'legR' / 'legL' / 'legstep' would energize it) -- the limp cleared its target
+        legService(RIGHT_LEG, &gLegTgtR, &gLegEnerR, &gLegWroteR, &gLegSetlR, &gLegEnR, &tLegRetryR, &tLegFailR,
+                   gLegLimped ? LEG_NONE : gLegAbsR, gLegLimped ? 0 : gLegStepR, LEG_R_MIN, LEG_R_MAX);
         gLegAbsR = LEG_NONE; gLegStepR = 0;
       } else {
-        legService(LEFT_LEG,  &gLegTgtL, &gLegEnerL, &gLegWroteL, &gLegSetlL, &gLegEnL, &tLegRetryL, &tLegFailL, gLegAbsL, gLegStepL, LEG_L_MIN, LEG_L_MAX);
+        legService(LEFT_LEG,  &gLegTgtL, &gLegEnerL, &gLegWroteL, &gLegSetlL, &gLegEnL, &tLegRetryL, &tLegFailL,
+                   gLegLimped ? LEG_NONE : gLegAbsL, gLegLimped ? 0 : gLegStepL, LEG_L_MIN, LEG_L_MAX);
         gLegAbsL = LEG_NONE; gLegStepL = 0;
       }
       if(!gLegLimped) legGoalWriter();                            // the ONLY place leg goal updates go on the bus
@@ -1886,7 +1884,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"levmax"))   gLevelMax = (int)v;    // leveling max |differential| authority (counts)
   else if (!strcmp(s,"levsign"))  gLevelSign = (v<0)?-1:1; // leveling correction sign (flip if it tilts the wrong way)
   else if (!strcmp(s,"lean"))     gLeanGain = v;         // turn lean: share of the lean along the pull (0 = none, 1 = full)
-  else if (!strcmp(s,"leghomeslew")) gLegHomeSlew = v;   // leg home/equalize slew (counts/cycle) = how 'slowly' the legs move on balance on/off
+  else if (!strcmp(s,"leghomeslew")) gLegHomeSlew = v;   // leg home/equalize slew (counts/cycle) = how 'slowly' the legs move to the ride height / equalize
   else if (!strcmp(s,"legrate"))  { gLegRate = clampf(v,-200.0f,200.0f); gLegRateMs = millis(); }  // height rate (counts/s, + up); heartbeat
   else if (!strcmp(s,"leghome"))  gLegHomeReq = true;    // legs -> ride height (MID), slow slew; ignored while limp
   else if (!strcmp(s,"leglimp"))  gLegLimpReq = true;    // STOP button: torque-OFF both legs, stay limp until next balance-on

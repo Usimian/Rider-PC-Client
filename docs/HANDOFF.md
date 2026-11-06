@@ -10,6 +10,9 @@ list, and what not to trust.
   armed and resumes once held level (pitch error and roll < 15 deg) for 1 s (1.5 s until 11-06) -- the legs re-power and slew to the
   ride height while it balances. Also: arming reads the wheel mode (0x11 must be 0; `wmode` removed), non-numbers
   refused, Circle shifts the plan instead of restarting it. Floor 08:47-08:50: 4 of 4 limp/resume cycles clean.
+- **Flashed + committed:** the legs are powered ONLY while actively balancing (armed and not fallen) -- the
+  firmware limps them at any other time and drops every leg command (height stick, R3, web slider, legR/legL/legstep);
+  balance off -> on always starts from the ride height (no kept height). Web height controls grey out unless balancing.
 - **Not explained:** the first two resumes at 08:46 (armed lying at 34 deg, then held level) ran the wheels to full
   command (u 400) within 0.3 s while within ~1 deg of the set point, and threw it (35 / 87 deg). The legs were
   slewing slowly, not the cause; the plan restarts at the robot. Later resumes start the same and don't diverge.
