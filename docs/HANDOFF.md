@@ -4,7 +4,22 @@ Read at session start. Facts live in the repo (commit messages carry the numbers
 provenance, `docs/HARDWARE.md` -> Power / Audio the hardware facts); this is only the running story, the open
 list, and what not to trust.
 
-## Where it stands (2026-11-03 evening): pitch corrected for acceleration; an MPC planner (off); wheel speed check
+## Where it stands (2026-11-06): pick-up / fall = wheels off + legs limp, resume after 1.5 s level
+
+- **Flashed + committed (see `git log`):** a fall or pick-up while armed stops the wheels AND limps the legs; it stays
+  armed and resumes once held level (pitch error and roll < 15 deg) for 1.5 s -- the legs re-power and slew to the
+  ride height while it balances. Also: arming reads the wheel mode (0x11 must be 0; `wmode` removed), non-numbers
+  refused, Circle shifts the plan instead of restarting it. Floor 08:47-08:50: 4 of 4 limp/resume cycles clean.
+- **Not explained:** the first two resumes at 08:46 (armed lying at 34 deg, then held level) ran the wheels to full
+  command (u 400) within 0.3 s while within ~1 deg of the set point, and threw it (35 / 87 deg). The legs were
+  slewing slowly, not the cause; the plan restarts at the robot. Later resumes start the same and don't diverge.
+  The second had a 64 ms loop stall (`dtmax`), the first none (10 ms); the clean arm at 08:47:41 had one of 100 ms.
+- **Not tested:** Circle while moving (no jolt expected). Control-loop stalls of 50-115 ms (`dtmax`) recur, as on
+  11-03 -- not new with this flash, cause unknown.
+- **DS4 (`3641bfb`):** Cross = obstacle stop on/off, Triangle = LQR <-> policy; computer mode ignores every input but
+  Share and Options.
+
+## Where it stood (2026-11-03 evening): pitch corrected for acceleration; an MPC planner (off); wheel speed check
 
 - **Pitch estimate less the plan's acceleration (ACC_COMP, `6e010ef`, default on, live `acccomp`):** the
   accelerometer read a start's acceleration as tilt; once at speed the body lay back -4.5 deg (floor A/B, 0.45 m/s),
@@ -155,9 +170,8 @@ list, and what not to trust.
 ## Open list, in order
 
 0. **Drive planner + safety (11-03):** (a) the MPC vs the fixed plan on a WEAK battery (~30-40 %): the same 0.45 m/s
-   A/B (tools/balance/start_lean.py --split) -- its only real case so far; (b) after a fall, balancing resumes at
-   full command as soon as the pitch is back under 25 deg -- it drove -400 in Marc's hands and rolled the robot to
-   87 deg on 11-03: require upright and still first?; (c) watch `vrejL/R` -- the first nonzero count shows the
+   A/B (tools/balance/start_lean.py --split) -- its only real case so far; (b) resume after a fall: the 1.5 s
+   level wait is in (11-06), but two resumes at 08:46 ran away to u 400 unexplained (see the top); (c) watch `vrejL/R` -- the first nonzero count shows the
    speed check catching a bad reply; (d) the speed register reads 0.966 of the position's rate: one scale ~3 % off;
    (e) MPC tuning: slower than the fixed plan at 0.30 m/s, brakes at ~-11 deg (fixed ~-7).
    (f) the planner stops late at walls (with the ToF governor on, 0.45 m/s: 9-16 mm, touched twice; 0.30 m/s:

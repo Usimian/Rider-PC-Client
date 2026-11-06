@@ -872,6 +872,7 @@ static float gHdgTarget=0;                 // heading-lock target = (wheel1_x - 
 // (2026-11-03 telemetry: the register reads 0.966 of the position's rate -- one of the two scales is ~3 % off).
 #define VCHK_TOL (0.25f * LQR_SPEED_PER_MPS)       // scaled units (0.25 m/s; the register's step ~3 mm/s, a count 0.05 m/s a cycle)
 volatile uint32_t tVrejL = 0, tVrejR = 0;
+volatile uint8_t  tWmodeBad = 0;             // the last arming's wheel mode check (WHEEL MODE CHECK; 0 = both 0)
 static uint32_t gVchkUsL = 0, gVchkUsR = 0;
 static float vCheck(float vReg, int dCounts, bool haveD, uint32_t* lastUs, float vPrev, volatile uint32_t* rej){
   uint32_t now = micros();
@@ -968,10 +969,10 @@ static void balanceTask(void*){
   for(int i=0;i<3;i++){ legTorqueOff(LEFT_LEG); legTorqueOff(RIGHT_LEG); wheelTorque(0,0); vTaskDelay(2); }
   wheelTorqueEnAll(0);   // LIMP the wheels at boot (reg 0x18=0 after the coast-kill): FREE until 'en 1'
   // NOTE: wheel velocity-open-loop mode (reg 0x11=0) is "set and forget" -- it lives in the servo's
-  // persistent EEPROM and nothing in normal operation touches it. Set it ONCE with 'wmode 0' (done
-  // 2026-06-18) and it stays across reboots. We do NOT re-assert it at boot: that only guards against
-  // someone deliberately re-flipping it (i.e. us during servo work), and a boot-time servo write before
-  // the bus is settled is unreliable anyway (a flip-test proved it didn't take). See docs/servo_registers.md.
+  // persistent EEPROM and the firmware never writes it (set 2026-06-18; the 'wmode' command, its only writer,
+  // removed 2026-11-06). Not re-asserted at boot: a boot-time servo write before the bus is settled is
+  // unreliable (a flip-test proved it didn't take). Every arming READS it (WHEEL MODE CHECK) and refuses
+  // unless both wheels are 0. See docs/servo_registers.md.
   calibrateGyro();                  // boot cal -> sets yaw bias + zeroes heading/pose (robot should be still)
   gGyroBias = -1.19f;               // ...but FORCE the pitch (balance) bias to the baked constant, so a
                                     // boot measurement on a moving robot can never break balance startup. 'gcal' re-measures both.
@@ -1165,14 +1166,37 @@ static void balanceTask(void*){
     // here anyway, so runaway protection is unaffected).
     bool ctrlInit = (gCtrl == CTRL_POL) ? polInit : lqrInit;
     float posRef = ctrlInit ? gPosTargetEff : wheel_x;
-    bool fallen = (fabsf(qErr) > gFallDeg) || (fabsf(tRoll) > gFallRollDeg) || (fabsf(wheel_x - posRef) > gMaxPosErr);
+    // FALL LATCH (2026-11-06, the Hover's update_state after its code review of 11-05): a fall still cuts at once;
+    // balancing resumes only after the body has been held near upright -- pitch error and roll both within
+    // UPRIGHT_DEG -- for UPRIGHT_HOLD_MS without a break. A wheel spinning freely (|speed| over PICKUP_VEL for
+    // PICKUP_MS: lifted with the wheels driven; ~1.3 m/s, the top speed is 0.45) cuts too and restarts the wait.
+    // Before, it resumed the moment the pitch error was back under gFallDeg: on 11-03, being picked up after a fall,
+    // it drove -400 in Marc's hands and rolled the robot to 87 deg. Disarming clears the latch (arming as before).
+    #define UPRIGHT_DEG     15.0f
+    #define UPRIGHT_HOLD_MS 1500
+    #define PICKUP_VEL      350.0f
+    #define PICKUP_MS       50
+    static bool fallLatch = false; static uint32_t uprightSince = 0, fastSince = 0;
+    bool fallNow = (fabsf(qErr) > gFallDeg) || (fabsf(tRoll) > gFallRollDeg) || (fabsf(wheel_x - posRef) > gMaxPosErr);
+    { uint32_t ms = millis();
+      if(fabsf(wheel1_vel) > PICKUP_VEL || fabsf(wheel2_vel) > PICKUP_VEL){
+        if(!fastSince) fastSince = ms | 1u; else if(ms - fastSince > PICKUP_MS) fallNow = true;
+      } else fastSince = 0;
+      if(!gEnabled){ fallLatch = false; uprightSince = 0; }
+      else if(fallNow){ fallLatch = true; uprightSince = 0; }
+      else if(fallLatch){
+        if(fabsf(qErr) >= UPRIGHT_DEG || fabsf(tRoll) >= UPRIGHT_DEG) uprightSince = 0;
+        else if(!uprightSince) uprightSince = ms | 1u;
+        else if(ms - uprightSince >= UPRIGHT_HOLD_MS) fallLatch = false;
+      } }
+    bool fallen = fallNow || fallLatch;
     gFallen = fallen;                          // expose to the LED status (loop() reads it)
+    static float lqrShift = 0.0f;              // Circle: the distance frame's shift (m) for the LQR's plan to take (below)
     if(gPosZeroReq){                           // re-zero the distance frame mid-balance: odometer + target + slew
+      lqrShift += wheel_x;                     //   the frame moves by -wheel_x: the LQR's plan moves with it
       wheel1_x = 0; wheel2_x = 0; wheel_x = 0; //   are zeroed TOGETHER so posErr stays 0 -> no jolt, balance holds
       gHdgTarget = 0;
       gPosTarget = 0; gPosTargetEff = 0; posErrInt = 0; vdesS = 0; polPrevX = 0;
-      lqrInit = false;                         // the LQR: the Hover's Reset home -- plan_start where the robot is, at its
-                                               // speed (its plan kept the old position: the robot drove to it)
       gOdoReset = true;                        // dead-reckoned pose origin too
       gPosZeroReq = false;
     }
@@ -1324,7 +1348,14 @@ static void balanceTask(void*){
       if(!lqrInit){                                                 // plan_start: where the robot is, at its speed
         planX = xax; planV = planVF = lqrV / LQR_SPEED_PER_MPS; planA = 0.0f; planI = 0.0f; lqrInit = true;
         lqrHome = xax; lqrStick = false;
+      } else if(lqrShift != 0.0f){
+        // Circle (Reset home, 2026-11-06): the plan moves with the distance frame and home becomes here; its speed,
+        // acceleration, lean and integral run on. Before, the plan restarted (plan_start), zeroing its acceleration:
+        // accelerating at 0.6 m/s^2 the lean target snapped from ~6.4 deg to 0 -- a one-cycle step of several hundred
+        // units (the Hover's code review 11-05: ~750 at 1 m/s^2). The integral is kept, as on the Hover (Marc 11-05).
+        planX -= lqrShift; lqrHome = xax;
       }
+      lqrShift = 0.0f;
       float lqr_x = xax - planX;                                    // before the plan's step
       {                                                             // plan_step(stick, dt, x_axle, lqr_x)
         bool held = fabsf(gDriveVel) > 0.001f;
@@ -1371,6 +1402,27 @@ static void balanceTask(void*){
     static bool wasDriving = false;
     static int torqAcc=0;                   // factory-style rate-limited torque accumulator
     bool driving = (gEnabled && !fallen) || (!gEnabled && gTestTor!=0);
+    if(driving && !wasDriving && gEnabled){
+      // WHEEL MODE CHECK (2026-11-06): both wheels must be in velocity-open-loop mode (0x11 = 0) before they get
+      // torque -- read, never written. Mode 1 (the motor's own speed loop) does not balance: on 06-18 a stray write left
+      // both wheels in it and the robot could not; on the Hover (same Kpower motor, 11-05) a wheel set to it by a bench
+      // tool, and mode 1 itself wedges the motor within a minute and drives back to where it last was in it. 'wmode'
+      // (the firmware's only writer) is gone; a wrong wheel is fixed deliberately with the servo tools. Not 0, or no
+      // reply after 3 tries: arming is refused (telemetry wmodebad: bit 1/2 left/right not 0, 4/8 unreadable).
+      uint8_t bad = 0;
+      const uint8_t ids[2] = {LEFT_W, RIGHT_W};
+      for(int w = 0; w < 2; w++){
+        uint8_t m = 0xFF; bool ok = false;
+        for(int t = 0; t < 3 && !ok; t++) ok = servoReadN(ids[w], 0x11, 1, &m);
+        if(!ok) bad |= (uint8_t)(4u << w); else if(m != 0) bad |= (uint8_t)(1u << w);
+      }
+      tWmodeBad = bad;
+      if(bad){
+        gEnabled = false; driving = false;
+        char b[96]; int k = snprintf(b, sizeof(b), "# ? arm REFUSED: wheel mode (wmodebad=%u; 0x11 must be 0 on both)\n", bad);
+        emit(b, k);
+      }
+    }
     if(driving){
       if(!wasDriving){ wheelTorqueEnAll(1);                                      // enable both (broadcast, no collision)
                        torqAcc=0; }                                             // seed accumulator at 0
@@ -1440,6 +1492,14 @@ static void balanceTask(void*){
       // ===== leg state machine =====
       static bool drvPrev=false;
       int hp;
+      // FALL / PICK-UP while armed (2026-11-06): the wheels stop (driving goes false) and the legs go limp too, via
+      // the STOP limp below. Balance stays enabled; once the fall latch clears (level for UPRIGHT_HOLD_MS) driving
+      // rises again, which un-limps the legs and slews them to the ride height (MID) while it balances -- the same
+      // path as STOP -> balance on.
+      static bool fallStopPrev=false;
+      bool fallStop = gEnabled && fallen;
+      if(fallStop && !fallStopPrev && !gLegLimped) gLegLimpReq = true;
+      fallStopPrev = fallStop;
       // STOP-button limp ('leglimp'): torque-OFF both legs and stay limp until the next balance-on.
       if(gLegLimpReq){
         // robust torque-OFF: SPACE the writes (the busy bus drops back-to-back writes -- the startup loops
@@ -1466,8 +1526,8 @@ static void balanceTask(void*){
       if(gLegLimped){ drvPrev=driving; gLegHomeReq=false; }  // stay limp: skip the machine (a 'leghome' while limp is dropped)
       else {
       // balance ON, or 'leghome' (DS4 R3) -> slew both legs to the ride height (MID), slowly. A balance-on
-      // with both legs still powered (a pick-up / put-down, a fall) KEEPS the chosen height (2026-10-21):
-      // the legs never went limp, so the height is known. Limp legs (power-up, STOP) still go to MID.
+      // with both legs still powered (balance off -> on) KEEPS the chosen height (2026-10-21): the legs never
+      // went limp, so the height is known. Limp legs (power-up, STOP, a fall / pick-up) go to MID.
       bool keepHeight = gLegEnerR && gLegEnerL && gLegTgtR != LEG_NONE && gLegTgtL != LEG_NONE;
       if((driving && !drvPrev && !keepHeight) || gLegHomeReq){
         gLegHomeReq = false; gLegStepReq = 0;                     // a reset discards any height nudge still pending
@@ -1718,6 +1778,9 @@ static void applyCmd(char* s){
   char* sp=s; while(*sp && *sp!=' ') sp++;
   float v=0;
   if(*sp){ *sp=0; v=atof(sp+1); }
+  // 2026-11-06 (the Hover's code review 11-05: atof takes "nan" and "inf", and a clamp passes NaN): a value that
+  // is not a finite number is refused, whatever the command -- it would reach the balance law as a gain or a limit
+  if(!isfinite(v)){ char b[64]; int k=snprintf(b,sizeof(b),"# ? '%s' (not a finite number)\n", s); emit(b,k); return; }
   if      (!strcmp(s,"en"))  { gEnabled=(v!=0.0f); gTurn=0.0f; gYawRateCmd=0.0f; gDriveVel=0.0f; if(gEnabled){ gWheelFault=0; wheel1_x=0; wheel2_x=0; wheel_x=0; gPosTarget=0.0f; gHdgTarget=0.0f; gOdoReset=true; dcIdx=0; gDcReady=false; gDcArm=true; } else { gDcArm=false; gDcReady=true; } }  // enable: clear fault + ZERO the position frame (wheel odometer + target + dead-reckoned pose) so current pos and target both start at 0; zero any turn
   else if (!strcmp(s,"d"))     gEnabled=false;
   else if (!strcmp(s,"izero")) gImuZero=v;
@@ -1746,7 +1809,6 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"cap"))   gSetpoint=tTheta;
   else if (!strcmp(s,"rd")){ gDumpRead=true; return; } // dump next raw read frame
   else if (!strcmp(s,"wt")){ gTestTor=(int)v; }        // stand-only wheel torque test
-  else if (!strcmp(s,"wmode")){ wheelSetReg(LEFT_W,0x11,(uint8_t)v); wheelSetReg(RIGHT_W,0x11,(uint8_t)v); } // wheel mode reg 0x11
   else if (!strcmp(s,"wten")){ wheelTorqueEnAll((uint8_t)v); }  // wheel torque enable reg 0x18 (broadcast)
   else if (!strcmp(s,"lock")){ gPollLock=(int)v; }     // poll only this wheel ID (0=alternate)
   else if (!strcmp(s,"vbatk"))  gVbatK=v;                        // trim battery divider ratio (default 3.0 per schematic)
@@ -1900,8 +1962,8 @@ void loop(){
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
     char b[704];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f amax=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f pull=%.2f lean=%.2f mpc=%u mpcus=%u vrejL=%u vrejR=%u gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u legstkL=%u legstkR=%u legst=%u rfL=%u rfR=%u rft0=%u rft1=%u ms=%u\n",
-      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gLqrAMax, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gRollMode, tRollAcc, tPull, tLean, (unsigned)tMpcState, (unsigned)tMpcUs, (unsigned)tVrejL, (unsigned)tVrejR, gTurn, gHdgTarget, gYawRateCmd,
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f amax=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f pull=%.2f lean=%.2f mpc=%u mpcus=%u vrejL=%u vrejR=%u wmodebad=%u gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u legstkL=%u legstkR=%u legst=%u rfL=%u rfR=%u rft0=%u rft1=%u ms=%u\n",
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gLqrAMax, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gRollMode, tRollAcc, tPull, tLean, (unsigned)tMpcState, (unsigned)tMpcUs, (unsigned)tVrejL, (unsigned)tVrejR, (unsigned)tWmodeBad, gTurn, gHdgTarget, gYawRateCmd,
       (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID), (unsigned)gDriveWdTrips, (unsigned)tLegRetryL, (unsigned)tLegRetryR, (unsigned)tLegFailL, (unsigned)tLegFailR, (unsigned)tLegStuckL, (unsigned)tLegStuckR, (unsigned)((gLegLimped?1:0)|(gLegHoming?2:0)|(gLegEnerR?4:0)|(gLegEnerL?8:0)), (unsigned)tRfL, (unsigned)tRfR, (unsigned)tRfFirstMs, (unsigned)tRfLastMs, (unsigned)millis());
     if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
     emit(b,k);
