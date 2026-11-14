@@ -108,7 +108,7 @@ function controls() {
   const bal = ok && S.roll_balance_enabled, rm = ok ? S.roll_mode : null;
   const bb = $("balbtn");
   bb.disabled = !ok;
-  bb.textContent = !ok ? "–" : bal ? "Stop balancing" : "Start balancing";
+  bb.textContent = !ok ? "–" : bal ? "Sit down" : "Start balancing";
   bb.className = "btn" + (bal ? " stop" : "");
   // body roll (firmware 'level' 2/1/0): lean into turns (along gravity + the turn's pull), stay flat, off (legs equal)
   for (const [id, m] of [["rolllean", "lean"], ["rollflat", "flat"], ["rolloff", "off"]]) {
@@ -126,10 +126,11 @@ function controls() {
   $("height").disabled = $("leghome").disabled = !bal;   // the legs move only while balancing (firmware, 2026-11-06)
 }
 
-// Balance: idle -> 'en 1'; balancing -> STOP, same as the LCD button and E-STOP (balance off + legs limp)
+// Balance, as the LCD button and DS4 Share: idle -> 'en 1' (resting on the knee stub or nose, the firmware gets it
+// up); balancing -> 'sit' (back onto the knee stub, then off). The instant stop is E-STOP, below.
 $("balbtn").addEventListener("click", () => {
   if (!live()) return;
-  if (S.roll_balance_enabled) { line("en 0"); line("leglimp"); } else line("en 1");
+  line(S.roll_balance_enabled ? "sit" : "en 1");
 });
 $("rolllean").addEventListener("click", () => { if (live()) line("level 2"); });
 $("rollflat").addEventListener("click", () => { if (live()) line("level 1"); });
@@ -160,7 +161,8 @@ $("speed").addEventListener("change", () => {
   else showSpeed(speedRetained);
 });
 
-// E-STOP = the LCD stop button: balance off, then legs limp. Two lines on the same topic keep
+// E-STOP, the instant stop (the balance button, LCD button and DS4 Share sit it down instead, 2026-11-14):
+// balance off, then legs limp. Two lines on the same topic keep
 // their order through the bridge's queue. No confirm: it's an emergency control.
 $("estop").addEventListener("click", () => {
   const a = client.publish("rider/control/line", JSON.stringify({ line: "en 0" }));

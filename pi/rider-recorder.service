@@ -13,7 +13,7 @@ Wants=mosquitto.service
 # rider/safety/fwd_brief (2026-11-03): the ToF governor's verdict a frame (factor, the nearest obstacle min_mm), compact.
 # rider/control/line (2026-11-03): every command line sent to the robot (the DS4's dv / turnrate, the web page's) --
 # brief turn commands between two telemetry lines are otherwise invisible (the robot "turning by itself").
-ExecStart=/usr/bin/mosquitto_sub -h localhost -t rider/debug/telem -t rider/debug/dcap -t rider/debug/leg -t rider/debug/unknown -t rider/safety/fwd_brief -t rider/control/line -v -F "%%I %%t %%p"
+ExecStart=/usr/bin/mosquitto_sub -h localhost -t rider/debug/telem -t rider/debug/dcap -t rider/debug/leg -t rider/debug/unknown -t rider/debug/getup -t rider/safety/fwd_brief -t rider/control/line -v -F "%%I %%t %%p"
 StandardOutput=append:/home/pi/riderlog.txt
 StandardError=append:/home/pi/riderlog.txt
 Restart=always

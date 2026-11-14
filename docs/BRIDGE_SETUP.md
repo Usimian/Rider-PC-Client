@@ -97,7 +97,7 @@ ssh rider 'timeout 2 mosquitto_sub -h localhost -t rider/status/imu | head -1'
 ssh rider 'timeout 2 mosquitto_sub -h localhost -t rider/safety/fwd_limit | head -1'
 ```
 
-Then press the **upper-left button** to start/stop balancing, or
+Then press the **upper-left button** to start balancing (from resting on its knee stub or nose it gets up by itself) or to sit it back down, or
 `python3 tools/diag/rider_cmd.py start` / `stop`.
 
 > ⚠️ Balancing drives the wheels. Never arm it with the robot on a stand —

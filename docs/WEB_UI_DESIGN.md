@@ -55,7 +55,7 @@ bus (see the pairing plan in the Hover project).
 
 | control | message | notes |
 |---|---|---|
-| **Balance on/off** | `rider/control/line` `en 1` / `en 0` | toggles by the live `roll_balance_enabled` |
+| **Balance on / sit down** | `rider/control/line` `en 1` / `sit` | toggles by the live `roll_balance_enabled`; `en 1` from a resting pose (knee stub or nose) gets it up, `sit` sits it back onto the knee stub then switches off (2026-11-14; was `en 0` + `leglimp`) |
 | **Body roll**: lean into turns / stay flat / off | `level 2` / `level 1` / `level 0` | by live `roll_mode` (lean / flat / off; the Tk GUI and DS4 Square step through them) |
 | **Controller** POLICY / LQR | `ctrl 0` / `ctrl 1` | greyed out while balancing; the firmware refuses it anyway |
 | **Obstacle** (the obstacle stop; edge stop removed 10-27) | `rider/safety/enable` `{"on": bool}`, **retained** | toggles by the governor's reported `on`; off = it reports but never limits |
@@ -63,7 +63,7 @@ bus (see the pairing plan in the Hover project).
 | **Ride height** | `leghome` | same as DS4 R3 |
 | **Top speed** slider | `posvmax v` + `posvmaxb v` (m/s) | caps full stick for both controllers; replaces the dead Tk speed slider |
 | **Reset position** | `poszero` | same as DS4 Circle |
-| **E-STOP** | `rider/control/line` `en 0` then `leglimp` | always visible, top bar; **same as the LCD stop button** (balance off + legs limp), not the Tk GUI's `emergency_stop` (balance off only). Built in step 2 |
+| **E-STOP** | `rider/control/line` `en 0` then `leglimp` | always visible, top bar; **the instant stop** (balance off + legs limp; the balance button, LCD button and DS4 Share sit it down instead, 2026-11-14), not the Tk GUI's `emergency_stop` (balance off only). Built in step 2 |
 | **Power off / Reboot Pi** | `rider/control/system` `poweroff_pi` / `reboot_pi` | behind a confirm dialog; the LCD shows SHUTTING DOWN / REBOOTING |
 | **Camera** | `rider/control/image_capture` `{"request_id", "resolution"}` | see Video |
 

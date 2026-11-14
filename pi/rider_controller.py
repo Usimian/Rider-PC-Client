@@ -19,8 +19,10 @@ Mapping:
   Cross (X)           -> obstacle stop on/off (the retained rider/safety/enable, as the web page's button); a beep
   Square (#)          -> body roll: lean into turns -> stay flat -> off -> ... (level 2/1/0)
   Circle (O)          -> reset position (poszero) without dropping balance
-  Share               -> BALANCE / STOP: idle -> en 1; balancing -> en 0 + leglimp (legs limp too),
-                         the same stop as the LCD upper-left button and the web page's E-STOP
+  Share               -> BALANCE / SIT, as the LCD upper-left button and the web page's balance button:
+                         idle -> en 1 (resting on the knee stub or nose, the firmware gets it up; held upright, it
+                         balances as before); balancing -> sit (back onto the knee stub, then off; main.cpp gSitU).
+                         The web page's E-STOP is the instant stop (en 0 + leglimp).
   Options             -> toggle joystick <-> computer drive
 
 Joystick mode is manual operation: everything above works. Computer mode is all computer: only Share and
@@ -59,7 +61,7 @@ AXIS_DRIVE = 1       # left stick Y (stick up = negative)
 AXIS_TURN = 3        # right stick X (verify with --test)
 AXIS_HEIGHT = 4      # right stick Y (stick up = negative). 6-axis DS4 under hid_playstation: 0 LX, 1 LY,
                      # 2 L2, 3 RX, 4 RY, 5 R2 (3 = RX verified; 4 = RY verified with --test 2026-10-18)
-BTN_BALANCE     = 8  # Share        -- toggle balance (en 1/en 0); off = stop. (moved to Share 2026-06-24; VERIFY index w/ --test)
+BTN_BALANCE     = 8  # Share        -- balance on (en 1: gets up from resting) / sit (then off). (Share since 2026-06-24)
 BTN_CTRL        = 2  # Triangle    -- balance controller: LQR <-> policy ('ctrl 1' / 'ctrl 0'); only while balance is off
 BTN_SAFETY      = 0  # Cross (X)   -- obstacle stop on/off (2026-11-06; Cross was 'LQR', Triangle 'policy')
 BTN_DISTZERO    = 1  # Circle (O)  -- poszero / reset position, balance stays on (Cross=0,Circle=1,Triangle=2,Square=3 verified --test 2026-06-16)
@@ -342,11 +344,11 @@ def main():
         def jedge(idx):                        # a button that acts only in joystick (manual) mode
             return drive_mode == "joystick" and edge(idx)
 
-        if edge(BTN_BALANCE):                  # Share: BALANCE / STOP -- both modes
+        if edge(BTN_BALANCE):                  # Share: BALANCE / SIT -- both modes
             if state["en"]:
-                send("en 0"); send("leglimp")  # STOP = balance off + legs limp -- same as the LCD button + web E-STOP
+                send("sit")                    # sit back onto the knee stub, then off -- as the LCD button + web balance button
             else:
-                send("en 1")                       # firmware homes the target on enable
+                send("en 1")                   # resting: the firmware gets it up; held upright: balances as before
         if jedge(BTN_CTRL):                     # Triangle: the other balance controller, from the robot's (rider/status)
             nxt = "POL" if state["ctrl"] == "LQR" else "LQR"
             if state["en"]:                    # the firmware refuses a swap mid-balance; don't even ask

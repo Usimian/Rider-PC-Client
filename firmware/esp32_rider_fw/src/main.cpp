@@ -217,6 +217,45 @@ volatile float gDqUMax   = 60.0f;   // clamp on rate-damping term
 volatile float gVelIClamp= 8.0f;    // velocity integral anti-windup clamp (deg of lean)
 volatile int   gDither   = 0;       // +/- buzz added to wheel cmd each cycle (stiction fluidizer); 0=off
 volatile float gFallDeg  = 25.0f;   // cut torque past this tilt error
+// GET-UP (2026-11-14, sim/getup_sim.py): from a resting pose -- back on the knee stub (pitch ~+31 deg from upright)
+// or forward on the nose prong (~-29) -- balance on ('en 1': web page, DS4 Share, LCD button; Marc) arms the balance
+// and, on the LQR with the robot resting and still, kicks the wheels toward the lean at
+// gGetupU (may exceed gUMax for the kick alone), until the LQR's pitch is within gGetupHand of upright; then the fall latch
+// releases and the LQR starts its plan from where the robot is, as after a fall (the legs, limp while latched, power
+// up and slew to ride height). The kick ends without handing over -- wheels off, still latched -- after gGetupMs, or
+// as soon as the lean grows GETUP_BACK_DEG past where it started (falling back onto the stub / nose). Sim, 32 random
+// robots per pose: 600 got up 64/64 in ~80 ms (max 95), 7-10 deg past upright, rolling ~9 cm (max 18); 400 failed on
+// weak batteries (the motor's torque fades with speed). Above 400 the motor model is extrapolated and the 8.4 V
+// rail's sag is not modelled -- 1000 browned out ID21 on 06-18. 400, the floor (11-14, three kicks: up from the stub
+// and the nose in ~150 ms, vbat 7.90 -> 7.86, no servo retries) and Marc's choice: more risks locking up a servo.
+// Anywhere else (held near upright, lying oddly, the policy controller) 'en 1' arms as before.
+volatile bool  gArmReq    = false;  // set by 'en 1', taken by the balance task (get up, or arm as before)
+volatile float gGetupU    = 400.0f; // the kick's command ('getupu', 0..GETUP_U_MAX)
+volatile float gGetupHand = 10.0f;  // hand over within this of upright (deg, 'getuphand')
+volatile int   gGetupMs   = 250;    // the kick's time limit (ms, 'getupms')
+#define GETUP_U_MAX     800.0f      // the most 'getupu' takes
+#define GETUP_REST_MIN  20.0f       // a resting pose: the LQR's pitch error this far from upright ...
+#define GETUP_REST_MAX  45.0f       // ... and no further
+#define GETUP_STILL_DPS 15.0f       // ... with the body's rate under this (deg/s)
+#define GETUP_STILL_W   20.0f       // ... and both wheels under this (register units)
+#define GETUP_BACK_DEG  5.0f        // falling back: the lean this much past where the kick started
+#define GETUP_STIFF_MS  400         // the legs must power (holding where they rest) within this, else no kick
+#define GETUP_SETTLE_MS 1000        // after the catch the legs hold this long at least, and until it is calm ...
+#define GETUP_SETTLE_MAX_MS 3000    // ... or at most this, then they slew to the ride height
+// SIT (2026-11-14, sim/sit_sim.py; Marc's idea): 'sit' (web page balance button, DS4 Share, LCD button -- the
+// normal stop; the web E-STOP stays 'en 0' + 'leglimp', instant) sits the robot back onto its knee stub, so the next
+// start is always the same get-up: the legs slew to the LOWEST height (Marc; ride height until 11-14 noon), then the wheels are driven forward at
+// gSitU, open loop -- rolling under the body tips it back -- until the LQR's pitch reads gSitCut back, then balance
+// off (wheels off, legs limp) and it settles onto the stub. Sim, 16 random robots: 150 cut at 8-12 deg sat 16/16,
+// the stub hit at ~250 deg/s (max ~310), ~12 N, rolling 2-3 cm; holding the balance loop in charge (its upright
+// reference ramped back) rolled up to 1 m backward and hit at ~600 deg/s. If it has not tipped back in gSitMs, or
+// tips forward past -gSitCut, the sit is abandoned and it keeps balancing (the plan restarts). Not balancing
+// upright (off, or latched after a fall): 'sit' is a plain stop.
+volatile bool  gSitReq    = false;  // set by 'sit', taken by the balance task
+volatile float gSitU      = 150.0f; // the forward pulse's command ('situ', 0..300)
+volatile float gSitCut    = 10.0f;  // cut when this far back from upright (deg, 'sitcut')
+volatile int   gSitMs     = 600;    // the pulse's time limit (ms, 'sitms')
+#define SIT_LOWER_MS    3000        // the most the legs get to reach the lowest height before the pulse
 volatile float gFallRollDeg = 40.0f; // ... and past this roll (deg, the fused roll: true in turns since tiltRates) -- past
                                      // the most the legs can lean the body, so it is falling, not leaning (2026-10-29,
                                      // Marc): ~+/-30 deg at full reach, DERIVED (tools/balance/lean_cpd.py: 1.5 counts/deg
@@ -350,6 +389,15 @@ volatile float gLegHomeSlew = 0.3f;          // home/equalize slew (counts/cycle
 volatile bool  gLegLimpReq = false;          // 'leglimp' (STOP button) -> torque-OFF both legs and stay limp
 volatile bool  gLegHomeReq = false;          // 'leghome' (DS4 R3) -> slew both legs back to the ride height (MID),
                                              // the same slow move balance-on does; works balancing or not
+static bool    gLegLowReq = false;           // the sit (see gSitU): slew both legs to the LOWEST height (R MIN, L MAX),
+                                             // the same slow move as 'leghome' (Marc 11-14: lowest, then sit)
+static bool    gLegHold = false;             // the get-up (see gGetupU): legs powered HOLDING where they stand -- also
+                                             // while latched -- with no homing, leveling or height steps, so the robot
+                                             // rises and is caught as one rigid piece; cleared when it has settled
+                                             // (then the legs slew to the ride height), or on any failure or fall.
+                                             // Floor 11-14: with the legs limp the body sank to the lowest height
+                                             // while being kicked up and rose as the legs powered at the handover;
+                                             // the LQR then went to +400 and threw it back (2 of 2 at 11:07).
 static bool    gLegLimped  = false;          // legs held limp (suppresses the balance-off equalize) until next balance-on
 static bool    gLegHoming = false;           // slewing legs to a home/equalized destination, then hold
 static float   gLegHomeR=0, gLegHomeL=0;     // slewing command (float for fractional slew)
@@ -433,6 +481,23 @@ volatile bool  gDoGcal=false;       // 'gcal' -> recalibrate gyro bias (robot mu
 volatile bool  gStepCap=false;      // 'stepcap' -> capture wheel step response (stand only, disabled)
 volatile int   gStepCmd=200;        // step magnitude (wheel torque field) for the capture
 static void emit(const char* b, int k);   // fwd decl (defined below)
+// BALANCE-TASK MESSAGES (2026-11-14): the balance task never writes the serial ports itself -- it post()s a line,
+// and loop() sends it with the telemetry. Defect: emit() from the balance task (priority 12) waited behind loop()'s
+// telemetry write (~1100 chars, ~95 ms at the Pi link's 115200 baud) -- the control loop froze up to ~110 ms with
+// its last command held. Floor 11-14: the get-up's status lines froze it 53 ms mid-kick (-400 held: rolled back
+// 50 cm) and 103/109 ms at the handover (+400 held: thrown forward past 25 deg, twice). Likely also the 50-115 ms
+// 'dtmax' stalls open since 11-03 (leg arrival reports and the wheel-mode refusal went the same way). The
+// on-demand capture dumps ('cap', 'logdump') still write directly: they pause the balance task deliberately.
+struct MsgSlot { uint8_t n; char s[127]; };
+static QueueHandle_t gMsgQ = nullptr;
+static volatile uint32_t gMsgDrops = 0;     // lines lost to a full queue (loop() reports them)
+static void post(const char* b, int k){     // from the balance task: queue the line, never wait
+  if(k <= 0) return;
+  MsgSlot m; m.n = (uint8_t)(k < (int)sizeof(m.s) ? k : (int)sizeof(m.s));
+  memcpy(m.s, b, m.n);
+  if(m.n == sizeof(m.s)) m.s[m.n - 1] = '\n';                   // a cut line still ends its line
+  if(!gMsgQ || xQueueSend(gMsgQ, &m, 0) != pdTRUE) gMsgDrops++;
+}
 
 // IMU / filter constants
 static const float GYRO_LSB_PER_DPS = 16.4f;
@@ -793,14 +858,14 @@ static void legArrivalCheck(uint8_t id, bool ener, int tgt, volatile uint32_t* s
   if(!ener || tgt == LEG_NONE) return;
   uint8_t r[16];
   char b[120]; int k;
-  if(!legRead(id, 0x18, 16, r)){ k = snprintf(b, sizeof(b), "# leg %d noread tgt=%d\n", id, tgt); emit(b, k); return; }
+  if(!legRead(id, 0x18, 16, r)){ k = snprintf(b, sizeof(b), "# leg %d noread tgt=%d\n", id, tgt); post(b, k); return; }
   int pos = (r[0x24-0x18] | (r[0x25-0x18] << 8)) & 0x3FF;
   bool bad = abs(pos - tgt) > LEG_ARRIVE_TOL;
   if(bad) (*stuck)++;
   k = snprintf(b, sizeof(b), "# leg %d %s tgt=%d pos=%d regs=", id, bad ? "STUCK" : "ok", tgt, pos);
   for(int i = 0; i < 16; i++) k += snprintf(b + k, sizeof(b) - k, "%02X", r[i]);
   k += snprintf(b + k, sizeof(b) - k, "\n");
-  emit(b, k);
+  post(b, k);
 }
 static void legGoalWriter(){
   static uint32_t lastMs = 0;
@@ -965,6 +1030,16 @@ static float driveRamp(float v, float tgt, float dt){
   float n = (tgt > v + d) ? v + d : (tgt < v - d) ? v - d : tgt;
   if(braking && ((v > 0.0f && n < 0.0f) || (v < 0.0f && n > 0.0f))) n = 0.0f;
   return n;
+}
+
+// Balance on / off ('en 1' / 'en 0', and 'getup' arming): on clears a wheel fault and ZEROES the position frame
+// (wheel odometer + target + dead-reckoned pose) so position and target both start at 0; either way any turn and
+// drive command is dropped; the drive capture arms on 'on' and stops on 'off'.
+static void setBalance(bool on){
+  gEnabled = on; gTurn = 0.0f; gYawRateCmd = 0.0f; gDriveVel = 0.0f;
+  if(on){ gWheelFault = 0; wheel1_x = 0; wheel2_x = 0; wheel_x = 0; gPosTarget = 0.0f; gHdgTarget = 0.0f; gOdoReset = true;
+          dcIdx = 0; gDcReady = false; gDcArm = true; }
+  else  { gDcArm = false; gDcReady = true; }
 }
 
 // ---------------- balance task (core 1) ----------------
@@ -1156,6 +1231,7 @@ static void balanceTask(void*){
     static bool  polInit=false;          // neural-policy episode state (reset on disable)
     static bool  lqrInit=false;          // LQR drive-state init on enable; declared here (not in the LQR block) so the runaway cutout's posRef can read it
     static float polIpitch=0,polPrevX=0,polPrevFrame[8]={0},posErrInt=0,xvelF=0,xvelP=0,uF=0,gPosTargetEff=0,vdesS=0;
+    static float uLast = 0.0f;           // the wheel command applied last cycle (the pick-up check reads it before u is computed)
     static bool  wasVelDrive=false;     // edge-detect velocity-drive -> release, to latch the home cleanly
     static bool  wasTurning=false;      // edge-detect turn start -> re-anchor fore/aft home to the spin center
     // position-runaway cutout: in policy mode measure from the SLEWED target gPosTargetEff
@@ -1171,31 +1247,142 @@ static void balanceTask(void*){
     float posRef = ctrlInit ? gPosTargetEff : wheel_x;
     // FALL LATCH (2026-11-06, the Hover's update_state after its code review of 11-05): a fall still cuts at once;
     // balancing resumes only after the body has been held near upright -- pitch error and roll both within
-    // UPRIGHT_DEG -- for UPRIGHT_HOLD_MS without a break. A wheel spinning freely (|speed| over PICKUP_VEL for
-    // PICKUP_MS: lifted with the wheels driven) cuts too and restarts the wait. PICKUP_VEL is in the wheel speed
-    // register's units (0.0038 m/s each, floor odometry 11-14). It was 350 (~1.3 m/s) until 2026-11-14 and never fired:
-    // at the +/-400 command cap a lifted wheel spins at only ~280 (three lifts that day: 277-281, full battery), so the
-    // tilt cut caught the lifts after up to 1 s at full command. 240 (~0.91 m/s): driving at 0.60 m/s the fastest
-    // wheel read 193; a lifted wheel reaches ~280 charged, ~255 on a low battery (free spin scales with vbat).
-    // Before, it resumed the moment the pitch error was back under gFallDeg: on 11-03, being picked up after a fall,
-    // it drove -400 in Marc's hands and rolled the robot to 87 deg. Disarming clears the latch (arming as before).
+    // UPRIGHT_DEG -- for UPRIGHT_HOLD_MS without a break.
+    // PICK-UP (2026-11-14): while balancing, a wheel spinning PICKUP_SLIP faster than the plan asks (or against it)
+    // WHILE the command drives it that way at |u| >= PICKUP_U, for PICKUP_MS, means it is off the ground and driven --
+    // lifted -- and cuts like a fall. The command condition: in every lift u sat at +/-400 pushing the free wheel; a
+    // wheel rolled by the floor is not being driven (11-14 09:36:59, braking from 0.60 across the doorway: rolled back
+    // 179 past the plan with u -33; replayed over the day's logs, slip alone flags it, slip + command flags only the
+    // lifts). Measured from the plan, not
+    // from zero: a fixed limit cannot separate a lift from driving fast over a bump. Floor 11-14 (register units,
+    // LQR_SPEED_PER_MPS per m/s): lifts at rest spun to 264-281 (lower on a weaker battery); a doorway ramp at 0.60
+    // m/s (158) put a wheel briefly airborne at 231, i.e. 73 past the plan. The fixed limit was 350 (could never
+    // fire: at the +/-400 cap a lifted wheel spins at ~280), then 240 (fired, but 9 above that ramp). One-sided: a
+    // wheel slower than the plan (blocked, stalled at a wall, coasting after a cut) never trips it. Only while not
+    // latched: the plan speed (vdesS) is frozen while fallen and the wheels are off. Limit: lifted while driving
+    // forward at >= ~0.45 m/s with the wheels still spinning forward, the wheel cannot get PICKUP_SLIP past the
+    // plan -- the tilt cut is the backstop there.
+    // Before 11-06 it resumed the moment the pitch error was back under gFallDeg: on 11-03, being picked up after a
+    // fall, it drove -400 in Marc's hands and rolled the robot to 87 deg. Disarming clears the latch.
     #define UPRIGHT_DEG     15.0f
     #define UPRIGHT_HOLD_MS 1000          // 1 s (Marc, 11-06; was 1.5 s)
-    #define PICKUP_VEL      240.0f
+    #define PICKUP_SLIP     150.0f        // register units past the plan's speed (~0.55 m/s)
+    #define PICKUP_U        300.0f        // command units: the wheel is being driven the way it slips (gUMax 400)
     #define PICKUP_MS       50
     static bool fallLatch = false; static uint32_t uprightSince = 0, fastSince = 0;
-    bool fallNow = (fabsf(qErr) > gFallDeg) || (fabsf(tRoll) > gFallRollDeg) || (fabsf(wheel_x - posRef) > gMaxPosErr);
+    // The tilt the fall check reads: on the LQR its own pitch (lqrPitch, the IMU loop's: every sample, on core 0),
+    // not theta. theta integrates the latest gyro sample once per control cycle, so a stall of the control loop
+    // while the body turns fast puts it far off: floor 11-14 11:21:07, a 50 ms stall at the get-up's kick (the
+    // wheel-mode check) -- theta read +39 deg with the body at ~-4 (lqrPitch), and the fall cut stopped the catch.
+    const float qFall = (gCtrl == CTRL_LQR) ? (lqrPitch - gLqrUp) : qErr;
+    bool fallNow = (fabsf(qFall) > gFallDeg) || (fabsf(tRoll) > gFallRollDeg) || (fabsf(wheel_x - posRef) > gMaxPosErr);
     { uint32_t ms = millis();
-      if(fabsf(wheel1_vel) > PICKUP_VEL || fabsf(wheel2_vel) > PICKUP_VEL){
+      const float pv = vdesS * LQR_SPEED_PER_MPS;                  // the plan's speed, register units
+      const float ul = uLast;
+      auto spinsPast = [pv, ul](float w){ float s = w - pv;
+        return fabsf(w) > fabsf(pv) && fabsf(s) > PICKUP_SLIP && ul * s > 0.0f && fabsf(ul) >= PICKUP_U; };
+      // Not during the get-up's catch (gLegHold): the plan starts at the kick's backward speed while the LQR brakes
+      // forward at 400 -- a lift's signature; floor 11-14 11:17:40/45 it cut two catches near upright.
+      if(gEnabled && !fallLatch && !gLegHold && (spinsPast(wheel1_vel) || spinsPast(wheel2_vel))){
         if(!fastSince) fastSince = ms | 1u; else if(ms - fastSince > PICKUP_MS) fallNow = true;
       } else fastSince = 0;
       if(!gEnabled){ fallLatch = false; uprightSince = 0; }
       else if(fallNow){ fallLatch = true; uprightSince = 0; }
       else if(fallLatch){
-        if(fabsf(qErr) >= UPRIGHT_DEG || fabsf(tRoll) >= UPRIGHT_DEG) uprightSince = 0;
+        if(fabsf(qFall) >= UPRIGHT_DEG || fabsf(tRoll) >= UPRIGHT_DEG) uprightSince = 0;
         else if(!uprightSince) uprightSince = ms | 1u;
         else if(ms - uprightSince >= UPRIGHT_HOLD_MS) fallLatch = false;
       } }
+    // GET-UP (see gGetupU): taken here, inside the fall latch -- a resting robot is armed-but-fallen and the LQR idle.
+    // States: 3 the legs power holding where they rest (gLegHold) -> 1 the kick (overrides the wheels' command,
+    // below) -> handing over releases the latch, so the LQR starts its plan this very cycle (lqrInit is false while
+    // fallen) -> 2 the legs hold until it is calm, then slew to the ride height. 0 idle.
+    static uint8_t getupState = 0; static uint32_t getupSince = 0; static float getupQ0 = 0.0f, getupSign = 0.0f;
+    bool getupKick = false;
+    // getupPrep: while the legs stiffen (state 3) the wheels are powered at command 0, so the output stage's
+    // wheel-mode check -- servo reads with retries, a stall of up to ~50 ms, run when the wheels first get power --
+    // happens with the robot still at rest, not at the kick (floor 11-14 11:21: dtmax 50 ms at each kick).
+    bool getupPrep = false;
+    { const float qg = lqrPitch - gLqrUp;                         // the LQR's pitch error, firmware frame (+ = back)
+      char b[128]; int k = 0;
+      if(gArmReq){                                                 // 'en 1': get up from a resting pose, else arm as before
+        gArmReq = false;
+        const bool still = fabsf(lqrRate) < GETUP_STILL_DPS && fabsf(wheel1_vel) < GETUP_STILL_W && fabsf(wheel2_vel) < GETUP_STILL_W;
+        const bool resting = fabsf(qg) >= GETUP_REST_MIN && fabsf(qg) <= GETUP_REST_MAX;
+        const bool upright = gEnabled && !fallLatch;
+        if(gCtrl == CTRL_LQR && !upright && resting && still){
+          if(!gEnabled) setBalance(true);
+          getupState = 3; getupSince = millis(); getupQ0 = qg; getupSign = (qg > 0.0f) ? -1.0f : 1.0f;   // back: wheels back
+          fallLatch = true; uprightSince = 0; gLegHold = true;      // the legs stiffen first (the leg section powers them)
+        } else setBalance(true);
+      }
+      if(getupState == 3){                                         // the legs powering, holding where they rest
+        const uint32_t el = millis() - getupSince;
+        if(!gEnabled){ getupState = 0; gLegHold = false; }
+        else if(gLegEnerR && gLegEnerL){
+          getupState = 1; getupSince = millis();
+          k = snprintf(b, sizeof(b), "# getup: legs stiff in %u ms, kick %.0f from %+.1f deg\n", (unsigned)el, getupSign * gGetupU, qg);
+        } else if(el > GETUP_STIFF_MS || gLegEnR.stage == LEG_EN_FAILED || gLegEnL.stage == LEG_EN_FAILED){
+          getupState = 0; gLegHold = false;                         // no kick: it stays latched, the legs go limp
+          k = snprintf(b, sizeof(b), "# getup FAILED: legs not powered after %u ms (L %s, R %s), no kick\n",
+                       (unsigned)el, gLegEnerL ? "ok" : "no", gLegEnerR ? "ok" : "no");
+        } else getupPrep = true;                                    // wheels powered at 0 meanwhile (see getupPrep)
+      }
+      if(getupState == 1){
+        const uint32_t el = millis() - getupSince;
+        if(!gEnabled){ getupState = 0; gLegHold = false; }           // balance switched off mid-kick
+        else if(fabsf(qg) <= gGetupHand){
+          getupState = 2; getupSince = millis(); fallLatch = false; uprightSince = 0; fallNow = false;   // the legs keep holding
+          k = snprintf(b, sizeof(b), "# getup ok: up in %u ms from %+.1f, handed over at %+.1f deg\n", (unsigned)el, getupQ0, qg);
+        } else if(el > (uint32_t)gGetupMs || fabsf(qg) > fabsf(getupQ0) + GETUP_BACK_DEG){
+          getupState = 0; gLegHold = false;
+          k = snprintf(b, sizeof(b), "# getup FAILED: %s after %u ms, at %+.1f deg (from %+.1f)\n",
+                       el > (uint32_t)gGetupMs ? "time" : "falling back", (unsigned)el, qg, getupQ0);
+        } else getupKick = true;
+      }
+      if(getupState == 2){                                         // caught: the legs hold until it is calm
+        const uint32_t el = millis() - getupSince;
+        if(!gEnabled || fallNow || fallLatch){
+          getupState = 0; gLegHold = false;                         // fell: limp, as after any fall
+          if(gEnabled) k = snprintf(b, sizeof(b), "# getup: fell %u ms after the catch, at %+.1f deg\n", (unsigned)el, qg);
+        } else if((el > GETUP_SETTLE_MS && fabsf(qg) < 5.0f && fabsf(lqrRate) < 30.0f) || el > GETUP_SETTLE_MAX_MS){
+          getupState = 0; gLegHold = false; gLegHomeReq = true;     // now the slow slew to the ride height
+          k = snprintf(b, sizeof(b), "# getup: settled %u ms after the catch, legs to the ride height\n", (unsigned)el);
+        }
+      }
+      if(k > 0) post(b, k);
+    }
+    // SIT (see gSitU): legs to the lowest height, then the forward pulse (overrides the wheels' command, below) until
+    // the pitch reads gSitCut back, then balance off. Taken here so a fall during it is handled as any fall.
+    static uint8_t sitState = 0; static uint32_t sitSince = 0;    // 0 idle, 1 legs going to the lowest height, 2 pulsing
+    bool sitPulse = false;
+    { const float qg = lqrPitch - gLqrUp;
+      char b[112]; int k = 0;
+      const bool upright = gEnabled && !fallLatch && !fallNow;
+      if(gSitReq){
+        gSitReq = false;
+        if(!upright){ setBalance(false); gLegLimpReq = true; sitState = 0;           // not balancing upright: a stop
+                      k = snprintf(b, sizeof(b), "# sit: not balancing upright, stopped\n"); }
+        else if(sitState == 0){ sitState = 1; sitSince = millis(); gLegLowReq = true; }
+      }
+      if(sitState && !upright){ sitState = 0; }                    // switched off, or fell, meanwhile
+      if(sitState == 1){
+        const uint32_t el = millis() - sitSince;
+        if((!gLegLowReq && !gLegHoming) || el > SIT_LOWER_MS){ sitState = 2; sitSince = millis(); }
+      }
+      if(sitState == 2){
+        const uint32_t el = millis() - sitSince;
+        if(qg >= gSitCut){
+          sitState = 0; setBalance(false);                          // wheels off; the legs limp (not balancing)
+          k = snprintf(b, sizeof(b), "# sit ok: tipped back to %+.1f in %u ms, balance off\n", qg, (unsigned)el);
+        } else if(el > (uint32_t)gSitMs || qg < -gSitCut){
+          sitState = 0; lqrInit = false;                            // abandoned: the LQR restarts its plan from here
+          k = snprintf(b, sizeof(b), "# sit FAILED: %s after %u ms, at %+.1f deg; still balancing\n",
+                       el > (uint32_t)gSitMs ? "time" : "tipped forward", (unsigned)el, qg);
+        } else sitPulse = true;
+      }
+      if(k > 0) post(b, k);
+    }
     bool fallen = fallNow || fallLatch;
     gFallen = fallen;                          // expose to the LED status (loop() reads it)
     static float lqrShift = 0.0f;              // Circle: the distance frame's shift (m) for the LQR's plan to take (below)
@@ -1408,7 +1595,9 @@ static void balanceTask(void*){
     static int8_t ditherSign = 1;
     static bool wasDriving = false;
     static int torqAcc=0;                   // factory-style rate-limited torque accumulator
-    bool driving = (gEnabled && !fallen) || (!gEnabled && gTestTor!=0);
+    if(getupKick) u = getupSign * clampf(gGetupU, 0.0f, GETUP_U_MAX);   // the get-up kick: above gUMax, for the kick alone
+    if(sitPulse)  u = clampf(gSitU, 0.0f, 300.0f);                        // the sit: wheels forward, the body tips back
+    bool driving = (gEnabled && !fallen) || (!gEnabled && gTestTor!=0) || getupKick || getupPrep;
     if(driving && !wasDriving && gEnabled){
       // WHEEL MODE CHECK (2026-11-06): both wheels must be in velocity-open-loop mode (0x11 = 0) before they get
       // torque -- read, never written. Mode 1 (the motor's own speed loop) does not balance: on 06-18 a stray write left
@@ -1427,7 +1616,7 @@ static void balanceTask(void*){
       if(bad){
         gEnabled = false; driving = false;
         char b[96]; int k = snprintf(b, sizeof(b), "# ? arm REFUSED: wheel mode (wmodebad=%u; 0x11 must be 0 on both)\n", bad);
-        emit(b, k);
+        post(b, k);
       }
     }
     if(driving){
@@ -1502,7 +1691,8 @@ static void balanceTask(void*){
       // armed: a fall or pick-up holds balance on with the wheels off; not the stand-only wheel test). Any other time
       // the legs go limp (the limp below) and every leg command is dropped -- balance off from anywhere, a fall, a
       // refused arm, power-up. When balancing starts or resumes the legs re-power and slew to the ride height (MID).
-      bool balancing = gEnabled && !fallen;
+      // The get-up's hold (gLegHold) powers them too, while still latched: held where they stand (below).
+      bool balancing = (gEnabled && !fallen) || gLegHold;
       if(!balancing && !gLegLimped) gLegLimpReq = true;
       // the limp ('leglimp' too): torque-OFF both legs and stay limp until balancing starts.
       if(gLegLimpReq){
@@ -1531,11 +1721,13 @@ static void balanceTask(void*){
       else {
       // here it is balancing (else the legs are limp). Balancing starts, or 'leghome' (DS4 R3) -> slew both legs to
       // the ride height (MID), slowly, from where they stand (they were limp: no height is kept, 2026-11-06).
-      if(!drvPrev || gLegHomeReq){
+      if(!drvPrev || gLegHomeReq || gLegLowReq){
         gLegHomeReq = false; gLegStepReq = 0;                     // a reset discards any height nudge still pending
         gLegHomeR = (gLegEnerR&&gLegTgtR!=LEG_NONE)?gLegTgtR:(legReadPos(RIGHT_LEG,&hp)?hp:LEG_R_MID);
         gLegHomeL = (gLegEnerL&&gLegTgtL!=LEG_NONE)?gLegTgtL:(legReadPos(LEFT_LEG,&hp)?hp:LEG_L_MID);
         gLegDestR = LEG_R_MID; gLegDestL = LEG_L_MID; gLegHoming = true;
+        if(gLegLowReq){ gLegDestR = LEG_R_MIN; gLegDestL = LEG_L_MAX; gLegLowReq = false; }          // the sit: lowest height
+        if(gLegHold){ gLegDestR = (int)lroundf(gLegHomeR); gLegDestL = (int)lroundf(gLegHomeL); }   // the get-up: hold here
       }
       // body roll switched to OFF while balancing -> equalize (remove the roll differential, keep height) + hold.
       // (FLAT <-> LEAN only changes the accumulator's target.)
@@ -1551,7 +1743,7 @@ static void balanceTask(void*){
 
       // the roll accumulator (FLAT, or along the pull: LEAN) runs whenever balancing with body roll not OFF, once
       // homing is done; it starts from the legs as they stand
-      bool levRun = (!gLegHoming && gRollMode != ROLL_OFF);
+      bool levRun = (!gLegHoming && !gLegHold && gRollMode != ROLL_OFF);
       static bool levRunPrev=false;
       if(levRun && !levRunPrev){                                  // the split just started -> anchor at the (homed) pos
         if(gLegEnerR && gLegTgtR!=LEG_NONE) gLevAnchR=gLegTgtR; else if(legReadPos(RIGHT_LEG,&hp)) gLevAnchR=hp; else gLevAnchR=LEG_R_MID;
@@ -1570,6 +1762,7 @@ static void balanceTask(void*){
       }
       if(gLegStepReq){
         if(levRun){ gLevAnchR += gLegStepReq; gLevAnchL -= gLegStepReq; gLegStepReq=0; }      // move the level anchor (mirror)
+        else if(gLegHold) gLegStepReq = 0;                                                     // (dropped while the get-up holds)
         else if(!gLegHoming){ gLegStepR += gLegStepReq; gLegStepL -= gLegStepReq; gLegStepReq = 0; }  // (ignored mid-home)
       }
       if(gLegHoming){
@@ -1656,6 +1849,7 @@ static void balanceTask(void*){
     tPoseX+=dWx*cosf(yawRad); tPoseY+=dWx*sinf(yawRad);
 
     tTheta=theta; tRate=dqf; tU=u; tWheelX=wheel_x; tWheelVx=wheel_vx;
+    uLast = u;
 
     // drive-capture sample (commanded u vs actual encoder v, per wheel, + pitch) at loop rate
     if(gDcArm && dcIdx<DCAP_N){
@@ -1734,12 +1928,13 @@ void setup(){
   Serial.printf("\n=== Rider balance FW (LQR) ===  IMU WHO_AM_I=0x%02X  retDelay L=%d R=%d\n", imuRead(REG_WHO_AM_I), tRetDL, tRetDR);
   Serial.println("LQR full-state: u = -(lqrx*x + lqrvx*vx + lqrq*q + lqrdq*dq). Legs torque-OFF. DISABLED.");
   Serial.println("Cmds: en 1|0 | lqrx lqrvx lqrq lqrdq izero set <v> | umax ff ffband fall vlp <v> |");
-  Serial.println("      driveff obsa obsb cap home gcal | d get");
+  Serial.println("      driveff obsa obsb cap home gcal | d get | sit, situ sitcut sitms, getupu getuphand getupms <v>");
 
   gLeds.begin(); gLeds.clear(); gLeds.show();       // status LEDs (IO27): off until first state update
   pinMode(LED_RED, OUTPUT);  digitalWrite(LED_RED,  LED_OFF);   // discrete red (fault) -- off
   pinMode(LED_BLUE, OUTPUT); digitalWrite(LED_BLUE, LED_OFF);   // discrete blue (heartbeat) -- off
   policyToRam();                                    // copy NN weights flash -> SRAM (fast matmul)
+  gMsgQ = xQueueCreate(8, sizeof(MsgSlot));                               // the balance task's lines (see post)
   xTaskCreatePinnedToCore(imuTask, "imu", 2048, NULL, 12, NULL, 0);   // the IMU loop (the Hover's imu_task)
   xTaskCreatePinnedToCore(balanceTask, "balance", 4096, NULL, 12, NULL, 1);
   xTaskCreatePinnedToCore(mpcTaskFn, "mpc", 6144, NULL, 1, &gMpcTask, 0);   // the MPC PLANNER, below the IMU loop
@@ -1786,7 +1981,14 @@ static void applyCmd(char* s){
   // 2026-11-06 (the Hover's code review 11-05: atof takes "nan" and "inf", and a clamp passes NaN): a value that
   // is not a finite number is refused, whatever the command -- it would reach the balance law as a gain or a limit
   if(!isfinite(v)){ char b[64]; int k=snprintf(b,sizeof(b),"# ? '%s' (not a finite number)\n", s); emit(b,k); return; }
-  if      (!strcmp(s,"en"))  { gEnabled=(v!=0.0f); gTurn=0.0f; gYawRateCmd=0.0f; gDriveVel=0.0f; if(gEnabled){ gWheelFault=0; wheel1_x=0; wheel2_x=0; wheel_x=0; gPosTarget=0.0f; gHdgTarget=0.0f; gOdoReset=true; dcIdx=0; gDcReady=false; gDcArm=true; } else { gDcArm=false; gDcReady=true; } }  // enable: clear fault + ZERO the position frame (wheel odometer + target + dead-reckoned pose) so current pos and target both start at 0; zero any turn
+  if      (!strcmp(s,"en"))  { if(v != 0.0f) gArmReq = true; else setBalance(false); }   // on: get up or arm (balance task); off: at once
+  else if (!strcmp(s,"sit"))       gSitReq = true;            // sit back onto the knee stub, then off (see gSitU)
+  else if (!strcmp(s,"situ"))      gSitU = clampf(v, 0.0f, 300.0f);           // the sit's forward pulse
+  else if (!strcmp(s,"sitcut"))    gSitCut = clampf(v, 4.0f, 20.0f);          // cut this far back (deg)
+  else if (!strcmp(s,"sitms"))     gSitMs = (int)clampf(v, 100.0f, 1500.0f);  // the pulse's time limit (ms)
+  else if (!strcmp(s,"getupu"))    gGetupU = clampf(v, 0.0f, GETUP_U_MAX);   // the kick's command
+  else if (!strcmp(s,"getuphand")) gGetupHand = clampf(v, 3.0f, 20.0f);      // hand over within this of upright (deg)
+  else if (!strcmp(s,"getupms"))   gGetupMs = (int)clampf(v, 50.0f, 600.0f); // the kick's time limit (ms)
   else if (!strcmp(s,"d"))     gEnabled=false;
   else if (!strcmp(s,"izero")) gImuZero=v;
   else if (!strcmp(s,"dqmax")) gDqUMax=v;
@@ -1956,6 +2158,11 @@ void loop(){
   static char b1[40]; static int n1=0;
   pump(Serial,  b0, n0);
   pump(Serial1, b1, n1);
+  { MsgSlot m;                                                  // the balance task's lines (see post)
+    while(gMsgQ && xQueueReceive(gMsgQ, &m, 0) == pdTRUE) emit(m.s, m.n);
+    static uint32_t dropsSeen = 0;
+    if(gMsgDrops != dropsSeen){ dropsSeen = gMsgDrops;
+      char d[48]; int dk = snprintf(d, sizeof(d), "# msg queue full: %u lines lost\n", (unsigned)dropsSeen); emit(d, dk); } }
   if(!gEnabled && gRollMode != gRollSaved){ gPrefs.putUChar("roll", (uint8_t)gRollMode); gRollSaved = gRollMode; }  // persist body roll (balancing off)
   if(millis()-tp >= 50){   // telemetry @ ~20 Hz
     tp=millis();

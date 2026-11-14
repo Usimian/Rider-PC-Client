@@ -50,8 +50,10 @@ ser.write(b"\n")
 
 # physical buttons on the XGO 2-inch board (active-low, pull-up). Mapped BY POSITION
 # on 2026-06-14 (GPIOs from the XGO CM4 key.py; labels A/B/C/D, but position is what we use):
-#   upper-left  = GPIO17 (C)  -> BALANCE / STOP: idle -> 'en 1'; balancing -> STOP = 'en 0' + 'leglimp'
-#                                (balance off AND legs torque-off). Merged 2026-10-19 (was two buttons).
+#   upper-left  = GPIO17 (C)  -> BALANCE / SIT: idle -> 'en 1' (resting on the knee stub or nose, the firmware
+#                                gets it up); balancing -> 'sit' (back onto the knee stub, then off; 2026-11-14,
+#                                was 'en 0' + 'leglimp' -- the web page's E-STOP keeps that instant stop).
+#                                Merged 2026-10-19 (was two buttons).
 #   upper-right = GPIO22 (D)  -> RESERVED for the hotspot on/off toggle (docs/WEB_UI_DESIGN.md); unused now
 #   lower-left  = GPIO23 (B)  -> hold ~1.5s = sudo poweroff
 #   lower-right = GPIO24 (A)  -> tap = reset distance frame ('poszero'; odometer + target -> 0)
@@ -525,23 +527,24 @@ while True:
         mqtt_forward("rider/debug/leg", line)      # leg arrival check after a slow leg move (ok / STUCK + registers)
     elif line.startswith("# ?"):
         mqtt_forward("rider/debug/unknown", line)  # a command line the firmware did not recognise
+    elif line.startswith(("# getup", "# sit")):
+        mqtt_forward("rider/debug/getup", line)    # each get-up from a resting pose and each sit: ok (ms, angles) / FAILED
     # relay any queued commands to the ESP32
     while not cmd_q.empty():
         try:
             ser.write((cmd_q.get_nowait() + "\n").encode())
         except Exception:
             break
-    # C button (upper-left, GPIO17): BALANCE / STOP. Idle -> start balancing. Balancing -> STOP:
-    # 'en 0' (wheels off) + 'leglimp' (legs torque-off too), so the robot settles fully limp.
+    # C button (upper-left, GPIO17): BALANCE / SIT. Idle -> 'en 1' (gets up from a resting pose). Balancing ->
+    # 'sit': back onto the knee stub, then balance off and the legs limp (the firmware does both).
     if btn_ok:
         lvl = lgpio.gpio_read(_chip, BTN_BALANCE)
         tnow = time.time()
         if btn_prev == 1 and lvl == 0 and tnow - btn_last > 0.4:   # falling edge + debounce
             btn_last = tnow
             if int(tel.get("en", 0)) == 1:
-                ser.write(b"en 0\n")
-                ser.write(b"leglimp\n")
-                print("STOP requested (en 0 + leglimp)", flush=True)
+                ser.write(b"sit\n")
+                print("SIT requested", flush=True)
             else:
                 ser.write(b"en 1\n")                               # idle -> balance (balance-on re-energizes the legs)
         btn_prev = lvl
