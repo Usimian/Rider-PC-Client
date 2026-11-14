@@ -49,9 +49,9 @@ FF, FF_BAND, U_MAX = 10.0, 20.0, 400.0
 # FRIC_TAU; replaces the factory boost in the new law. Rider friction: model.Params fric / ku = 32.5 units.
 FRIC_UNITS, FRIC_WIDTH, FRIC_TAU = 32.5, 20.0, 0.030
 # Driving (main.cpp): the stick's speed is ramped (driveRamp) at POS_AMAX up / POS_DMAX braking, capped at VMAX
-# (gPosVmax, 0.45 since 10-28 evening; drive_design.py explores above it with --vmax); the law's speed reference is
-# VREF x vdes, its command feedforward CMD_FF x vdes.
-VMAX, POS_AMAX, POS_DMAX = 0.45, 0.4, 0.8
+# (gPosVmax, 0.60 since 11-14, 0.45 from 10-28 evening; drive_design.py explores other caps with --vmax); the law's
+# speed reference is VREF x vdes, its command feedforward CMD_FF x vdes.
+VMAX, POS_AMAX, POS_DMAX = 0.60, 0.4, 0.8
 VREF, CMD_FF = 270.0, 360.0
 L2_SPEED = 327.6 * 4.5 * 60.0 * np.pi / 1024.0   # the LQR's scaled units per m/s (271.4, main.cpp LQR_SPEED_PER_MPS)
 # The Hover's plan (robot.cc kPlan*): the lead limit and the plan's own position integral (command units)

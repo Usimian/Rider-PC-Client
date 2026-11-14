@@ -152,13 +152,16 @@ volatile float gPosIntBand = 0.15f; // only integrate within this dist of target
 volatile float gPosDeadband= 0.012f;// hold dead-band (m): when settled within this of target, STOP chasing the
                                     // exact center (P off, I frozen, D kept) so the loop can't limit-cycle against
                                     // wheel stiction -> robot sits STILL instead of hunting. 0=off. live-tune 'posdb'
-volatile float gPosVmax    = 0.45f; // move speed cap (m/s), the most the stick may ask: ->0.45 (2026-10-28 later: at 0.60, starts
-                                    // fell on a 34 % battery; sim/lqr/drive_design.py); 0.60 earlier that day (as the Hover).
+volatile float gPosVmax    = 0.60f; // move speed cap (m/s), the most the stick may ask: ->0.60 (2026-11-14, the Hover's; floor on
+                                    // a charged battery with 0.6 m/s^2 starts: cruise 0.60 m/s at u 235-250, peaks 254-308, no
+                                    // falls). ->0.45 (2026-10-28 later: at 0.60, starts fell on a 34 % battery under 1.0 m/s^2
+                                    // starts; sim/lqr/drive_design.py); 0.60 earlier that day (as the Hover).
                                     // The DS4 service starts full stick at 0.30. ->0.30 (2026-10-19, Marc; matches the
                                     // joystick's MAX_SPEED). ->0.25 (2026-06-19, LQR): allow
                                     // real drive speeds. The cap
                                     // only bounds the target ramp; no motion without a command. live-tune via 'posvmax'.
-volatile float gPosVmaxBack= 0.45f; // BACKWARD speed cap (m/s). matched to forward (0.45 since 2026-10-28, 0.30 since 2026-10-19).
+volatile float gPosVmaxBack= 0.60f; // BACKWARD speed cap (m/s). matched to forward (0.60 since 2026-11-14, 0.45 since 2026-10-28,
+                                    // 0.30 since 2026-10-19).
                                     // (the +setpoint lean + ppo_v_pure's forward cruise make backward the "against"
                                     // direction -> the balance policy saturates ~23% at full speed = the shimmy).
                                     // Matching the demand to the headroom (lower cap backward) keeps it out of the
@@ -1169,12 +1172,16 @@ static void balanceTask(void*){
     // FALL LATCH (2026-11-06, the Hover's update_state after its code review of 11-05): a fall still cuts at once;
     // balancing resumes only after the body has been held near upright -- pitch error and roll both within
     // UPRIGHT_DEG -- for UPRIGHT_HOLD_MS without a break. A wheel spinning freely (|speed| over PICKUP_VEL for
-    // PICKUP_MS: lifted with the wheels driven; ~1.3 m/s, the top speed is 0.45) cuts too and restarts the wait.
+    // PICKUP_MS: lifted with the wheels driven) cuts too and restarts the wait. PICKUP_VEL is in the wheel speed
+    // register's units (0.0038 m/s each, floor odometry 11-14). It was 350 (~1.3 m/s) until 2026-11-14 and never fired:
+    // at the +/-400 command cap a lifted wheel spins at only ~280 (three lifts that day: 277-281, full battery), so the
+    // tilt cut caught the lifts after up to 1 s at full command. 240 (~0.91 m/s): driving at 0.60 m/s the fastest
+    // wheel read 193; a lifted wheel reaches ~280 charged, ~255 on a low battery (free spin scales with vbat).
     // Before, it resumed the moment the pitch error was back under gFallDeg: on 11-03, being picked up after a fall,
     // it drove -400 in Marc's hands and rolled the robot to 87 deg. Disarming clears the latch (arming as before).
     #define UPRIGHT_DEG     15.0f
     #define UPRIGHT_HOLD_MS 1000          // 1 s (Marc, 11-06; was 1.5 s)
-    #define PICKUP_VEL      350.0f
+    #define PICKUP_VEL      240.0f
     #define PICKUP_MS       50
     static bool fallLatch = false; static uint32_t uprightSince = 0, fastSince = 0;
     bool fallNow = (fabsf(qErr) > gFallDeg) || (fabsf(tRoll) > gFallRollDeg) || (fabsf(wheel_x - posRef) > gMaxPosErr);

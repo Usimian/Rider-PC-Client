@@ -38,7 +38,8 @@ SHAPE = M.Shape(horizon=25, step_cycles=10, check_every=10, iters=50, late=True)
 BINS = (1.0, 0.9, 0.8, 0.75)          # motor strengths with a table set each
 VREF = 8.29                           # V: motor = vbat / VREF (MEASURED 11-03, tools/balance/motor_strength.py)
 LEAN_AIM_DEG = 11.0
-VMAX = 0.45                           # m/s, the firmware's gPosVmax / gPosVmaxBack
+VMAX = 0.45                           # m/s, the planner's top speed (MPC_VMAX); the firmware's gPosVmax is 0.60 since
+                                      # 11-14, so with the planner on the stick is held to this until re-exported
 SAMPLE = (0.78, 0.45, 8)              # the bench's sample: motors, full-stick speed, planner step into the start
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "firmware", "esp32_rider_fw", "src",
                    "mpc_plan_data.h")
