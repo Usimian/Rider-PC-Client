@@ -4,8 +4,8 @@ The 2-D env (rider_env.RiderBalanceEnv) is one lumped wheel in the sagittal plan
 subclass keeps EVERYTHING the 2-D env validated against the floor (the measured wheel model per wheel, the
 firmware's sensing: tilt blending with the accelerometer coupling, encoder speed, LQR-style steering via
 drive_sim, the drive loop) and replaces the plant with two independent wheels on a body that can yaw, plus
-the firmware's TURN controller (main.cpp): while a yaw-rate command is held, turn = FF*cmd + Kp*(cmd - rate)
-from the gyro; otherwise a heading lock (PD on the two wheels' encoder difference). Both through the
+the firmware's TURN controller (main.cpp): turn = FF*cmd + Kp*(cmd - rate) from the gyro, always (the encoder
+heading lock used when not turning was removed 2026-11-14, docs/heading_hold_removed.md), through the
 firmware's 0.5 low-pass and +/-250 clamp. The balance output u and the turn tn mix as the firmware does:
 left wheel u + tn, right wheel u - tn (forward commands). Each wheel has its own ActuatorModel.
 
@@ -23,9 +23,6 @@ from rider_env import RiderBalanceEnv, ActuatorModel
 # firmware turn controller (main.cpp defaults)
 YAW_FF, YAW_KP = 75.0, 40.0          # gYawFF (raw per rad/s commanded), gYawKp (raw per rad/s of error)
 TURN_MAX, TURN_LP = 250.0, 0.5       # gTurnMax (raw), gTurnLP (per cycle)
-HDG_KP, HDG_KD = 1.0, 2.0            # gHdgKp (raw per count of wheel1-wheel2), gHdgKd (raw per wheel_vx unit)
-WV_PER_MPS = 265.0                   # wheel_vx units per m/s (floor, 2026-10-19)
-LP_VEL = 0.85                        # firmware per-wheel speed low-pass
 CMD_FULL = 30.0 * 7.764              # raw wheel-cmd at action 1
 # training randomization (spin_prob > 0, domain_rand)
 SPIN_CMD = (0.3, 1.0)                # turnrate held (rad/s; the joystick's full stick = 1.0)
@@ -125,8 +122,7 @@ class RiderTwoWheelEnv(RiderBalanceEnv):
         self.sense._enc_x = lambda a: a * r                       # a = the already-quantized mean angle
 
     def _turn_reset(self):
-        self.turn_f = 0.0; self.turning_prev = False; self.hdg_target = 0.0
-        self.vL_f = 0.0; self.vR_f = 0.0
+        self.turn_f = 0.0
         self.last_turn = 0.0
 
     # ---- state ----
@@ -161,18 +157,7 @@ class RiderTwoWheelEnv(RiderBalanceEnv):
 
     # ---- the firmware turn controller + mixing ----
     def _turn_output(self):
-        r = self.p.wheel_radius_m
-        a = 1.0 - LP_VEL
-        self.vL_f = LP_VEL * self.vL_f + a * self.data.qvel[self.d_wL] * r * WV_PER_MPS
-        self.vR_f = LP_VEL * self.vR_f + a * self.data.qvel[self.d_wR] * r * WV_PER_MPS
-        cl, cr = self._counts()
-        d = cl - cr
-        turning = abs(self.yaw_cmd) > 0.001
-        if turning:
-            raw = YAW_FF * self.yaw_cmd + YAW_KP * (self.yaw_cmd - self.yaw_rate_turn())
-            self.hdg_target = d                                    # latches the new heading on release
-        else:
-            raw = HDG_KP * (self.hdg_target - d) - HDG_KD * (self.vL_f - self.vR_f)
+        raw = YAW_FF * self.yaw_cmd + YAW_KP * (self.yaw_cmd - self.yaw_rate_turn())
         raw = float(np.clip(raw, -TURN_MAX, TURN_MAX))
         self.turn_f = TURN_LP * self.turn_f + (1.0 - TURN_LP) * raw
         return self.turn_f

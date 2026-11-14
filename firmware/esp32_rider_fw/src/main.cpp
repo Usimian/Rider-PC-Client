@@ -188,14 +188,6 @@ volatile float gYawKp      = 40.0f; // wheel-differential (raw) per rad/s of yaw
 volatile float gYawFF      = 75.0f; // FEEDFORWARD differential (raw) per rad/s commanded -> firm turn open-loop, low FB gain stays stable
 volatile float gTurnLP     = 0.5f;  // low-pass on the turn output (0=off..0.95) -> smooths residual jitter
 volatile float gYawFb      = -1.0f; // yaw-rate FEEDBACK sign (-1 = correct: gz reads opposite to the turn dir; +1 ran away). live-tune via 'yawfb'
-// --- encoder heading-lock: while NOT turning, hold (wheel1_x - wheel2_x) at a target so the
-// robot keeps its heading (a bump that rotates it moves the wheels off their individual targets
-// -> corrected). Pure encoder-based -> no gyro yaw-bias dependence. 'hdghold 0' falls back to the
-// old yaw-rate anti-spin. Gains need on-robot tuning (start conservative). ---
-volatile bool  gHdgHold = true;     // heading-lock on/off ('hdghold'). ON: verified on-robot 2026-06-15 (holds heading; sign correct). gains gHdgKp/Kd may want tuning if it oscillates.
-volatile float gHdgKp   = 1.0f;     // P: raw wheel-differential per count of (w1-w2) error ('hdgkp')
-volatile float gHdgKd   = 2.0f;     // D: raw per (vel1-vel2) differential velocity ('hdgkd')
-volatile float gHdgSign = 1.0f;     // correction sign -- flip if heading diverges ('hdgsign')
 volatile float gPosVelLP   = 0.9f;  // low-pass on the velocity feeding the D term (0=off..→1 heavy); kills D-noise shimmy.
                                     // 0.8->0.9 (2026-06-17): smooths the coarse low-speed encoder velocity the drive loop
                                     // chases -> cut forward accel-zone roughness ~40% (1.77->1.04deg); 0.95 over-lagged.
@@ -955,7 +947,6 @@ static float wheel1_vr=0, wheel2_vr=0;     // the same, unfiltered (this reply's
 static int   last11=-1, last21=-1;
 static float wheel_x=0, wheel_vx=0;        // fused: meters, scaled vel
 static float wheel_vr=0;                   // fused unfiltered scaled vel
-static float gHdgTarget=0;                 // heading-lock target = (wheel1_x - wheel2_x) to hold
 
 // WHEEL SPEED CHECK (2026-11-03). Defect: driving backward at 0.45 m/s on the LQR, wheel 1's speed register read
 // about -8000 counts (~4 m/s) for one sample -- not a failed read: its position moved on exactly as wheel 2's (-49
@@ -1064,7 +1055,7 @@ static float driveRamp(float v, float tgt, float dt){
 // drive command is dropped; the drive capture arms on 'on' and stops on 'off'.
 static void setBalance(bool on){
   gEnabled = on; gTurn = 0.0f; gYawRateCmd = 0.0f; gDriveVel = 0.0f;
-  if(on){ gWheelFault = 0; wheel1_x = 0; wheel2_x = 0; wheel_x = 0; gPosTarget = 0.0f; gHdgTarget = 0.0f; gOdoReset = true;
+  if(on){ gWheelFault = 0; wheel1_x = 0; wheel2_x = 0; wheel_x = 0; gPosTarget = 0.0f; gOdoReset = true;
           dcIdx = 0; gDcReady = false; gDcArm = true;
           gPollLock = 0; gTestTor = 0; }    // stand-test settings never carry into balancing (a script killed mid-run
                                             // left 'lock 11': the right wheel unread while balancing; 'wt' drove at disarm)
@@ -1210,27 +1201,17 @@ static void balanceTask(void*){
     }
     // yaw-RATE control: drive the wheel differential (gTurn) to track the commanded rate
     // gYawRateCmd (rad/s). Closed loop on the gyro => a hard rate cap (full stick = +/-2 rad/s)
-    // instead of an open-loop torque that spins ever faster. Zeroed when disabled.
+    // instead of an open-loop torque that spins ever faster; at 0 it resists a spin. Zeroed when disabled.
+    // (The encoder heading hold that took over when not turning was removed 2026-11-14: it threw the first get-up
+    // after each boot -- docs/heading_hold_removed.md.)
     static float gTurnF = 0.0f;
     if(gEnabled){
-      float rawTurn;
-      bool turning = (fabsf(gYawRateCmd) > 0.001f);
-      if(turning || !gHdgHold){
-        // active turn (stick) OR heading-lock off: yaw-RATE control (FF + gyro FB).
-        float yawErr = gYawRateCmd - gYawFb * yaw_rate * POL_DEG2RAD; // rad/s error (gYawFb fixes gz sign)
-        rawTurn = gYawFF*gYawRateCmd + gYawKp*yawErr;                 // FF (firm) + FB (trim)
-        gHdgTarget = wheel1_x - wheel2_x;     // track heading while turning -> latches the NEW heading on release
-      } else {
-        // HEADING LOCK: PD on the wheel-encoder differential (w1-w2) -> hold heading. Pure encoder-based
-        // (no gyro yaw-bias dependence). Verified on-robot 2026-06-15.
-        float d     = wheel1_x   - wheel2_x;
-        float dRate = wheel1_vel - wheel2_vel;
-        rawTurn = gHdgSign * (gHdgKp*(gHdgTarget - d) - gHdgKd*dRate);
-      }
+      float yawErr = gYawRateCmd - gYawFb * yaw_rate * POL_DEG2RAD; // rad/s error (gYawFb fixes gz sign)
+      float rawTurn = gYawFF*gYawRateCmd + gYawKp*yawErr;           // FF (firm) + FB (trim)
       rawTurn = clampf(rawTurn, -gTurnMax, gTurnMax);
       gTurnF = gTurnLP*gTurnF + (1.0f-gTurnLP)*rawTurn;              // light low-pass smooths residual jitter
       gTurn = gTurnF;
-    } else { gTurn = 0.0f; gTurnF = 0.0f; gHdgTarget = wheel1_x - wheel2_x; }  // disabled: keep target = current heading
+    } else { gTurn = 0.0f; gTurnF = 0.0f; }
     if(!primed){ theta=pit_acc; primed=true; }
     dqf = 0.6f*dqf + 0.4f*pit_gyro;                              // dq for control rate-damping
     float pit_freq = 1.0f/(fabsf(pit_gyro) + 200.0f);           // rate-adaptive accel weight
@@ -1416,7 +1397,6 @@ static void balanceTask(void*){
     if(gPosZeroReq){                           // re-zero the distance frame mid-balance: odometer + target + slew
       lqrShift += wheel_x;                     //   the frame moves by -wheel_x: the LQR's plan moves with it
       wheel1_x = 0; wheel2_x = 0; wheel_x = 0; //   are zeroed TOGETHER so posErr stays 0 -> no jolt, balance holds
-      gHdgTarget = 0;
       gPosTarget = 0; gPosTargetEff = 0; posErrInt = 0; vdesS = 0; polPrevX = 0;
       gOdoReset = true;                        // dead-reckoned pose origin too
       gPosZeroReq = false;
@@ -2113,10 +2093,6 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"yawfb"))    gYawFb=(v<0?-1.0f:1.0f);  // yaw-rate feedback sign (-1/+1)
   else if (!strcmp(s,"turnmax"))  gTurnMax=clampf(v,0.0f,400.0f);   // clamp on |turn differential| (raw)
   else if (!strcmp(s,"wheeldz"))  gWheelDZ=clampf(v,0.0f,100.0f);   // per-wheel anti-stiction floor during turns (raw)
-  else if (!strcmp(s,"hdghold"))  gHdgHold=(v!=0.0f);  // encoder heading-lock on/off
-  else if (!strcmp(s,"hdgkp"))    gHdgKp=v;            // heading-lock P (raw per count of w1-w2 error)
-  else if (!strcmp(s,"hdgkd"))    gHdgKd=v;            // heading-lock D (raw per vel1-vel2)
-  else if (!strcmp(s,"hdgsign"))  gHdgSign=(v<0?-1.0f:1.0f);  // heading-lock correction sign
   else if (!strcmp(s,"led"))     { gLedOvr=(v<0.5f)?-1:(int)v; gLedOvrMs=millis(); }  // LED: 0=auto 1=blu 2=grn 3=amb 4=red 5=wht 6=OFF
   else if (!strcmp(s,"ledbright")) gLedBright=(int)clampf(v,0.0f,255.0f);  // global LED brightness 0..255 (scales the status colors)
   else if (!strcmp(s,"posvlp"))  gPosVelLP=clampf(v,0.0f,0.99f); // D-term velocity low-pass (0=off..0.99 heavy)
@@ -2214,11 +2190,11 @@ void loop(){
     int bpct = (int)clampf((tVbat-VBAT_EMPTY)/(VBAT_FULL-VBAT_EMPTY)*100.0f, 0.0f, 100.0f);
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
     // 1024 (was 704, 2026-11-14 review): the line runs ~610-680 chars and several fields only grow until a reboot
-    // (htg, yaw, poses, rft1, counters); a cut line lost its '\n', merging the next lines at the Pi
+    // (yaw, poses, rft1, counters); a cut line lost its '\n', merging the next lines at the Pi
     char b[1024];
     int k=snprintf(b,sizeof(b),
-      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f amax=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f pull=%.2f lean=%.2f mpc=%u mpcus=%u vrejL=%u vrejR=%u wmodebad=%u gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u legstkL=%u legstkR=%u legst=%u rfL=%u rfR=%u rft0=%u rft1=%u ms=%u\n",
-      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gLqrAMax, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gRollMode, tRollAcc, tPull, tLean, (unsigned)tMpcState, (unsigned)tMpcUs, (unsigned)tVrejL, (unsigned)tVrejR, (unsigned)tWmodeBad, gTurn, gHdgTarget, gYawRateCmd,
+      "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f amax=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f pull=%.2f lean=%.2f mpc=%u mpcus=%u vrejL=%u vrejR=%u wmodebad=%u gturn=%.1f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u legstkL=%u legstkR=%u legst=%u rfL=%u rfR=%u rft0=%u rft1=%u ms=%u\n",
+      tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gLqrAMax, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gRollMode, tRollAcc, tPull, tLean, (unsigned)tMpcState, (unsigned)tMpcUs, (unsigned)tVrejL, (unsigned)tVrejR, (unsigned)tWmodeBad, gTurn, gYawRateCmd,
       (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID), (unsigned)gDriveWdTrips, (unsigned)tLegRetryL, (unsigned)tLegRetryR, (unsigned)tLegFailL, (unsigned)tLegFailR, (unsigned)tLegStuckL, (unsigned)tLegStuckR, (unsigned)((gLegLimped?1:0)|(gLegHoming?2:0)|(gLegEnerR?4:0)|(gLegEnerL?8:0)), (unsigned)tRfL, (unsigned)tRfR, (unsigned)tRfFirstMs, (unsigned)tRfLastMs, (unsigned)millis());
     if(k > (int)sizeof(b)-1){ k = sizeof(b)-1; b[k-1] = '\n'; }   // clamp (snprintf returns the intended length); a cut line still ends its line
     emit(b,k);
