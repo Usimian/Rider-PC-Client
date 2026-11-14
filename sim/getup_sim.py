@@ -124,8 +124,11 @@ class GetupFirmware:
     estimate and speed smoothing keep going); its output is replaced at rest and during the kick, and its plan is
     restarted (plan_x None = main.cpp's plan start from the robot) at the handover."""
 
-    def __init__(self, fw, u_kick, hand_deg):
-        self.fw, self.u_kick, self.hand_deg = fw, u_kick, hand_deg
+    def __init__(self, fw, u_kick, hand_deg, catch_amax=None):
+        """catch_amax: the plan's acceleration limit (m/s^2) for CATCH_S after the handover (its braking from the
+        kick's speed), then back to the flashed one; None = the flashed one throughout."""
+        self.fw, self.u_kick, self.hand_deg, self.catch_amax = fw, u_kick, hand_deg, catch_amax
+        self.amax0 = fw.plan["a_max"]
         self.t, self.phase, self.t_hand = 0.0, "rest", None
 
     def __getattr__(self, name):                                     # read_imu, read_wheels, hover_sample, ...
@@ -145,6 +148,8 @@ class GetupFirmware:
         if self.phase == "kick" and (abs(q) <= self.hand_deg or self.t - self.t_kick >= KICK_MAX_S):
             self.phase, self.t_hand = "lqr", self.t
             self.fw.plan_x = None                                    # resume: a fresh plan from where it is
+        if self.catch_amax is not None and self.phase == "lqr":
+            self.fw.plan["a_max"] = self.catch_amax if self.t - self.t_hand < CATCH_S else self.amax0
         u = self.fw.control(dt, stick)                               # always run: its estimates stay current
         if self.phase == "rest":
             return 0.0
@@ -153,10 +158,14 @@ class GetupFirmware:
         return u
 
 
-def trial(pose, u_kick, hand_deg, var=None, seed=0):
-    """One get-up; var: the plant's variation (NOMINAL's keys); seed: the IMU noise and the firmware's cycle draws."""
+CATCH_S = 1.5                              # how long a catch_amax holds after the handover
+
+
+def trial(pose, u_kick, hand_deg, var=None, seed=0, catch_amax=None):
+    """One get-up; var: the plant's variation (NOMINAL's keys); seed: the IMU noise and the firmware's cycle draws;
+    catch_amax: see GetupFirmware."""
     plant = GetupPlant(pose, var)
-    gf = GetupFirmware(CL.flashed(rng=np.random.default_rng(seed)), u_kick, hand_deg)
+    gf = GetupFirmware(CL.flashed(rng=np.random.default_rng(seed)), u_kick, hand_deg, catch_amax)
     L, fell = CL.run(fw=gf, plant=plant, T=T_REST + KICK_MAX_S + T_AFTER, log_all=True, seed=seed)
     L = np.array(L)
     t, u, v, lean = L[:, 0], L[:, 2], L[:, 3], L[:, 4]
@@ -172,6 +181,7 @@ def trial(pose, u_kick, hand_deg, var=None, seed=0):
         res["peak"] = np.abs(lean[a]).max()
         res["cut"] = res["peak"] > FALL_CUT_DEG
         res["roll_mm"] = 1000 * np.abs(x[t >= T_REST] - x[t < T_REST][-1]).max()
+        res["end_mm"] = 1000 * (x[-1] - x[t < T_REST][-1])           # where it stands at the end, from the start
         res["end_sd"] = lean[t > t[-1] - 1.0].std() if not fell else None
         res["umax"] = np.abs(u[a]).max()
     return res
@@ -226,9 +236,27 @@ def main():
                     help="the fore/aft CoM range +-this (mm) for --robust (RANGES: 15). Marc 11-14: stood up level on "
                          "the limp legs it balances at once, so its balance point is near the flashed 2.8 deg -- a "
                          "few mm at most (4 mm ~ 5.6 deg)")
+    ap.add_argument("--catch-amax", type=float, nargs="+", metavar="M_S2",
+                    help="compare the plan's braking limit for the first CATCH_S after the handover (0.6 = flashed): "
+                         "how far it travels, how far it leans; N random robots with --robust N")
     a = ap.parse_args()
     if a.com_dx_mm is not None:
         RANGES["com_dx"] = (-a.com_dx_mm / 1000, a.com_dx_mm / 1000)
+    if a.catch_amax:
+        n = a.robust or 1
+        for pose in POSES:
+            for am in a.catch_amax:
+                rs = [trial(pose, a.kicks[-1], a.hand, draw(np.random.default_rng(1000 + i)) if a.robust else None,
+                            seed=1000 + i, catch_amax=am) for i in range(n)]
+                good = [r for r in rs if ok(r)]
+                if not good:
+                    print(f"{pose:8s} catch a_max {am:3.1f}: 0/{n} up and standing")
+                    continue
+                f = lambda k: np.percentile([abs(r[k]) for r in good], [50, 100])
+                print(f"{pose:8s} catch a_max {am:3.1f}: {len(good)}/{n} up; farthest {f('roll_mm')[0]:4.0f}/"
+                      f"{f('roll_mm')[1]:4.0f} mm (median/max), ends {f('end_mm')[0]:4.0f} mm from the start; "
+                      f"peak lean after the catch {f('peak')[0]:4.1f}/{f('peak')[1]:4.1f} deg", flush=True)
+        return
     if a.one:
         print(show(trial(a.one[0], float(a.one[1]), float(a.one[2]), dict(gain=a.gain))))
         return

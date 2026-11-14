@@ -231,7 +231,9 @@ volatile float gFallDeg  = 25.0f;   // cut torque past this tilt error
 // Anywhere else (held near upright, lying oddly, the policy controller) 'en 1' arms as before.
 volatile bool  gArmReq    = false;  // set by 'en 1', taken by the balance task (get up, or arm as before)
 volatile float gGetupU    = 400.0f; // the kick's command ('getupu', 0..GETUP_U_MAX)
-volatile float gGetupHand = 10.0f;  // hand over within this of upright (deg, 'getuphand')
+volatile float gGetupHand = 15.0f;  // hand over within this of upright (deg, 'getuphand'). 15 (Marc, 11-14; was 10):
+                                    // the kick ends sooner, so less speed to brake away -- floor, odometer: from the stub
+                                    // farthest 14-17 cm (was 20-23), from the nose 29 (was ~37); 5/5 up, settled ~1 s
 volatile int   gGetupMs   = 250;    // the kick's time limit (ms, 'getupms')
 #define GETUP_U_MAX     800.0f      // the most 'getupu' takes
 #define GETUP_REST_MIN  20.0f       // a resting pose: the LQR's pitch error this far from upright ...
