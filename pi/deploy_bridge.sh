@@ -106,6 +106,11 @@ sudo systemctl enable rider-bridge.service rider-joystick.service rider-camera.s
 sudo systemctl restart rider-bridge.service rider-joystick.service rider-camera.service \
                        rider-tof.service rider-tof-safety.service rider-recorder.service \
                        rider-wifi-watchdog.service
+# 6. flush to the SD card before saying "done": the robot is often power-cycled right after a deploy (Pi included),
+# and ext4 holds new file data in memory for up to ~30 s. 2026-11-14: a power cycle seconds after a deploy left
+# every file written in its last ~3 s EMPTY -- the 7 unit files (empty = masked: nothing started at boot), the
+# broker's rider.conf and the web page.
+sync
 sleep 2
 echo "  bridge  : $(systemctl is-active rider-bridge.service)/$(systemctl is-enabled rider-bridge.service)"
 echo "  joystick: $(systemctl is-active rider-joystick.service)/$(systemctl is-enabled rider-joystick.service)"
