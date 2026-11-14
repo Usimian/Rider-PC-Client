@@ -20,6 +20,7 @@ import json
 import queue
 import socket
 import subprocess
+import threading
 import serial
 import psutil
 import lgpio
@@ -195,28 +196,43 @@ def controller_battery():
 g_power_msg = None              # set once a poweroff/reboot fires -> render() shows only this from then on
 
 
+def _stop_robot_then(argv, label):
+    """Stop the robot, then run argv (sudo poweroff / reboot). Defect (2026-11-14 review): the Pi went down with
+    the ESP32 still balancing -- and with the Pi gone, no LCD button, DS4 or web E-STOP could stop it. Now: if it
+    is balancing, sit it down (back onto the knee stub, then off; up to ~4 s) and wait for balance off, then send
+    the instant stop anyway (en 0 + leglimp), give the main loop time to relay it, then go down. A thread, so the
+    main loop -- the only writer of the serial port -- keeps relaying cmd_q meanwhile."""
+    def run():
+        if int(tel.get("en", 0)) == 1:
+            cmd_q.put("sit")
+            t0 = time.time()
+            while time.time() - t0 < 6.0 and int(tel.get("en", 0)) == 1:
+                time.sleep(0.1)
+        cmd_q.put("en 0")
+        cmd_q.put("leglimp")
+        time.sleep(0.5)
+        print("%s requested -> %s" % (label, " ".join(argv)), flush=True)
+        try:
+            subprocess.Popen(argv)
+        except Exception as e:
+            print("%s failed: %s" % (label, e), flush=True)
+    threading.Thread(target=run, daemon=True).start()
+
+
 def do_poweroff():
-    """Shut the Pi down (pi has NOPASSWD sudo). Triggered by the lower-left button
+    """Shut the Pi down (pi has NOPASSWD sudo), the robot stopped first. Triggered by the lower-left button
     held ~1.5s, or the GUI's rider/control/system 'poweroff_pi' command."""
     global g_power_msg
     g_power_msg = "SHUTTING DOWN"   # next frame (<=0.2 s) switches the LCD to it; it stays until power drops
-    print("POWEROFF requested -> sudo poweroff", flush=True)
-    try:
-        subprocess.Popen(["sudo", "poweroff"])
-    except Exception as e:
-        print("poweroff failed: %s" % e, flush=True)
+    _stop_robot_then(["sudo", "poweroff"], "POWEROFF")
 
 
 def do_reboot():
-    """Reboot the Pi (pi has NOPASSWD sudo). Triggered by the GUI's
+    """Reboot the Pi (pi has NOPASSWD sudo), the robot stopped first. Triggered by the GUI's
     rider/control/system 'reboot_pi' command (mirrors do_poweroff)."""
     global g_power_msg
     g_power_msg = "REBOOTING"
-    print("REBOOT requested -> sudo reboot", flush=True)
-    try:
-        subprocess.Popen(["sudo", "reboot"])
-    except Exception as e:
-        print("reboot failed: %s" % e, flush=True)
+    _stop_robot_then(["sudo", "reboot"], "REBOOT")
 
 
 # ---------------- MQTT (republish + relay) ----------------
@@ -231,9 +247,21 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 
 
 def on_message(client, userdata, msg):
+    """Never lets an exception out: paho re-raises a callback's exception, which ends its network thread -- every
+    later command, E-STOP included, then silently dropped while the LCD looked normal (2026-11-14 review: a payload
+    that parsed to a number or a quoted string did it)."""
+    try:
+        _handle_message(msg)
+    except Exception as e:
+        print("mqtt: ignored a message on %s (%s: %s)" % (msg.topic, type(e).__name__, e), flush=True)
+
+
+def _handle_message(msg):
     try:
         p = json.loads(msg.payload.decode())
     except Exception:
+        p = {}
+    if not isinstance(p, dict):                          # a number, a string, a list, null: not a command
         p = {}
     t = msg.topic
     if t == "rider/safety/fwd_limit":
@@ -252,7 +280,7 @@ def on_message(client, userdata, msg):
         return
     if t == "rider/control/drivemode":
         global g_drivemode
-        m = (p.get("mode") or "").lower()
+        m = str(p.get("mode") or "").lower()
         if m in ("joystick", "computer"):
             g_drivemode = m
     elif t == "rider/control/line":
@@ -260,7 +288,7 @@ def on_message(client, userdata, msg):
         if line:
             cmd_q.put(str(line))
     elif t == "rider/control/system":
-        c = (p.get("command") or p.get("action") or "").lower()
+        c = str(p.get("command") or p.get("action") or "").lower()
         if c in ("emergency_stop", "stop", "disable"):
             cmd_q.put("en 0")
         elif c in ("enable", "balance_on"):
@@ -527,8 +555,10 @@ while True:
         mqtt_forward("rider/debug/leg", line)      # leg arrival check after a slow leg move (ok / STUCK + registers)
     elif line.startswith("# ?"):
         mqtt_forward("rider/debug/unknown", line)  # a command line the firmware did not recognise
-    elif line.startswith(("# getup", "# sit")):
-        mqtt_forward("rider/debug/getup", line)    # each get-up from a resting pose and each sit: ok (ms, angles) / FAILED
+    elif line.startswith(("# getup", "# sit", "# gcal", "# msg", "# WHEEL")) or (line.startswith("#") and "REFUSED" in line):
+        mqtt_forward("rider/debug/event", line)    # one-off firmware events: get-up / sit results, the pitch-gyro zero,
+                                                   # lost status lines, WHEEL FAULT, refused commands -- not the per-
+                                                   # command '# en=' acks (every heartbeat) nor the capture dumps
     # relay any queued commands to the ESP32
     while not cmd_q.empty():
         try:

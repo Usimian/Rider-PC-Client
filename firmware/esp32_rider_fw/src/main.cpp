@@ -457,7 +457,8 @@ volatile bool  gDumpRead=false;     // 'rd' -> task dumps next raw read frame
 volatile int   gTestTor=0;          // 'wt <v>' -> direct wheel torque when DISABLED (stand test)
 volatile int   gPollLock=0;         // 'lock <id>' -> poll only that wheel (0 = alternate)
 volatile int   gCfgDumpId=0;        // 'cfgdump <id>' -> dump servo config regs 0x00-0x2F
-volatile float gGyroBias=-1.19f;    // pitch gyro zero-rate bias (deg/s) -- BAKED CONSTANT (avg of measured boots -1.15/-1.16/-1.27). NOT re-measured at boot (boot cal sometimes sampled a moving robot -> bad bias -> wouldn't balance). 'gcal' still re-measures.
+volatile float gGyroBias=-1.19f;    // pitch gyro zero-rate bias (deg/s): measured at boot / 'gcal' when STILL (see
+                                    // calibrateGyro), else this fallback (avg of measured boots -1.15/-1.16/-1.27)
 volatile float gCfAlpha=0.996f;     // compl-filter gyro weight PER SAMPLE @~333Hz (~1s accel trim).
 // --- IMU lever-arm comp: the IMU sits ~120mm ABOVE the axle, so body rotation about the axle
 // injects tangential (alpha*r) + centripetal (omega^2*r) accel that isn't gravity and corrupts
@@ -485,7 +486,7 @@ volatile int   gStepCmd=200;        // step magnitude (wheel torque field) for t
 static void emit(const char* b, int k);   // fwd decl (defined below)
 // BALANCE-TASK MESSAGES (2026-11-14): the balance task never writes the serial ports itself -- it post()s a line,
 // and loop() sends it with the telemetry. Defect: emit() from the balance task (priority 12) waited behind loop()'s
-// telemetry write (~1100 chars, ~95 ms at the Pi link's 115200 baud) -- the control loop froze up to ~110 ms with
+// telemetry write (~680 chars to USB and the Pi link, ~107 ms for both at 115200 baud) -- the control loop froze up to ~110 ms with
 // its last command held. Floor 11-14: the get-up's status lines froze it 53 ms mid-kick (-400 held: rolled back
 // 50 cm) and 103/109 ms at the handover (+400 held: thrown forward past 25 deg, twice). Likely also the 50-115 ms
 // 'dtmax' stalls open since 11-03 (leg arrival reports and the wheel-mode refusal went the same way). The
@@ -909,16 +910,40 @@ static bool servoReadN(uint8_t id, uint8_t reg, uint8_t len, uint8_t* out){
 
 // Average the gyro while the robot is held still -> zero-rate bias.
 // gx = balance/pitch axis; gz = yaw/heading axis (both biased for drift-free integration).
+// PITCH GYRO ZERO, measured only when STILL (2026-11-14). It was a baked -1.19 deg/s, never re-measured at boot
+// (a boot measurement sometimes sampled a moving robot and it would not balance). Then one power-up (11-14 11:4x)
+// came up with the pitch gyro ~26 deg/s off at rest: both pitch estimates were pulled 10-20 deg wrong, the get-up
+// never saw it still, and arming balanced from where it sat at full command. Now each calibration (boot, 'gcal')
+// takes the measured zero only if the robot was still for the whole second: the gyro's scatter small, the
+// accelerometer's tilt not moving (first vs last 0.1 s: a slow steady turn reads like an offset to the gyro, not to
+// the accelerometer) and no jolt in it -- a constant offset passes, a carried robot does not and keeps the zero it had.
+#define GCAL_STILL_SD_DPS  0.6f   // pitch gyro scatter (sd) under this
+#define GCAL_STILL_DRIFT   0.5f   // accelerometer pitch, mean of the first vs the last 20 samples, within this (deg)
+#define GCAL_STILL_SPAN    2.0f   // accelerometer pitch span over the second under this (deg)
+#define GCAL_MAX_DPS       60.0f  // a zero beyond this is not believed
 static void calibrateGyro(){
-  const int N=200; float sum=0, sumz=0;
+  const int N=200, E=20; float sum=0, sum2=0, sumz=0, pMin=1e9f, pMax=-1e9f, pHead=0, pTail=0;
   for(int i=0;i<N;i++){
     int16_t ax,ay,az,gx,gy,gz; imuLatest(&ax,&ay,&az,&gx,&gy,&gz);   // a new sample every ~2.4 ms, taken every 5
-    sum  += (float)gx / GYRO_LSB_PER_DPS;
-    sumz += (float)gz / GYRO_LSB_PER_DPS;
+    const float g = (float)gx / GYRO_LSB_PER_DPS;
+    const float p = atan2f((float)ay, (float)az) * 57.2958f;         // the accelerometer's pitch, as lqrImuStep
+    sum += g; sum2 += g * g; sumz += (float)gz / GYRO_LSB_PER_DPS;
+    if(p < pMin) pMin = p; if(p > pMax) pMax = p;
+    if(i < E) pHead += p / E; else if(i >= N - E) pTail += p / E;
     vTaskDelay(pdMS_TO_TICKS(5));
   }
-  gGyroBias = sum / N;
+  const float mean = sum / N, sd = sqrtf(fmaxf(0.0f, sum2 / N - mean * mean));
+  const float drift = fabsf(pTail - pHead), span = pMax - pMin;
   gYawBias  = sumz / N;
+  char b[136]; int k;
+  if(sd < GCAL_STILL_SD_DPS && drift < GCAL_STILL_DRIFT && span < GCAL_STILL_SPAN && fabsf(mean) < GCAL_MAX_DPS){
+    gGyroBias = mean;
+    k = snprintf(b, sizeof(b), "# gcal: pitch gyro zero %+.2f deg/s (still: sd %.2f, tilt drift %.2f, span %.2f deg)\n",
+                 mean, sd, drift, span);
+  } else
+    k = snprintf(b, sizeof(b), "# gcal: pitch gyro zero NOT taken (%+.2f deg/s, sd %.2f, tilt drift %.2f, span %.2f): kept %+.2f\n",
+                 mean, sd, drift, span, gGyroBias);
+  post(b, k);
   tYaw = 0.0f;                            // zero heading at each (re)calibration
   gOdoReset = true;                       // pose origin follows the heading origin
 }
@@ -1040,7 +1065,9 @@ static float driveRamp(float v, float tgt, float dt){
 static void setBalance(bool on){
   gEnabled = on; gTurn = 0.0f; gYawRateCmd = 0.0f; gDriveVel = 0.0f;
   if(on){ gWheelFault = 0; wheel1_x = 0; wheel2_x = 0; wheel_x = 0; gPosTarget = 0.0f; gHdgTarget = 0.0f; gOdoReset = true;
-          dcIdx = 0; gDcReady = false; gDcArm = true; }
+          dcIdx = 0; gDcReady = false; gDcArm = true;
+          gPollLock = 0; gTestTor = 0; }    // stand-test settings never carry into balancing (a script killed mid-run
+                                            // left 'lock 11': the right wheel unread while balancing; 'wt' drove at disarm)
   else  { gDcArm = false; gDcReady = true; }
 }
 
@@ -1053,9 +1080,7 @@ static void balanceTask(void*){
   // removed 2026-11-06). Not re-asserted at boot: a boot-time servo write before the bus is settled is
   // unreliable (a flip-test proved it didn't take). Every arming READS it (WHEEL MODE CHECK) and refuses
   // unless both wheels are 0. See docs/servo_registers.md.
-  calibrateGyro();                  // boot cal -> sets yaw bias + zeroes heading/pose (robot should be still)
-  gGyroBias = -1.19f;               // ...but FORCE the pitch (balance) bias to the baked constant, so a
-                                    // boot measurement on a moving robot can never break balance startup. 'gcal' re-measures both.
+  calibrateGyro();                  // boot cal: yaw bias, heading/pose zeroed, and the pitch zero -- only if still
   float theta=0, dqf=0; bool primed=false;
   uint32_t lastUs = micros(); uint32_t n=0;
   uint32_t hzN=0, hzT=millis();             // loop-rate measurement
@@ -1220,7 +1245,7 @@ static void balanceTask(void*){
     if(gEnabled && (failL > 12 || failR > 12)){
       gEnabled = false; gWheelFault = (failL>12)? LEFT_W : RIGHT_W;
       char wb[72]; int wk=snprintf(wb,sizeof(wb),"# WHEEL FAULT id=%d off bus -> DISABLED\n",gWheelFault);
-      emit(wb,wk);
+      post(wb,wk);                          // queued: emit() here held the healthy wheel's last command ~0.1 s
     }
     if(gDumpRead){
       char b[200]; int k=snprintf(b,sizeof(b),"# rd id=%d ok=%d n=%d p=%d v=%d raw=",rdWid,ok,gRawN,p,v);
@@ -1440,7 +1465,7 @@ static void balanceTask(void*){
           // most gPolLeash behind/ahead), so speed errors and pitch offsets are corrected. gPolLeash 0 (the
           // old drive): the home tracks the current position, posErr ~0, only the velocity-D term drives.
           // Either way, the instant the stick releases the home latches at the current spot.
-          float vtgt = (gDriveVel < -gPosVmaxBack) ? -gPosVmaxBack : gDriveVel;   // asymmetric: limit backward
+          float vtgt = clampf(gDriveVel, -gPosVmaxBack, gPosVmax);   // both ways (forward was unclamped until 11-14)
           vdesS = driveRamp(vdesS, vtgt, sdt);
           // posErrInt is FROZEN here, not zeroed (2026-09-16): at rest the integrator tilts the
           // setpoint to cancel the policy's constant command bias (ppo_fw_s2: ~-50 raw -> hold
@@ -1944,6 +1969,14 @@ void setup(){
 
 // ---------------- command protocol (UART0 + UART1) ----------------
 static void emit(const char* b, int k){ Serial.write((const uint8_t*)b,k); Serial1.write((const uint8_t*)b,k); }
+// Diagnostic commands that stall the balance task or change what it reads are refused while balancing (2026-11-14
+// review: 'cfgdump' held the control loop 0.3-0.5 s, 'rd' up to ~0.1 s, 'lock' left one wheel unread, a 'stepcap'
+// sent while balancing fired at the next disable). True = refused.
+static bool refusedWhileBalancing(const char* cmd){
+  if(!gEnabled) return false;
+  char b[64]; int k = snprintf(b, sizeof(b), "# %s REFUSED: balancing (en 0 first)\n", cmd); emit(b, k);
+  return true;
+}
 
 // 'mpcbench [reps]' (2026-11-03): the MPC PLANNER's solve on this chip. The stored sample (mpc_plan_data.h MPCB_*: a
 // real planner state from a simulated weak-battery start, sim/lqr/mpc_export.py) solved reps times from cold by
@@ -1983,7 +2016,9 @@ static void applyCmd(char* s){
   // 2026-11-06 (the Hover's code review 11-05: atof takes "nan" and "inf", and a clamp passes NaN): a value that
   // is not a finite number is refused, whatever the command -- it would reach the balance law as a gain or a limit
   if(!isfinite(v)){ char b[64]; int k=snprintf(b,sizeof(b),"# ? '%s' (not a finite number)\n", s); emit(b,k); return; }
-  if      (!strcmp(s,"en"))  { if(v != 0.0f) gArmReq = true; else setBalance(false); }   // on: get up or arm (balance task); off: at once
+  if      (!strcmp(s,"en"))  { if(v != 0.0f) gArmReq = true;                              // on: get up or arm (balance task)
+                               else { gArmReq = false; gSitReq = false; setBalance(false); } }   // off: at once, and a pending
+                                                                                         // 'en 1' / 'sit' is cancelled
   else if (!strcmp(s,"sit"))       gSitReq = true;            // sit back onto the knee stub, then off (see gSitU)
   else if (!strcmp(s,"situ"))      gSitU = clampf(v, 0.0f, 300.0f);           // the sit's forward pulse
   else if (!strcmp(s,"sitcut"))    gSitCut = clampf(v, 4.0f, 20.0f);          // cut this far back (deg)
@@ -1991,7 +2026,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"getupu"))    gGetupU = clampf(v, 0.0f, GETUP_U_MAX);   // the kick's command
   else if (!strcmp(s,"getuphand")) gGetupHand = clampf(v, 3.0f, 20.0f);      // hand over within this of upright (deg)
   else if (!strcmp(s,"getupms"))   gGetupMs = (int)clampf(v, 50.0f, 600.0f); // the kick's time limit (ms)
-  else if (!strcmp(s,"d"))     gEnabled=false;
+  else if (!strcmp(s,"d"))     { gArmReq = false; gSitReq = false; setBalance(false); }   // = 'en 0'
   else if (!strcmp(s,"izero")) gImuZero=v;
   else if (!strcmp(s,"dqmax")) gDqUMax=v;
   else if (!strcmp(s,"ctrl")){                                   // controller select: 0=POL (policy), 1=LQR
@@ -2001,11 +2036,13 @@ static void applyCmd(char* s){
     char cb[40]; int ck=snprintf(cb,sizeof(cb),"# ctrl=%s\n",ctrlName()); emit(cb,ck); return;
   }
   else if (!strcmp(s,"posmode")) gPosMode=(v!=0.0f);            // factory position-goal wheel cmd on/off
-  else if (!strcmp(s,"torlim"))  gTorLim=(int)v;               // torque-limit field (position mode)
-  else if (!strcmp(s,"posclamp"))gPosClamp=(int)v;             // per-cycle goal delta clamp
-  else if (!strcmp(s,"loopus"))  gLoopUs=(int)v;               // control-loop period (us); 6000=~167Hz
+  // Every value that sets a wheel command, a speed or the loop's timing is clamped (2026-11-14 review: 'loopus -1'
+  // slept the balance task ~71 min with the wheels on their last command; 'umax -400' inverted the output clamp).
+  else if (!strcmp(s,"torlim"))  gTorLim=(int)clampf(v,0.0f,600.0f);       // torque-limit field (position mode)
+  else if (!strcmp(s,"posclamp"))gPosClamp=(int)clampf(v,0.0f,200.0f);     // per-cycle goal delta clamp
+  else if (!strcmp(s,"loopus"))  gLoopUs=(int)clampf(v,2000.0f,10000.0f);  // control-loop period (us); 6000=~167Hz
   else if (!strcmp(s,"iclamp")) gVelIClamp=v;
-  else if (!strcmp(s,"umax"))  gUMax=(int)v;
+  else if (!strcmp(s,"umax"))  gUMax=(int)clampf(v,50.0f,600.0f);   // output clamp (1000 browned out ID21, 06-18)
   else if (!strcmp(s,"set"))   gSetpoint=v;
   else if (!strcmp(s,"lqrx"))    gLqrX=v;                 // LQR gains (sim/lqr/lqr_design.py) ...
   else if (!strcmp(s,"lqrvx"))   gLqrVx=v;
@@ -2016,12 +2053,13 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"lqramax")) gLqrAMax=clampf(v,0.1f,3.0f);   // ... its driving plan's acceleration (m/s^2)
   else if (!strcmp(s,"lqrup"))   gLqrUp=v;                 // ... and its pitch reference (deg)
   else if (!strcmp(s,"cap"))   gSetpoint=tTheta;
-  else if (!strcmp(s,"rd")){ gDumpRead=true; return; } // dump next raw read frame
-  else if (!strcmp(s,"wt")){ gTestTor=(int)v; }        // stand-only wheel torque test
-  else if (!strcmp(s,"wten")){ wheelTorqueEnAll((uint8_t)v); }  // wheel torque enable reg 0x18 (broadcast)
-  else if (!strcmp(s,"lock")){ gPollLock=(int)v; }     // poll only this wheel ID (0=alternate)
+  else if (!strcmp(s,"rd")){ if(refusedWhileBalancing(s)) return; gDumpRead=true; return; } // dump next raw read frame
+  else if (!strcmp(s,"wt")){ if(refusedWhileBalancing(s)) return; gTestTor=(int)clampf(v,-400.0f,400.0f); }  // stand-only wheel torque test (cleared on arming)
+  else if (!strcmp(s,"wten")){ if(refusedWhileBalancing(s)) return; wheelTorqueEnAll((uint8_t)v); }  // wheel torque enable reg 0x18 (broadcast)
+  else if (!strcmp(s,"lock")){ if(refusedWhileBalancing(s)) return;          // poll only this wheel ID (0=alternate); cleared on arming
+    gPollLock = ((int)v == LEFT_W || (int)v == RIGHT_W) ? (int)v : 0; }
   else if (!strcmp(s,"vbatk"))  gVbatK=v;                        // trim battery divider ratio (default 3.0 per schematic)
-  else if (!strcmp(s,"cfgdump")){ gCfgDumpId=(int)v; return; }  // dump servo config regs
+  else if (!strcmp(s,"cfgdump")){ if(refusedWhileBalancing(s)) return; gCfgDumpId=(int)v; return; }  // dump servo config regs
   else if (!strcmp(s,"adcscan")){                               // probe ADC1 pins to find battery-sense divider
     const int pins[]={32,33,34,35,36,39};
     for(unsigned i=0;i<sizeof(pins)/sizeof(pins[0]);i++){
@@ -2031,8 +2069,9 @@ static void applyCmd(char* s){
     }
     return;
   }
-  else if (!strcmp(s,"gcal")){ gDoGcal=true; return; } // recalibrate gyro bias (hold still)
-  else if (!strcmp(s,"stepcap")){ if(v!=0.0f) gStepCmd=(int)v; gStepCap=true; return; } // wheel step-response capture
+  else if (!strcmp(s,"gcal")){ if(refusedWhileBalancing(s)) return; gDoGcal=true; return; } // recalibrate gyro bias (hold still)
+  else if (!strcmp(s,"stepcap")){ if(refusedWhileBalancing(s)) return;     // wheel step-response capture (stand only)
+    if(v!=0.0f) gStepCmd=(int)clampf(v,-400.0f,400.0f); gStepCap=true; return; }
   else if (!strcmp(s,"drivecap")){ dcIdx=0; gDcReady=false; gDcArm=true; return; }       // arm high-rate cmd-vs-actual capture (run WHILE balancing/driving)
   else if (!strcmp(s,"chirp")){                                  // wheel frequency sweep: 1 = start (balancing only), 0 = stop
     if(v == 0.0f){ gChirpOn = false; return; }
@@ -2063,17 +2102,17 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"polleash")) gPolLeash=clampf(v,0.0f,1.0f);   // policy stick drive: >0 LQR-like target lead (m), 0 = old
   else if (!strcmp(s,"posiband")) gPosIntBand=v;       // integrate only within this dist of target (m)
   else if (!strcmp(s,"posdb"))    gPosDeadband=v;      // hold dead-band (m): stop position-chasing within this -> no hunt
-  else if (!strcmp(s,"posvmax"))  gPosVmax=v;          // move speed cap (m/s) for the target slew
-  else if (!strcmp(s,"posvmaxb")) gPosVmaxBack=v;      // BACKWARD speed cap (m/s); lower = keep policy out of saturation
-  else if (!strcmp(s,"posamax"))  gPosAmax=v;          // accel cap (m/s^2) on the drive-velocity ramp
+  else if (!strcmp(s,"posvmax"))  gPosVmax=clampf(v,0.0f,0.8f);     // move speed cap (m/s); negative inverted the stick
+  else if (!strcmp(s,"posvmaxb")) gPosVmaxBack=clampf(v,0.0f,0.8f); // BACKWARD speed cap (m/s)
+  else if (!strcmp(s,"posamax"))  gPosAmax=clampf(v,0.1f,3.0f);     // accel cap (m/s^2) on the drive-velocity ramp
   else if (!strcmp(s,"posdmax"))  gPosDmax=clampf(v,0.1f,3.0f);  // BRAKING cap (m/s^2) on the drive-velocity ramp
-  else if (!strcmp(s,"turnrate")) { gYawRateCmd=v; gTurnMs=millis(); }  // commanded yaw rate (rad/s); 0=straight; heartbeat (watchdog)
+  else if (!strcmp(s,"turnrate")) { gYawRateCmd=clampf(v,-3.0f,3.0f); gTurnMs=millis(); }  // commanded yaw rate (rad/s; full stick 2); heartbeat (watchdog)
   else if (!strcmp(s,"yawkp"))    gYawKp=v;            // yaw-rate FB trim gain (raw per rad/s)
   else if (!strcmp(s,"yawff"))    gYawFF=v;            // yaw-rate FEEDFORWARD (raw per rad/s cmd) -> turn firmness
   else if (!strcmp(s,"turnlp"))   gTurnLP=clampf(v,0.0f,0.95f); // low-pass on turn output
   else if (!strcmp(s,"yawfb"))    gYawFb=(v<0?-1.0f:1.0f);  // yaw-rate feedback sign (-1/+1)
-  else if (!strcmp(s,"turnmax"))  gTurnMax=v;          // clamp on |turn differential| (raw)
-  else if (!strcmp(s,"wheeldz"))  gWheelDZ=v;          // per-wheel anti-stiction floor during turns (raw)
+  else if (!strcmp(s,"turnmax"))  gTurnMax=clampf(v,0.0f,400.0f);   // clamp on |turn differential| (raw)
+  else if (!strcmp(s,"wheeldz"))  gWheelDZ=clampf(v,0.0f,100.0f);   // per-wheel anti-stiction floor during turns (raw)
   else if (!strcmp(s,"hdghold"))  gHdgHold=(v!=0.0f);  // encoder heading-lock on/off
   else if (!strcmp(s,"hdgkp"))    gHdgKp=v;            // heading-lock P (raw per count of w1-w2 error)
   else if (!strcmp(s,"hdgkd"))    gHdgKd=v;            // heading-lock D (raw per vel1-vel2)
@@ -2082,7 +2121,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"ledbright")) gLedBright=(int)clampf(v,0.0f,255.0f);  // global LED brightness 0..255 (scales the status colors)
   else if (!strcmp(s,"posvlp"))  gPosVelLP=clampf(v,0.0f,0.99f); // D-term velocity low-pass (0=off..0.99 heavy)
   else if (!strcmp(s,"ptgt"))    { gPosTarget=v; gDriveVel=0.0f; }   // position MOVE to v (m); cancels velocity drive
-  else if (!strcmp(s,"dv"))      { gDriveVel=v; gDriveMs=millis(); }   // velocity-drive command (m/s); 0 = release -> latch home + hold; heartbeat (watchdog)
+  else if (!strcmp(s,"dv"))      { gDriveVel=clampf(v,-1.0f,1.0f); gDriveMs=millis(); }   // velocity-drive command (m/s; the caps clip it further); 0 = release -> latch home + hold; heartbeat (watchdog)
   else if (!strcmp(s,"odoreset")) gOdoReset=true;      // zero dead-reckoned pose (px,py); heading zero is via gyro-cal
   else if (!strcmp(s,"poszero"))  gPosZeroReq=true;    // re-zero the distance frame (odometer+target) mid-balance, no drop
   else if (!strcmp(s,"legstep"))  gLegStepReq += (int)v; // BOTH legs mirrored (body raise/lower); +extend / -retract; clamped, in-loop
@@ -2090,12 +2129,12 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"legL"))     gLegAbsL = (int)v;     // LEFT  leg -> absolute position (clamped); per-leg, for test + leveling
   else if (!strcmp(s,"level"))    gRollMode = (int)clampf(v, ROLL_OFF, ROLL_LEAN);  // body roll: 0 off (legs equal), 1 flat, 2 lean into turns
   else if (!strcmp(s,"levki"))    gLevelKi = v;          // leveling integral gain: leg counts accumulated per deg roll error per cycle
-  else if (!strcmp(s,"levslew"))  gLevelSlew = v;        // leveling slew limit: max leg-counts change per control cycle
+  else if (!strcmp(s,"levslew"))  gLevelSlew = clampf(v,0.0f,3.0f);        // leveling slew limit: max leg-counts change per control cycle
   else if (!strcmp(s,"levset"))   gLevelSet = v;         // leveling roll setpoint (deg); 0 = level
-  else if (!strcmp(s,"levmax"))   gLevelMax = (int)v;    // leveling max |differential| authority (counts)
+  else if (!strcmp(s,"levmax"))   gLevelMax = (int)clampf(v,0.0f,100.0f);  // leveling max |differential| authority (counts)
   else if (!strcmp(s,"levsign"))  gLevelSign = (v<0)?-1:1; // leveling correction sign (flip if it tilts the wrong way)
   else if (!strcmp(s,"lean"))     gLeanGain = v;         // turn lean: share of the lean along the pull (0 = none, 1 = full)
-  else if (!strcmp(s,"leghomeslew")) gLegHomeSlew = v;   // leg home/equalize slew (counts/cycle) = how 'slowly' the legs move to the ride height / equalize
+  else if (!strcmp(s,"leghomeslew")) gLegHomeSlew = clampf(v,0.05f,3.0f);   // leg home/equalize slew (counts/cycle) = how 'slowly' the legs move to the ride height / equalize
   else if (!strcmp(s,"legrate"))  { gLegRate = clampf(v,-200.0f,200.0f); gLegRateMs = millis(); }  // height rate (counts/s, + up); heartbeat
   else if (!strcmp(s,"leghome"))  gLegHomeReq = true;    // legs -> ride height (MID), slow slew; ignored while limp
   else if (!strcmp(s,"leglimp"))  gLegLimpReq = true;    // STOP button: torque-OFF both legs, stay limp until next balance-on
@@ -2111,7 +2150,7 @@ static void applyCmd(char* s){
     xTaskCreatePinnedToCore(mpcBenchTask, "mpcb", 4096, (void*)(intptr_t)(v >= 1.0f ? (int)v : 20), 1, NULL, 0);
     return;
   }
-  else if (!strcmp(s,"dither")) gDither=(int)v;                 // stiction dither amplitude (0=off)
+  else if (!strcmp(s,"dither")) gDither=(int)clampf(v,0.0f,50.0f);   // stiction dither amplitude (0=off)
   else if (!strcmp(s,"get")||!strcmp(s,"?")) {}
   else { char b[48]; int k=snprintf(b,sizeof(b),"# ? '%s'\n", s); emit(b,k); return; }
   ackState();
@@ -2174,12 +2213,14 @@ void loop(){
     vbatF = 0.95f*vbatF + 0.05f*vb; tVbat=vbatF;              // heavy LP (battery is slow)
     int bpct = (int)clampf((tVbat-VBAT_EMPTY)/(VBAT_FULL-VBAT_EMPTY)*100.0f, 0.0f, 100.0f);
     updateLEDs(bpct);                                        // status LEDs (only redraws on change)
-    char b[704];
+    // 1024 (was 704, 2026-11-14 review): the line runs ~610-680 chars and several fields only grow until a reboot
+    // (htg, yaw, poses, rft1, counters); a cut line lost its '\n', merging the next lines at the Pi
+    char b[1024];
     int k=snprintf(b,sizeof(b),
       "th=%.2f roll=%.2f yaw=%.1f px=%.3f py=%.3f rate=%.1f wx=%.3f wp1=%.3f wp2=%.3f ptgt=%.3f tgteff=%.3f vdes=%.2f wv=%.2f w1=%.1f w2=%.1f u=%.0f en=%d vbat=%.2f batt=%d lqrx=%.0f lqrvx=%.1f lqrq=%.1f lqrdq=%.2f amax=%.2f set=%.2f izero=%.1f Umax=%d gbias=%.2f lhz=%.0f dtmax=%.1f rfails=%u ctrl=%s poshold=%.1f rdms=%.2f wkms=%.2f post=%.2f inf=%.2f rd07L=%d rd07R=%d pacc=%.2f praw=%.2f vest=%.2f lqrin=%.2f lev=%d racc=%.2f pull=%.2f lean=%.2f mpc=%u mpcus=%u vrejL=%u vrejR=%u wmodebad=%u gturn=%.1f htg=%.3f yrc=%.3f legR=%d legL=%d dwd=%u legrtL=%u legrtR=%u legfL=%u legfR=%u legstkL=%u legstkR=%u legst=%u rfL=%u rfR=%u rft0=%u rft1=%u ms=%u\n",
       tTheta, tRoll, tYaw, tPoseX, tPoseY, tRate, tWheelX, wheel1_x/1024.0f*WHEEL_CIRC_M, wheel2_x/1024.0f*WHEEL_CIRC_M, gPosTarget, tTgtEff, tVdes, tWheelVx, wheel1_vel, wheel2_vel, tU, gEnabled, tVbat, bpct, gLqrX, gLqrVx, gLqrQ, gLqrDq, gLqrAMax, gSetpoint, gImuZero, gUMax, gGyroBias, tLoopHz, tDtMaxMs, (unsigned)tReadFails, ctrlName(), gPosHoldK, tReadMaxMs, tWorkMaxMs, tPostMaxMs, tInferMaxMs, tRetDL, tRetDR, tPacc, tPraw, tVest, tLqrInQ, gRollMode, tRollAcc, tPull, tLean, (unsigned)tMpcState, (unsigned)tMpcUs, (unsigned)tVrejL, (unsigned)tVrejR, (unsigned)tWmodeBad, gTurn, gHdgTarget, gYawRateCmd,
       (gLegTgtR!=LEG_NONE?gLegTgtR:LEG_R_MID), (gLegTgtL!=LEG_NONE?gLegTgtL:LEG_L_MID), (unsigned)gDriveWdTrips, (unsigned)tLegRetryL, (unsigned)tLegRetryR, (unsigned)tLegFailL, (unsigned)tLegFailR, (unsigned)tLegStuckL, (unsigned)tLegStuckR, (unsigned)((gLegLimped?1:0)|(gLegHoming?2:0)|(gLegEnerR?4:0)|(gLegEnerL?8:0)), (unsigned)tRfL, (unsigned)tRfR, (unsigned)tRfFirstMs, (unsigned)tRfLastMs, (unsigned)millis());
-    if(k > (int)sizeof(b)-1) k = sizeof(b)-1;   // clamp: snprintf returns intended len, not written
+    if(k > (int)sizeof(b)-1){ k = sizeof(b)-1; b[k-1] = '\n'; }   // clamp (snprintf returns the intended length); a cut line still ends its line
     emit(b,k);
   }
   // drive-capture dump: buffer filled by the control task -> emit here (loop() task), so the

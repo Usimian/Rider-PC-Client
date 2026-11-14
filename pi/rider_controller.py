@@ -189,9 +189,20 @@ state = {"en": 0, "pos": 0.0, "fwd_factor": 1.0,   # fwd_factor: ToF safety cap 
 
 
 def on_message(client, userdata, msg):
+    """Never lets an exception out: paho re-raises it and its network thread ends -- no status, no ToF limit, no
+    top speed from then on (2026-11-14 review: a payload that parsed to a number or a string did it)."""
+    try:
+        _handle_message(msg)
+    except Exception as e:
+        print("mqtt: ignored a message on %s (%s: %s)" % (msg.topic, type(e).__name__, e), flush=True)
+
+
+def _handle_message(msg):
     try:
         p = json.loads(msg.payload.decode())
     except Exception:
+        return
+    if not isinstance(p, dict):                     # a number, a string, a list, null: nothing for us
         return
     if msg.topic == TOPIC_FWDLIMIT:                 # ToF governor: forward-speed factor
         try:
