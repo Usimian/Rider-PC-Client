@@ -4,7 +4,31 @@ Read at session start. Facts live in the repo (commit messages carry the numbers
 provenance, `docs/HARDWARE.md` -> Power / Audio the hardware facts); this is only the running story, the open
 list, and what not to trust.
 
-## Where it stands (2026-11-06): pick-up / fall = wheels off + legs limp, resume after 1 s level
+## Where it stands (2026-11-14): stands up and sits down by itself; 0.6 m/s; the balance-loop stalls found
+
+- **Committed + pushed (`7ac300c`..`6f73a02`):** top speed 0.60 m/s (firmware default, joystick, web slider; floor
+  cruise 235-255 of 400). Balance on (web button, DS4 Share, LCD button) from resting on the knee stub or the nose
+  STANDS IT UP: legs stiffen where they rest, 400 kick toward the lean, LQR takes over at 15 deg, legs to ride
+  height once calm. The same buttons while balancing SIT it down: legs to the lowest height, forward pulse at 150,
+  off at 10 deg back, it settles on the stub. The web E-STOP stays the instant stop. Floor: 5/5 up and 5/5 sits
+  twice over; travel ~14-17 cm from the stub, ~29 from the nose. Sims: `sim/getup_sim.py`, `sim/sit_sim.py`.
+- **The stall cause (`bc4c2a1`):** status lines written to the serial port from the balance task waited behind
+  loop()'s ~1100-char telemetry (~95 ms at 115200): the control loop froze 50-110 ms with its command held. Now
+  queued (post()). Longest cycle while armed in the get-up runs: 10 ms. **Probably the 50-115 ms `dtmax` stalls open
+  since 11-03 and maybe the 11-06 08:46 runaway resumes (64 ms stall) -- confirm in normal driving.**
+- **Pick-up check:** a wheel 150 past the plan's speed with the command >= 300 pushing it (the fixed 350 could never
+  fire at the 400 cap; a doorway ramp at 0.6 m/s nearly tripped the interim fixed 240). Off during the get-up catch.
+  The fall check reads the LQR's own pitch on the LQR (theta drifted 20-30 deg in a stall).
+- **Built, NOT flashed (Marc at the gym):** the pitch gyro zero measured at boot / `gcal`, taken only when still
+  (else kept, -1.19 fallback), each result logged as `# gcal`. Why: one power-up (11:4x) came up with the pitch gyro
+  ~26 deg/s off at rest; the get-up then never saw it still and arming balanced from where it sat at full command.
+  Uncommitted with it: the bridge forwards `# getup / # sit / # gcal / # msg` to `rider/debug/event` (was
+  `rider/debug/getup`), recorder + CLAUDE.md updated -- needs the flash AND a deploy. Then check the `# gcal` line
+  after a power-up (still: taken, value near -1.2).
+- **Deploy now syncs (`85bbfca`):** a power cycle right after a deploy had left every file written in its last ~3 s
+  EMPTY (the 7 units -> masked, nothing started; rider.conf; the web page). Gate deploys and flashes on `en=0`.
+
+## Where it stood (2026-11-06): pick-up / fall = wheels off + legs limp, resume after 1 s level
 
 - **Flashed + committed (see `git log`):** a fall or pick-up while armed stops the wheels AND limps the legs; it stays
   armed and resumes once held level (pitch error and roll < 15 deg) for 1 s (1.5 s until 11-06) -- the legs re-power and slew to the
@@ -172,10 +196,19 @@ list, and what not to trust.
 
 ## Open list, in order
 
+00. **From 11-14, in order:** (a) flash + deploy the pitch-gyro zero and the `rider/debug/event` topic (above), check
+    `# gcal` after a power-up; (b) confirm the stalls are gone in normal driving (`dtmax` stays ~5-10 ms); (c) held
+    in the air after a pick-up cut, it resumes after 1 s level and is cut again ~150 ms later, re-powering the legs
+    each time -- that cycling left a leg servo unresponsive twice on 11-14 morning (ID12 at 10:00:52, ID22 at
+    10:09:30; a power cycle cleared both; the firmware counted it un-powered while it held torque). Options put to
+    Marc, not chosen: a longer level wait after a pick-up, or no auto-resume after a pick-up (re-arm = stand up);
+    (d) a stop that never arrived: at ~11:15 Marc turned balance off and no command reached the Pi -- which control,
+    unknown; (e) seated, the limp legs leave the body rolled ~11 deg (one side lower); harmless so far.
 0. **Drive planner + safety (11-03):** (a) the MPC vs the fixed plan on a WEAK battery (~30-40 %): the same 0.45 m/s
    A/B (tools/balance/start_lean.py --split) -- its only real case so far; (b) resume after a fall: the 1 s
-   level wait is in (11-06), but two resumes at 08:46 ran away to u 400 unexplained (see the top); (c) watch `vrejL/R` -- the first nonzero count shows the
-   speed check catching a bad reply; (d) the speed register reads 0.966 of the position's rate: one scale ~3 % off;
+   level wait is in (11-06), but two resumes at 08:46 ran away to u 400 unexplained (see the top; a 64 ms stall --
+   maybe the 11-14 stall cause); (c) watch `vrejL/R` -- 6/7 on 11-14 at 0.6 m/s, the first nonzero: the check works;
+   (d) the speed register reads 0.966 of the position's rate: one scale ~3 % off;
    (e) MPC tuning: slower than the fixed plan at 0.30 m/s, brakes at ~-11 deg (fixed ~-7).
    (f) the planner stops late at walls (with the ToF governor on, 0.45 m/s: 9-16 mm, touched twice; 0.30 m/s:
    ~45 mm): it chases the governor's falling speed cap a step late and smoothly. SIM DONE (`354e703`, mpc_plan
@@ -223,6 +256,11 @@ list, and what not to trust.
 
 ## Do not trust
 
+- **Telemetry `th` (theta) during fast body motion with a loop stall:** it integrates one gyro sample per control
+  cycle, so a 50-100 ms stall while the body turns at 300-400 deg/s puts it 20-30 deg off. My 11-14 "rebound after
+  the catch" readings (27-40 deg) came from it; the LQR's own pitch (`lqrin`) is the one to read.
+- **The get-up / sit sims for distance:** rigid legs, and the sim's get-up travel is ~1/3 of the floor's (~11 cm vs
+  20-38); the angles and timings matched (kick ~110 ms predicted and seen).
 - The web page / LCD status **while a recorder runs**: each capture dump (~600 lines, ~57 kB at the 115200-baud
   Pi link) silences telemetry 3.7-6.2 s, so an arm shows up late (the robot balances at once). Gone without a
   recorder -- only the capture tools send `logdump`.
