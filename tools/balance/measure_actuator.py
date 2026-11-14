@@ -18,27 +18,34 @@ step = int(sys.argv[1]) if len(sys.argv) > 1 else 200
 s = serial.Serial(PORT, 115200, timeout=2.0)
 time.sleep(0.4)
 s.reset_input_buffer()
-s.write(b"lock 11\n")            # poll only the left wheel -> full-rate sampling of one wheel
-time.sleep(0.2)
-s.reset_input_buffer()
-s.write(f"stepcap {step}\n".encode())
-s.flush()
-
 rows = []
-t0 = time.time()
-while time.time() - t0 < 8.0:
-    line = s.readline().decode(errors="replace").strip()
-    if line.startswith("# cap done"):
-        break
-    if line.startswith("# cap "):
-        parts = line.split()
-        if len(parts) == 6:          # "# cap i t_us cmd vel"
-            try:
-                rows.append((int(parts[2]), int(parts[3]), int(parts[4]), int(parts[5])))
-            except ValueError:
-                pass
-s.write(b"lock 0\n")               # restore alternating poll
-s.close()
+try:
+    s.write(b"en 0\n")               # balance MUST be off for stepcap (the firmware refuses it while balancing)
+    time.sleep(0.3)
+    s.write(b"lock 11\n")            # poll only the left wheel -> full-rate sampling of one wheel
+    time.sleep(0.2)
+    s.reset_input_buffer()
+    s.write(f"stepcap {step}\n".encode())
+    s.flush()
+    t0 = time.time()
+    while time.time() - t0 < 8.0:
+        line = s.readline().decode(errors="replace").strip()
+        if line.startswith("# cap done"):
+            break
+        if line.startswith("# cap "):
+            parts = line.split()
+            if len(parts) == 6:          # "# cap i t_us cmd vel"
+                try:
+                    rows.append((int(parts[2]), int(parts[3]), int(parts[4]), int(parts[5])))
+                except ValueError:
+                    pass
+finally:                             # always: a lock left on starves the other wheel's reads (Ctrl-C, unplug)
+    try:
+        s.write(b"lock 0\n")         # restore alternating poll
+        s.flush()
+    except Exception:
+        pass
+    s.close()
 
 if not rows:
     print("NO CAPTURE DATA -- is the stepcap firmware flashed and robot powered?")

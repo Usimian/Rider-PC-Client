@@ -66,20 +66,25 @@ def main():
     print("=== stand wheel test  (wheels must be FREE) ===")
     print("%-6s %-5s %-4s %8s %8s %8s" % ("wheel", "dir", "cmd", "n", "steady", "|vel|"))
     results = {}
-    for w in WHEELS:
-        for mag in LEVELS:
-            for cmd in (mag, -mag):
-                r = run_step(w, cmd)
-                s = summarize(r)
-                tag = "fwd" if cmd > 0 else "rev"
-                results[(w, mag, cmd)] = s
-                if s:
-                    print("%-6d %-5s %-4d %8d %8.1f %8.1f" % (w, tag, cmd, s["n"], s["steady"], s["abs"]))
-                else:
-                    print("%-6d %-5s %-4d   NO DATA" % (w, tag, cmd))
-                time.sleep(0.6)   # let the wheel coast to rest between runs
-    send("lock 0")               # restore alternating poll
-    send("en 0")
+    try:
+        for w in WHEELS:
+            for mag in LEVELS:
+                for cmd in (mag, -mag):
+                    r = run_step(w, cmd)
+                    s = summarize(r)
+                    tag = "fwd" if cmd > 0 else "rev"
+                    results[(w, mag, cmd)] = s
+                    if s:
+                        print("%-6d %-5s %-4d %8d %8.1f %8.1f" % (w, tag, cmd, s["n"], s["steady"], s["abs"]))
+                    else:
+                        print("%-6d %-5s %-4d   NO DATA" % (w, tag, cmd))
+                    time.sleep(0.6)   # let the wheel coast to rest between runs
+    finally:                     # always (Ctrl-C, unplug): a lock left on starves the other wheel's reads
+        try:
+            send("lock 0")       # restore alternating poll
+            send("en 0")
+        except Exception:
+            pass
     # asymmetry summary
     print("\n=== forward vs reverse |velocity| (same |torque|) ===")
     for w in WHEELS:

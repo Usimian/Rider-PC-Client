@@ -63,19 +63,24 @@ def capture(cmd):
 def main():
     allrows = []
     print("%5s %6s %8s %8s" % ("cmd", "n", "steady", "|steady|"))
-    for cmd in LADDER:
-        rows = capture(cmd)
-        if not rows:
-            print("%5d   NO DATA" % cmd)
-            continue
-        for (i, t_us, c, v) in rows:
-            allrows.append((cmd, i, t_us, v))
-        tail = [v for (i, t_us, c, v) in rows if i >= 80]
-        steady = sum(tail) / len(tail) if tail else 0.0
-        print("%5d %6d %8.1f %8.1f" % (cmd, len(rows), steady, abs(steady)))
-        time.sleep(0.6)                    # let the wheel coast to rest between rungs
-    s.write(b"lock 0\n"); s.write(b"en 0\n")
-    s.close()
+    try:
+        for cmd in LADDER:
+            rows = capture(cmd)
+            if not rows:
+                print("%5d   NO DATA" % cmd)
+                continue
+            for (i, t_us, c, v) in rows:
+                allrows.append((cmd, i, t_us, v))
+            tail = [v for (i, t_us, c, v) in rows if i >= 80]
+            steady = sum(tail) / len(tail) if tail else 0.0
+            print("%5d %6d %8.1f %8.1f" % (cmd, len(rows), steady, abs(steady)))
+            time.sleep(0.6)                    # let the wheel coast to rest between rungs
+    finally:                                   # always (Ctrl-C, unplug): a lock left on starves the other wheel
+        try:
+            s.write(b"lock 0\n"); s.write(b"en 0\n"); s.flush()
+        except Exception:
+            pass
+        s.close()
     with open(OUT, "w") as f:
         f.write("cmd,i,t_us,vel\n")
         for r in allrows:
