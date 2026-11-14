@@ -101,10 +101,16 @@ class GetupPlant(MujocoPlant):
         q = lambda n: (self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, n)],
                        self.model.jnt_dofadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, n)])
         (self.qx, self.dx), (self.qp, self.dp), (self.qw, self.dw) = q("slide_x"), q("pitch"), q("wheel_spin")
-        self.d.qpos[self.qp] = body_angle(POSES[pose][0]) * 0.9      # just short of the rest: let it settle onto it
-        for _ in range(8000):                                        # 2 s, unpowered
-            self.d.ctrl[0] = 0.0
-            mujoco.mj_step(self.model, self.d)
+        if pose is None:                                             # upright (sit_sim.py): settle onto the wheel
+            for _ in range(1200):                                    # with the body held level, as MujocoPlant
+                self.d.qpos[self.qp] = 0.0
+                self.d.qvel[:] = 0.0
+                mujoco.mj_step(self.model, self.d)
+        else:
+            self.d.qpos[self.qp] = body_angle(POSES[pose][0]) * 0.9  # just short of the rest: let it settle onto it
+            for _ in range(8000):                                    # 2 s, unpowered
+                self.d.ctrl[0] = 0.0
+                mujoco.mj_step(self.model, self.d)
         self.rest_deg = np.degrees(self.d.qpos[self.qp])
         self.d.qpos[self.qx] = 0.0; self.d.qpos[self.qw] = 0.0; self.d.qvel[:] = 0.0
         mujoco.mj_forward(self.model, self.d)
