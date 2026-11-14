@@ -15,7 +15,7 @@ firmware's own pitch estimate is within HAND_DEG of upright (or KICK_MAX_S passe
 plan start, as main.cpp resumes after a fall (planX/planV taken from the robot).
 
     ./.venv/bin/python getup_sim.py            # sweep: pose x kick command x handover angle x battery
-    ./.venv/bin/python getup_sim.py --one back 400 10
+    ./.venv/bin/python getup_sim.py --one back 400 15
 """
 import argparse
 import os
@@ -42,7 +42,8 @@ POSES = {                                  # IMU at rest (firmware sign: + = lea
     "forward": (-26.3, +0.055),
 }
 SPHERE_R = 0.003
-T_REST, KICK_MAX_S, T_AFTER = 1.5, 0.6, 3.0
+T_REST, KICK_MAX_S, T_AFTER = 1.5, 0.6, 3.0       # KICK_MAX_S: room in the run for a kick
+KICK_LIMIT_S, BACK_DEG = 0.25, 5.0                 # main.cpp gGetupMs (250 ms), GETUP_BACK_DEG
 FALL_CUT_DEG = 25.0                        # main.cpp gFallDeg: the tilt error that cuts the wheels
 
 
@@ -140,18 +141,32 @@ class GetupFirmware:
         return (fw.theta2 - UP) if fw.hover_imu else (fw.theta - CL.SET_DEG)
 
     def control(self, dt, stick=0.0):
-        """Decide the phase on this cycle's estimate (read_imu has run), then run the firmware's cycle once."""
+        """Decide the phase on this cycle's estimate (read_imu has run), then run the firmware's cycle once.
+        As main.cpp's get-up: the kick ends at the handover (within hand_deg of upright); it is abandoned -- wheels
+        off, no handover, 'abort' -- after KICK_LIMIT_S or once the lean grows BACK_DEG past where it started.
+        At the handover the LQR restarts as main.cpp's does after a fall: its speed (lqrV) re-seeded from the RAW
+        axle speed -- the register less the body's rate -- and its friction filter (lqrULp) zeroed, then plan_start.
+        (Until 2026-11-14 the sim kept its 0.1 s-smoothed speed running through the kick, so the plan started at
+        ~1/3 of the robot's speed and every travel figure came out ~3x short of the floor's.)"""
         self.t += dt
         q = self.pitch_est()
+        fw = self.fw
         if self.phase == "rest" and self.t >= T_REST:
-            self.phase, self.t_kick, self.sign = "kick", self.t, (-1.0 if q > 0 else 1.0)   # back -> wheels back
-        if self.phase == "kick" and (abs(q) <= self.hand_deg or self.t - self.t_kick >= KICK_MAX_S):
-            self.phase, self.t_hand = "lqr", self.t
-            self.fw.plan_x = None                                    # resume: a fresh plan from where it is
+            self.phase, self.t_kick, self.q0 = "kick", self.t, q
+            self.sign = -1.0 if q > 0 else 1.0                       # back -> wheels back
+        if self.phase == "kick":
+            if abs(q) <= self.hand_deg:
+                self.phase, self.t_hand = "lqr", self.t
+                rr = fw.dq2 if fw.hover_imu else fw.rate
+                fw.vel_s = fw.raw_v - CL.R_WHEEL * np.radians(rr) * CL.SPEED_COUNTS * CL.SCALED_PER_COUNT
+                fw.u_lp = 0.0
+                fw.plan_x = None                                     # resume: a fresh plan from where it is
+            elif self.t - self.t_kick >= KICK_LIMIT_S or abs(q) > abs(self.q0) + BACK_DEG:
+                self.phase = "abort"
         if self.catch_amax is not None and self.phase == "lqr":
-            self.fw.plan["a_max"] = self.catch_amax if self.t - self.t_hand < CATCH_S else self.amax0
-        u = self.fw.control(dt, stick)                               # always run: its estimates stay current
-        if self.phase == "rest":
+            fw.plan["a_max"] = self.catch_amax if self.t - self.t_hand < CATCH_S else self.amax0
+        u = fw.control(dt, stick)                                    # always run: its estimates stay current
+        if self.phase in ("rest", "abort"):
             return 0.0
         if self.phase == "kick":
             return self.sign * self.u_kick
@@ -231,7 +246,7 @@ def main():
     ap.add_argument("--gain", type=float, default=1.0)
     ap.add_argument("--robust", type=int, metavar="N", help="N randomized robots per pose and kick (RANGES)")
     ap.add_argument("--kicks", type=float, nargs="+", default=[350.0, 400.0])
-    ap.add_argument("--hand", type=float, default=10.0)
+    ap.add_argument("--hand", type=float, default=15.0)   # main.cpp gGetupHand (15 since 6f73a02)
     ap.add_argument("--com-dx-mm", type=float, default=None,
                     help="the fore/aft CoM range +-this (mm) for --robust (RANGES: 15). Marc 11-14: stood up level on "
                          "the limp legs it balances at once, so its balance point is near the flashed 2.8 deg -- a "
