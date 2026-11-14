@@ -227,6 +227,11 @@ volatile float gGetupHand = 15.0f;  // hand over within this of upright (deg, 'g
                                     // the kick ends sooner, so less speed to brake away -- floor, odometer: from the stub
                                     // farthest 14-17 cm (was 20-23), from the nose 29 (was ~37); 5/5 up, settled ~1 s
 volatile int   gGetupMs   = 250;    // the kick's time limit (ms, 'getupms')
+volatile float gGetupAMax = 1.0f;   // the LQR plan's acceleration limit while the get-up holds the legs -- the catch
+                                    // until it settles -- in place of gLqrAMax ('getupamax', m/s^2). The plan starts
+                                    // at the kick's ~0.5 m/s and braked it away at 0.6 over ~0.9 s: 26-30 cm of roll
+                                    // (floor 11-14). sim/getup_sim.py --catch-amax (16 random robots): 1.0 halves it,
+                                    // lean unchanged, 32/32 up; 1.5 began to fail.
 #define GETUP_U_MAX     800.0f      // the most 'getupu' takes
 #define GETUP_REST_MIN  20.0f       // a resting pose: the LQR's pitch error this far from upright ...
 #define GETUP_REST_MAX  45.0f       // ... and no further
@@ -1572,8 +1577,9 @@ static void balanceTask(void*){
         if(mpcStep(planStart, held, mpcTarget, xi, &mpcJerk)){
           planA = clampf(planA + mpcJerk * odt, -MPC_A_MAX, MPC_A_MAX);
         } else {
-          float ades = clampf(LQR_PLAN_GAIN * (stick - planV), -gLqrAMax, gLqrAMax);
-          float jerk = gLqrAMax / LQR_PLAN_TJERK * odt;
+          const float amax = gLegHold ? gGetupAMax : gLqrAMax;     // the get-up's catch brakes harder (gGetupAMax)
+          float ades = clampf(LQR_PLAN_GAIN * (stick - planV), -amax, amax);
+          float jerk = amax / LQR_PLAN_TJERK * odt;
           planA += clampf(ades - planA, -jerk, jerk);
         }
         planV += planA * odt;
@@ -2006,6 +2012,7 @@ static void applyCmd(char* s){
   else if (!strcmp(s,"getupu"))    gGetupU = clampf(v, 0.0f, GETUP_U_MAX);   // the kick's command
   else if (!strcmp(s,"getuphand")) gGetupHand = clampf(v, 3.0f, 20.0f);      // hand over within this of upright (deg)
   else if (!strcmp(s,"getupms"))   gGetupMs = (int)clampf(v, 50.0f, 600.0f); // the kick's time limit (ms)
+  else if (!strcmp(s,"getupamax")) gGetupAMax = clampf(v, 0.3f, 2.0f);       // the catch's plan acceleration limit (m/s^2)
   else if (!strcmp(s,"d"))     { gArmReq = false; gSitReq = false; setBalance(false); }   // = 'en 0'
   else if (!strcmp(s,"izero")) gImuZero=v;
   else if (!strcmp(s,"dqmax")) gDqUMax=v;
