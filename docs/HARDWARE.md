@@ -9,6 +9,23 @@ services), `factory_roll_balance.md` (decompiled stock leveling).
 > Confidence: **✅ verified on our hardware** vs **❔ not yet read/recorded**. Don't state a
 > ❔ value as fact — read it and promote it to ✅.
 
+## Model name and vendor source
+- **"XGO-Rider2" = the Rider with the CM5 compute module** — what ours is (we swapped the CM4 for
+  a CM5 ourselves; Marc, 2026-11-14). Vendor material labelled Rider2 applies to this robot.
+- **Vendor ESP32 firmware source** (Apache-2.0, published 2026-11-13):
+  `github.com/LuwuDynamics/xgorider_firmware`. Same bus/registers as ours (wheels 11/21: sync-write
+  `0x1E`, limp `0x18`, position `0x24`; legs 12/22; ICM-42670 at I²C `0x69`). Its balancer is a PID
+  cascade (speed PI → pitch target, pitch P + height-scheduled pitch-rate gain), not an LQR. Its
+  constants (read 2026-11-14, ❔ on our robot): friction bias 10 units, torque cap 1023, wheel
+  55 mm, top speed 0.21 m/s. A reference for the stock drivers, not a replacement for ours.
+- Related vendor repos: `xgorider2_rl` (RL balance policy on the stock ESP32: a robust linear core
+  cloned into an 18-32-32-4 MLP, PPO-polished; MuJoCo sim fitted to a measured command -> pitch-rate /
+  wheel-speed response, 4.9-14 Hz; CAD meshes CC BY-NC), `xgorider2-firmware` (2026-10-12).
+- **Their wheel dead zone (vendor-measured, 3 units):** the wheel starts to turn at |command| 40-50 on
+  one robot, 15-25 on a smoother one; inside it a standing pendulum creeps and kicks (stick-slip).
+  Their fix is a learned common-mode pre-load (`firmware/src/policy/dead_zone_comp.h`). Our friction
+  compensation measured 33 units -- inside their range.
+
 ## Controller (ESP32)
 - **ESP32** on the XGO controller board, USB-C via **CH340** → host `/dev/ttyUSB0`.
 - Three firmwares ever flashed (only one at a time — flashing overwrites):
